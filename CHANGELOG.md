@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.3](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.2...v2.10.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **cache:** invalidate performance/datacube caches on source YIP or downsample changes ([54f695e](https://github.com/HabitableWorldsObservatory/yippy/commit/54f695e5aed4bde232ce044c697f9002e09a3365))
+
 ## [2.10.2](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.1...v2.10.2) (2026-08-21)
 
 
