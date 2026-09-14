@@ -3,7 +3,20 @@
 from functools import partial
 
 import jax.numpy as jnp
-from hwoutils.fft import fft_shift_x, fft_shift_y
+from hwoutils.fft import (
+    fft_shear_setup as fft_shear_setup,
+)
+from hwoutils.fft import (
+    fft_shear_x as fft_shear_x,
+)
+from hwoutils.fft import (
+    fft_shear_y as fft_shear_y,
+)
+from hwoutils.fft import (
+    fft_shift_x,
+    fft_shift_y,
+)
+from hwoutils.transforms import rotate_image
 from jax import lax
 
 
@@ -393,212 +406,37 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
     return fft_shift_y(_PSF, shift, y_phasor)
 
 
-def fft_rotate_jax(image, rot_deg):
-    """Rotate an image by a specified angle using Fourier-based shear operations.
-
-    This function performs an image rotation by decomposing the rotation into
-    three sequential shear operations in the Fourier domain. For more details
-    see Larkin et al. (1997).
+def fft_rotate_jax(image, rot_deg, *, pad_factor=0.5, center=None):
+    """Rotate a square image with the shared hwoutils Fourier implementation.
 
     Args:
-        image (jax.numpy.ndarray):
-            The input image to be rotated.
-        rot_deg (float):
-            The rotation angle in degrees. Positive values rotate the image
-            counterclockwise, and negative values rotate it clockwise.
+        image: 2D square image.
+        rot_deg: CCW angle in degrees when displayed with origin at lower left.
+        pad_factor: Padding per side as a fraction of N. Default 0.5 gives
+            approximately 2N width; use 1.5 for 4N and check convergence for
+            precision wings or substantial edge content.
+        center: Optional optical center (row, column), in input pixels.
+            Defaults to the geometric array center (N-1)/2.
 
     Returns:
-        jax.numpy.ndarray:
-            The rotated image.
+        Rotated image, without clipping or flux renormalization. See
+        ``hwoutils.transforms.rotate_image`` for Nyquist and derivative semantics.
     """
-    # To rotate counterclockwise, with the origin in the lower left, we use the
-    # negative of the angle
-    rot_deg = -rot_deg
-
-    # Cut the angle to (-45, 45] and a number of 90-degree rotations
-    rot_deg, n_rot = decompose_angle_jax(rot_deg)
-
-    image = rot90_traceable(image, k=n_rot)
-
-    image = lax.cond(
-        rot_deg != 0.0,
-        lambda x: rotate_with_shear(image, x),
-        lambda x: image,
-        rot_deg,
-    )
-
-    return image
+    return rotate_image(image, rot_deg, pad_factor=pad_factor, center=center)
 
 
-def rotate_with_shear(image, rot_deg):
-    """Rotate an image by a specified angle using Fourier-based shear operations.
-
-    This is a helper function that simplifies the fft_rotate_jax function by
-    simplifying the lambda function used in the lax.cond call.
+def rotate_with_shear(image, rot_deg, *, pad_factor=0.5):
+    """Retain the legacy clockwise residual-angle convention using shared code.
 
     Args:
-        image (jax.numpy.ndarray):
-            The input image to be rotated.
-        rot_deg (float):
-            The rotation angle in degrees.
+        image: 2D square image.
+        rot_deg: Clockwise residual angle in degrees, normally in (-45, 45].
+        pad_factor: Padding per side as a fraction of input width.
 
     Returns:
-        jax.numpy.ndarray:
-            The rotated image.
+        Rotated image with the same shape as the input.
     """
-    theta = jnp.deg2rad(rot_deg)
-    a = jnp.tan(theta / 2)
-    b = -jnp.sin(theta)
-
-    x_freqs, x_dists, y_freqs, y_dists = fft_shear_setup(image)
-    # Rotate using three shears
-    # s_x
-    image = fft_shear_x(image, a, x_freqs, x_dists)
-
-    # s_yx
-    image = fft_shear_y(image, b, y_freqs, y_dists)
-
-    # s_xyx
-    image = fft_shear_x(image, a, x_freqs, x_dists)
-    return image
-
-
-def fft_shear_setup(image):
-    """Perform a shear operation in the Fourier domain.
-
-    Args:
-        image (jax.numpy.ndarray):
-            The input image to be sheared.
-
-    Returns:
-        tuple:
-            - jax.numpy.ndarray: x frequencies used for the Fourier transform.
-            - jax.numpy.ndarray: x distances from the center of the image.
-            - jax.numpy.ndarray: y frequencies used for the Fourier transform.
-            - jax.numpy.ndarray: y distances from the center of the image
-    """
-    # Calculate padding size based on the image dimensions
-    n_pixels = image.shape[0]
-    n_pad = int(1.5 * n_pixels)
-
-    # Pad the image with zeros
-    padded = jnp.pad(image, n_pad, mode="constant")
-
-    # Calculate the coordinate array for the padded image
-    padded_height, padded_width = padded.shape
-    center_y, center_x = (jnp.array(padded.shape) - 1) / 2
-    grid_y, grid_x = jnp.mgrid[0:padded_height, 0:padded_width]
-
-    # Array of distances from the center of the image along the shear axis
-    # if axis == 1:
-    # Shearing along the horizontal axis
-    x_dists = grid_x - center_x
-    x_perpendicular_axis = 1
-    # Compute the Fourier frequencies for the dimension perpendicular to the shear axis
-    x_freqs = jnp.fft.fftfreq(x_dists.shape[x_perpendicular_axis])
-    x_freqs = jnp.fft.fftshift(x_freqs)
-
-    # Tile the shifted frequencies to match the dimensions of the padded image
-    x_freqs = jnp.tile(x_freqs, (x_dists.shape[1], 1)).T
-
-    # Shearing along the vertical axis
-    y_dists = grid_y - center_y
-
-    # Determine the perpendicular axis to the shear direction
-    y_perpendicular_axis = 0
-
-    y_freqs = jnp.fft.fftfreq(y_dists.shape[y_perpendicular_axis])
-    y_freqs = jnp.fft.fftshift(y_freqs)
-    y_freqs = jnp.tile(y_freqs, (y_dists.shape[0], 1))
-
-    return x_freqs, x_dists, y_freqs, y_dists
-
-
-def fft_shear_x(image, shear_factor, x_freqs, x_dists):
-    """Perform a shear operation in the Fourier domain along the x-axis.
-
-    Uses JAX functions to perform the shear operation in the Fourier domain
-    along the x-axis.
-
-    Args:
-        image (jax.numpy.ndarray):
-            The input image to be sheared.
-        shear_factor (float):
-            The shear factor.
-        x_freqs (jax.numpy.ndarray):
-            x frequencies used for the Fourier transform.
-        x_dists (jax.numpy.ndarray):
-            x distances from the center of the image.
-
-    Returns:
-        jax.numpy.ndarray:
-            The sheared image with the zero padding removed.
-    """
-    # Calculate padding size based on the image dimensions
-    n_pixels = image.shape[0]
-    n_pad = int(1.5 * n_pixels)
-    img_edge = n_pad + n_pixels
-
-    # Pad the image with zeros
-    padded = jnp.pad(image, n_pad, mode="constant")
-    padded = jnp.fft.fftshift(padded)
-    padded = jnp.fft.fftshift(jnp.fft.fft(padded, axis=1))
-
-    # Apply the phase shift (shear) in the Fourier domain
-    padded = jnp.exp(-2j * jnp.pi * shear_factor * x_freqs * x_dists) * padded
-
-    # Shift back and apply the inverse Fourier transform along the specified axis
-    padded = jnp.fft.fftshift(padded)
-    padded = jnp.fft.ifft(padded, axis=1)
-    padded = jnp.fft.fftshift(padded)
-
-    # Unpad the image to return to the original size
-    image = jnp.real(padded[n_pad:img_edge, n_pad:img_edge])
-
-    return image
-
-
-def fft_shear_y(image, shear_factor, y_freqs, y_dists):
-    """Perform a shear operation in the Fourier domain along the y-axis.
-
-    Uses JAX operations.
-
-    Args:
-        image (jax.numpy.ndarray):
-            The input image to be sheared.
-        shear_factor (float):
-            The shear factor.
-        y_freqs (jax.numpy.ndarray):
-            y frequencies used for the Fourier transform.
-        y_dists (jax.numpy.ndarray):
-            y distances from the center of the image.
-
-    Returns:
-        jax.numpy.ndarray:
-            The sheared image with the zero padding removed.
-    """
-    # Calculate padding size based on the image dimensions
-    n_pixels = image.shape[0]
-    n_pad = int(1.5 * n_pixels)
-    img_edge = n_pad + n_pixels
-
-    # Pad the image with zeros
-    padded = jnp.pad(image, n_pad, mode="constant")
-    padded = jnp.fft.fftshift(padded)
-    padded = jnp.fft.fftshift(jnp.fft.fft(padded, axis=0))
-
-    # Apply the phase shift (shear) in the Fourier domain
-    padded = jnp.exp(-2j * jnp.pi * shear_factor * y_freqs * y_dists) * padded
-
-    # Shift back and apply the inverse Fourier transform along the specified axis
-    padded = jnp.fft.fftshift(padded)
-    padded = jnp.fft.ifft(padded, axis=0)
-    padded = jnp.fft.fftshift(padded)
-
-    # Unpad the image to return to the original size
-    image = jnp.real(padded[n_pad:img_edge, n_pad:img_edge])
-
-    return image
+    return rotate_image(image, -rot_deg, pad_factor=pad_factor)
 
 
 def decompose_angle_jax(angle):

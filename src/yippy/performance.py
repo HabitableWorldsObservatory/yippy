@@ -107,11 +107,12 @@ def _point_source_in_image(pos: OffAxisPosition) -> bool:
 def _oversample_psf(
     psf: np.ndarray, pixel_scale_arcsec: float, oversample: int
 ) -> np.ndarray:
-    """Oversample a PSF using flux-conserving resampling.
+    """Oversample a PSF using area-scaled cubic interpolation.
 
     Uses ``resample_flux`` from hwoutils which converts to surface brightness
-    before interpolation and back to integrated flux after, guaranteeing
-    per-pixel flux accuracy.
+    before interpolation and back to flux units afterward. This is smooth
+    center sampling, not exact target-pixel integration. Aperture estimates
+    require an oversampling convergence check; clipping can also change flux.
 
     Args:
         psf: 2D PSF image.
@@ -119,7 +120,7 @@ def _oversample_psf(
         oversample: Oversampling factor.
 
     Returns:
-        Oversampled PSF with flux conserved and negative values clamped.
+        Oversampled PSF in target-pixel flux units, with negative values clamped.
     """
     os_pix = pixel_scale_arcsec / oversample
     ny_os = psf.shape[0] * oversample
@@ -427,7 +428,7 @@ def compute_truncation_throughput_curve(
 
     Instead of a fixed circular aperture, selects all pixels where the
     oversampled PSF exceeds ``psf_trunc_ratio * peak``.  Throughput is the
-    sum of those pixels (after flux-conserving resampling).  This
+    sum of those pixels (after area-scaled cubic interpolation).  This
     matches the ``photap_frac`` calculation in AYO's ``load_coronagraph.pro``.
 
     Args:

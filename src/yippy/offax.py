@@ -101,11 +101,14 @@ class OffAx:
 
         # Load off-axis PSF data (e.g. the planet) (unitless intensity maps)
         psfs = pyfits.getdata(Path(yip_dir, offax_data_file), 0)
+        # FITS is big-endian; JAX downsampling requires native-endian arrays.
+        psfs = psfs.astype(psfs.dtype.newbyteorder("="), copy=False)
 
         # Save the center of the pixel array, which is used for converting to
-        # lambda/D when the x/y positions are in pixels.
-        self.center_x = psfs.shape[1] / 2 * u.pix
-        self.center_y = psfs.shape[2] / 2 * u.pix
+        # lambda/D when the x/y positions are in pixels. The stack is
+        # (n_psfs, row, column), so x measures columns and y measures rows.
+        self.center_x = psfs.shape[2] / 2 * u.pix
+        self.center_y = psfs.shape[1] / 2 * u.pix
 
         # Load the offset list, which is in units of lambda/D
         offsets = pyfits.getdata(Path(yip_dir, offax_offsets_file), 0)
@@ -207,9 +210,12 @@ class OffAx:
             self.pixel_scale_arcsec = new_pixscale * self.pixel_scale_arcsec.unit
             logger.info(f"New pixel scale: {self.pixel_scale_arcsec}")
 
-            # Update center positions for the new PSF shape
-            self.center_x = psfs.shape[2] / 2 * u.pix
-            self.center_y = psfs.shape[1] / 2 * u.pix
+            # Transform pixel-center coordinates under the same bin-edge map.
+            # For example, input index 4 becomes 1.75 after a 2x reduction.
+            scale_y = original_shape[0] / psfs.shape[1]
+            scale_x = original_shape[1] / psfs.shape[2]
+            self.center_x = (self.center_x + 0.5 * u.pix) / scale_x - 0.5 * u.pix
+            self.center_y = (self.center_y + 0.5 * u.pix) / scale_y - 0.5 * u.pix
 
             # Update max_offset_in_image after downsampling
             self.max_offset_in_image = (

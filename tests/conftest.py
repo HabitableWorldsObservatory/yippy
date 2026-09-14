@@ -1,5 +1,7 @@
 """Shared fixtures for yippy tests."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -49,3 +51,81 @@ def eqx_coro(coro):
     from yippy.eqx_coronagraph import EqxCoronagraph
 
     return EqxCoronagraph(yippy_coro=coro)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic analytic packages
+#
+# These need no network and no cache: every quantity they contain has a closed
+# form, so a test can compute the right answer from the package constants
+# rather than from the reader it is testing. See ``tests/synthetic_yip.py``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def synthetic_1d(tmp_path_factory):
+    """A radially symmetric analytic package, written once per session."""
+    from synthetic_yip import write_synthetic_yip
+
+    return write_synthetic_yip(tmp_path_factory.mktemp("yip1d") / "synthetic_1d")
+
+
+@pytest.fixture(scope="session")
+def synthetic_2d(tmp_path_factory):
+    """A quarterly symmetric analytic package, written once per session."""
+    from synthetic_yip import write_synthetic_yip
+
+    return write_synthetic_yip(
+        tmp_path_factory.mktemp("yip2d") / "synthetic_2d", kind="2dq"
+    )
+
+
+@pytest.fixture(scope="session")
+def syn_coro_1d(synthetic_1d):
+    """Coronagraph over the radially symmetric analytic package."""
+    return Coronagraph(synthetic_1d.path)
+
+
+@pytest.fixture(scope="session")
+def syn_coro_2d(synthetic_2d):
+    """Coronagraph over the quarterly symmetric analytic package."""
+    return Coronagraph(synthetic_2d.path)
+
+
+@pytest.fixture(scope="session")
+def syn_eqx_1d(syn_coro_1d):
+    """The JAX-facing view of the radially symmetric analytic package.
+
+    ``Coronagraph`` is the loader and uses scipy interpolants, so its
+    performance methods are not traceable. ``EqxCoronagraph`` is the array-only
+    view a consumer calls from inside ``jit``, ``vmap`` or ``grad``.
+    """
+    from yippy.eqx_coronagraph import EqxCoronagraph
+
+    return EqxCoronagraph(yippy_coro=syn_coro_1d)
+
+
+# A cold cache with no network is a missing referent, not a passing test. The
+# default is to skip with a reason that names the cause, so that a contributor
+# without the data can still run the physics suite; setting this flag turns
+# every such skip into a failure, which is what the nightly and any run that
+# claims the evidence should use. A cache that is present and disagrees with
+# the contract fails either way.
+REFERENCE_DATA_REQUIRED = os.environ.get("YIPPY_REQUIRE_REFERENCE_DATA") == "1"
+
+
+@pytest.fixture(scope="session")
+def shipped_coro():
+    """The shipped AAVC package, or a skip that says why it is absent."""
+    from yippy import fetch_yip
+
+    try:
+        yip_path = fetch_yip("eac1_aavc_2d")
+    except Exception as exc:
+        message = (
+            f"data-absent: eac1_aavc_2d is not cached and could not be fetched ({exc})"
+        )
+        if REFERENCE_DATA_REQUIRED:
+            pytest.fail(message)
+        pytest.skip(message)
+    return Coronagraph(yip_path)

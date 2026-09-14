@@ -97,6 +97,7 @@ class EqxCoronagraph(eqx.Module):
     _core_mean_intensity_interp: interpax.CubicSpline
     _core_mean_intensity_interp_2d: interpax.Interpolator2D | None
     _has_2d_core_intensity: bool
+    _diam_knot_range: tuple[float, float]
 
     # -- Static arrays (dynamic) -----------------------------------------
     sky_trans: Array
@@ -217,9 +218,14 @@ class EqxCoronagraph(eqx.Module):
                 extrap=False,  # returns NaN out-of-bounds
             )
             self._has_2d_core_intensity = True
+            self._diam_knot_range = (
+                float(jnp.min(diam_knots)),
+                float(jnp.max(diam_knots)),
+            )
         else:
             self._core_mean_intensity_interp_2d = None
             self._has_2d_core_intensity = False
+            self._diam_knot_range = (0.0, 0.0)
 
         # -- Sky transmission --------------------------------------------
         self.sky_trans = jnp.asarray(yippy_coro.sky_trans(), dtype=float_dtype())
@@ -353,9 +359,21 @@ class EqxCoronagraph(eqx.Module):
         Returns:
             Scalar core mean intensity value.
         """
-        if stellar_diam_lod != 0.0 and self._has_2d_core_intensity:
-            return self._core_mean_intensity_interp_2d(separation_lod, stellar_diam_lod)
-        return self._core_mean_intensity_interp(separation_lod)
+        point_source = self._core_mean_intensity_interp(separation_lod)
+        if not self._has_2d_core_intensity:
+            return point_source
+
+        # Select with jnp.where rather than a Python if, so that a traced
+        # stellar diameter works: a comparison against a tracer is itself a
+        # tracer and cannot be used in a branch. Both interpolants are
+        # therefore evaluated. The two-dimensional one returns NaN outside its
+        # diameter knots and a NaN in the branch that is not selected still
+        # propagates through a gradient, so the diameter is clamped into the
+        # tabulated range before it is evaluated.
+        low, high = self._diam_knot_range
+        clamped = jnp.clip(stellar_diam_lod, low, high)
+        extended = self._core_mean_intensity_interp_2d(separation_lod, clamped)
+        return jnp.where(stellar_diam_lod == 0.0, point_source, extended)
 
 
 # -- Helpers ------------------------------------------------------------------

@@ -171,6 +171,12 @@ coronagraph) and `usort_offaxis_ovc` (an off-axis vortex coronagraph
 design study). For production work or YIPs outside this set, manage your
 own YIP paths and pass them to `Coronagraph(path)` directly.
 
+The `eac1_aavc_2d` design is Susan Redmond's EAC1 apodized vortex
+coronagraph, described in D. P. Mawet et al., "Apodized vortex
+coronagraph for the Habitable Worlds Observatory," Proc. SPIE **13627**
+(2025), [doi:10.1117/12.3065779](https://doi.org/10.1117/12.3065779).
+Cite the design alongside yippy when you publish results built on it.
+
 See [`yippy.list_yips()`](https://yippy.readthedocs.io/en/latest/datasets.html)
 for the available names and the
 [datasets guide](https://yippy.readthedocs.io/en/latest/datasets.html)

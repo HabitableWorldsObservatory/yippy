@@ -55,6 +55,28 @@ docs = [
 ]
 test = ["nox", "pytest", "hypothesis", "pytest-cov"]
 
+# Validation evidence, collected by the ineedvalidation pytest plugin when it
+# is installed and ignored when it is not, so this table adds no dependency.
+# Each prefix says which physical case a test attests and what kind of evidence
+# it produces. Run with --vv-evidence PATH to write the ledger.
+[tool.ineedvalidation]
+library = "yippy"
+
+[tool.ineedvalidation.defaults]
+"tests/test_analytic_yip.py" = { case = "performance-curves", evidence = "code-verification" }
+"tests/test_direction_anchor.py" = { case = "psf-synthesis", evidence = "code-verification" }
+"tests/test_flux_and_centre.py" = { case = "psf-synthesis", evidence = "code-verification" }
+"tests/test_jax_contract.py" = { case = "performance-curves", evidence = "code-verification" }
+"tests/test_yip_contract.py" = { case = "coronagraph-table-contract", evidence = "code-verification" }
+"tests/test_export_agreement.py" = { case = "yip-export", evidence = "code-verification" }
+"tests/test_performance.py" = { case = "performance-curves", evidence = "code-verification" }
+"tests/test_fft_interpolation.py" = { case = "psf-synthesis", evidence = "code-verification" }
+"tests/test_map_methods.py" = { case = "performance-curves", evidence = "code-verification" }
+"tests/test_eqx_coronagraph.py" = { case = "performance-curves", evidence = "code-verification" }
+"tests/test_rebinning_metadata.py" = { case = "psf-synthesis", evidence = "code-verification" }
+"tests/test_real_psf_transforms.py" = { case = "psf-synthesis", evidence = "code-verification" }
+"tests/test_rotation_regressions.py" = { case = "psf-synthesis", evidence = "code-verification" }
+
 [tool.ruff]
 exclude = ["docs"]
 

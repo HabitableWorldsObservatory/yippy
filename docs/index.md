@@ -36,6 +36,7 @@ examples/06_Noise_Floor_Conventions.ipynb
 ```{toctree}
 :maxdepth: 2
 :caption: Reference
+contrast_floor.md
 azimuthal_averaging.md
 benchmarking.md
 ```

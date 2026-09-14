@@ -37,6 +37,10 @@ from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
 from .util import load_coro_performance_from_fits, save_coro_performance_to_fits
 
+# Invalidate artifacts generated before conservative PSF rebinning. Unlike a
+# release version this also protects development checkouts using the same tag.
+_SAMPLING_CACHE_VERSION = 1
+
 
 class Coronagraph:
     """Primary object for simulating a coronagraph.
@@ -480,13 +484,13 @@ class Coronagraph:
 
         Keyed by quarter/full, active float dtype, the realized PSF pixel
         shape (so a different ``downsample_shape`` gets its own cache entry),
-        and the source signature (so an in-place YIP overwrite is not served
-        a stale datacube).
+        the source signature, and the sampling implementation version. This
+        prevents reuse of cubes computed from center-sampled downsampled PSFs.
         """
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
         return (
             self._cache_dir / f"psf_datacube{ext}_{dtype_tag()}_{self.npixels}px_"
-            f"{self._source_signature()}.npy"
+            f"{self._source_signature()}_sampling{_SAMPLING_CACHE_VERSION}.npy"
         )
 
     @property
@@ -501,12 +505,18 @@ class Coronagraph:
 
         Also folds in the source signature (see ``_source_signature``) so a
         stale performance curve is not reused after the source YIP data
-        changes.
+        changes. Pixel shape, dtype, and sampling version distinguish curves
+        computed before conservative rebinning or at a different resolution.
         """
         sig = self._source_signature()
+        sampling = f"{self.npixels}px_{dtype_tag()}_sampling{_SAMPLING_CACHE_VERSION}"
         if self.psf_trunc_ratio is not None:
-            return f"trunc_{self.psf_trunc_ratio:.2f}_v{__version__}_{sig}.fits"
-        return f"aper_{self.aperture_radius_lod:.2f}_v{__version__}_{sig}.fits"
+            return (
+                f"trunc_{self.psf_trunc_ratio:.2f}_v{__version__}_{sig}_{sampling}.fits"
+            )
+        return (
+            f"aper_{self.aperture_radius_lod:.2f}_v{__version__}_{sig}_{sampling}.fits"
+        )
 
     def set_psf_trunc_ratio(self, ratio: float) -> None:
         """Switch PSF truncation ratio, recomputing only the affected curves.

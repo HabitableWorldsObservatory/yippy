@@ -35,6 +35,18 @@ locked into the catalog.
 ```{include} _generated/yip_catalog.md
 ```
 
+### Design references
+
+Cite the coronagraph design, not just yippy, when you publish results
+built on one of these YIPs:
+
+- `eac1_aavc_2d` -- the EAC1 apodized vortex coronagraph designed by
+  Susan Redmond. D. P. Mawet, S. F. Redmond, A. Bertrou-Cantou,
+  G. Ruane, and J. Llop-Sayson, "Apodized vortex coronagraph for the
+  Habitable Worlds Observatory," in *Techniques and Instrumentation for
+  Detection of Exoplanets XII*, Proc. SPIE **13627** (2025),
+  [doi:10.1117/12.3065779](https://doi.org/10.1117/12.3065779).
+
 ## Sampling
 
 YIP names end with a sampling-regime suffix:
