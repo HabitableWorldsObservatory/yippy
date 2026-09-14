@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.4](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.3...v2.10.4) (2026-09-14)
+
+
+### Bug Fixes
+
+* **transforms:** correct off-axis centering, rotation, and PSF rebinning via hwoutils ([9b0ab7b](https://github.com/HabitableWorldsObservatory/yippy/commit/9b0ab7b60217a6a94bd04ab3fd4ae42882df874e))
+
 ## [2.10.3](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.2...v2.10.3) (2026-08-31)
 
 
