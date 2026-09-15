@@ -378,6 +378,19 @@ def _cube(coro):
     return np.asarray(coro.psf_datacube)
 
 
+def _assert_same_cube(warm, cold):
+    """Two independently synthesized cubes agree to synthesis roundoff.
+
+    Tolerance basis: XLA's multithreaded CPU kernels can order the FFT and
+    neighbor-sum additions differently between runs, moving pixels by up to
+    one unit roundoff of the peak (about 6e-8 of it in float32). ``1e-6`` of
+    the peak leaves margin for that; the aliasing defects guarded here change
+    the cube by tens of percent of the peak.
+    """
+    got, want = _cube(warm), _cube(cold)
+    assert_allclose(got, want, rtol=0, atol=1e-6 * want.max())
+
+
 def test_datacube_identity_includes_physical_symmetry(tmp_path):
     """Full cubes built with different x symmetry do not alias."""
     path = _small_2dq(tmp_path, "warm")
@@ -386,7 +399,7 @@ def test_datacube_identity_includes_physical_symmetry(tmp_path):
     cold = Coronagraph(
         _small_2dq(tmp_path, "cold"), use_quarter_psf_datacube=False, x_symmetric=False
     )
-    assert_allclose(_cube(warm), _cube(cold), rtol=0, atol=0)
+    _assert_same_cube(warm, cold)
 
 
 def test_quarter_and_full_cubes_are_distinct(tmp_path):
@@ -420,7 +433,7 @@ def test_source_overwrite_invalidates_datacube(tmp_path):
     _bump_mtime(path)
     warm = Coronagraph(path)
     cold = Coronagraph(_small_2dq(tmp_path, "cold", psf_flux=0.5))
-    assert_allclose(_cube(warm), _cube(cold), rtol=0, atol=0)
+    _assert_same_cube(warm, cold)
 
 
 def test_stale_object_does_not_label_cube_as_new_source(tmp_path):
@@ -432,4 +445,4 @@ def test_stale_object_does_not_label_cube_as_new_source(tmp_path):
     _cube(stale)
     warm = Coronagraph(path)
     cold = Coronagraph(_small_2dq(tmp_path, "cold", psf_flux=0.5))
-    assert_allclose(_cube(warm), _cube(cold), rtol=0, atol=0)
+    _assert_same_cube(warm, cold)
