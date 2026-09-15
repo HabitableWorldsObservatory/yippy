@@ -9,7 +9,7 @@ description = "A Python and JAX wrapper to create a coronagraph object from a yi
 dependencies = [
   "astropy",
   "scipy",
-  "hwoutils>=1.6.1",
+  "hwoutils>=1.10.0",
   "lod_unit",
   "tqdm",
   "jax>=0.8.1",
