@@ -136,6 +136,17 @@ def _oversample_psf(
     return np.maximum(psf_os, 0.0)
 
 
+def resolve_oversample(coro: Coronagraph, oversample: int | None) -> int:
+    """Return the effective oversampling factor for a calculation.
+
+    ``None`` selects AYO's rule, ``ceil(pixscale / 0.05)`` for the realized
+    pixel scale in lambda/D; any other value is used as given.
+    """
+    if oversample is None:
+        return int(np.ceil(coro.pixel_scale_arcsec.value / 0.05))
+    return int(oversample)
+
+
 def _threshold_mask(psf_os: np.ndarray, trunc_ratio: float) -> np.ndarray:
     """Create boolean mask of pixels exceeding ``trunc_ratio * peak``.
 
@@ -442,8 +453,7 @@ def compute_truncation_throughput_curve(
         ``(separations, throughputs)`` - sorted 1-D arrays.
     """
     pix_lod = coro.pixel_scale_arcsec.value
-    if oversample is None:
-        oversample = int(np.ceil(pix_lod / 0.05))
+    oversample = resolve_oversample(coro, oversample)
 
     separations, throughputs = [], []
 
@@ -478,8 +488,7 @@ def compute_truncation_core_area_curve(
         ``(separations, core_areas)`` - sorted 1-D arrays, area in (lam/D)^2.
     """
     pix_lod = coro.pixel_scale_arcsec.value
-    if oversample is None:
-        oversample = int(np.ceil(pix_lod / 0.05))
+    oversample = resolve_oversample(coro, oversample)
 
     # Solid angle of one oversampled pixel in (lam/D)**2
     os_pix_lod = pix_lod / oversample
@@ -597,7 +606,7 @@ def compute_all_performance_curves(
     stellar_diam=None,
     fit_gaussian_for_core_area: bool = False,
     use_phot_aperture_as_min: bool = False,
-    oversample: int = 2,
+    oversample: int | None = 2,
     save_to_fits: bool = True,
     performance_file: str = "coro_perf.fits",
     load_from_file: str | None = None,
@@ -613,10 +622,21 @@ def compute_all_performance_curves(
     delegates to the individual ``compute_*`` helpers above, builds spline
     interpolators, and computes IWA / OWA.
 
+    ``load_from_file`` is an explicit import: the named table supplies the
+    separation, throughput and raw contrast as-is, whatever settings produced
+    it, and nothing is written. Automatic cache reuse in ``Coronagraph``
+    validates a table's identity metadata before passing it here. A table
+    written with ``save_to_fits`` records the identity of the settings that
+    actually produced it (when *coro* provides ``_perf_identity``), so a table
+    saved under non-default settings is never accepted as an automatic entry
+    for different ones. The stored contrast is always unfloored; the floor is
+    applied after loading.
+
     Returns a dict of all curve data for convenience.
     """
     if stellar_diam is None:
         stellar_diam = coro.stellar_intens.diams[0]
+    oversample = resolve_oversample(coro, oversample)
 
     # Resolve the directory for save/load operations
     io_dir = cache_dir if cache_dir is not None else coro.yip_path
@@ -661,8 +681,21 @@ def compute_all_performance_curves(
         assert np.allclose(sep, sep_c), "Throughput and contrast separations differ"
 
         if save_to_fits:
+            identity = None
+            if hasattr(coro, "_perf_identity"):
+                identity = coro._perf_identity(
+                    aperture_radius_lod=aperture_radius_lod,
+                    psf_trunc_ratio=psf_trunc_ratio,
+                    oversample=oversample,
+                    stellar_diam=stellar_diam,
+                )
             save_coro_performance_to_fits(
-                sep, throughput, raw_contrast, performance_file, io_dir
+                sep,
+                throughput,
+                raw_contrast,
+                performance_file,
+                io_dir,
+                identity=identity,
             )
 
     # Apply contrast floor

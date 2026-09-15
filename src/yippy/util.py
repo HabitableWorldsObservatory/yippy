@@ -1,5 +1,7 @@
 """Utility functions for the yippy package."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import astropy.io.fits as fits
@@ -163,6 +165,39 @@ def convert_to_pix(
     return x_pixels
 
 
+def _canonical_cache_value(value):
+    """Normalize a cache identity value to a JSON-stable form.
+
+    Real numbers of any Python or NumPy type become ``float.hex`` strings, so
+    ``1``, ``1.0`` and ``np.float32(1.0)`` agree while values that differ in any
+    bit of their double representation stay distinct. Booleans are kept apart
+    from numbers.
+    """
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value).hex()
+    if isinstance(value, dict):
+        return {str(k): _canonical_cache_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_cache_value(v) for v in value]
+    raise TypeError(f"Unsupported cache identity value: {value!r}")
+
+
+def cache_identity_json(identity: dict) -> str:
+    """Deterministic serialization of a cache identity mapping."""
+    return json.dumps(
+        _canonical_cache_value(identity), sort_keys=True, separators=(",", ":")
+    )
+
+
+def cache_identity_digest(identity: dict) -> str:
+    """SHA-256 hex digest of the canonical serialization of ``identity``."""
+    return hashlib.sha256(cache_identity_json(identity).encode()).hexdigest()
+
+
 def save_coro_performance_to_fits(
     sep: np.ndarray,
     throughput: np.ndarray,
@@ -170,8 +205,22 @@ def save_coro_performance_to_fits(
     filename: str,
     outdir: Path,
     overwrite=True,
+    identity: dict | None = None,
 ):
-    """Save coronagraph performance (throughput, raw_contrast) to a FITS file."""
+    """Save coronagraph performance (throughput, raw_contrast) to a FITS file.
+
+    Args:
+        sep: Separations in lambda/D.
+        throughput: Throughput at each separation.
+        raw_contrast: Unfloored raw contrast at each separation.
+        filename: Output file name.
+        outdir: Output directory.
+        overwrite: Whether to overwrite an existing file.
+        identity: Optional mapping describing the settings that produced the
+            table. Its digest (``CACHEKEY``) and canonical JSON (``CACHEID``)
+            are written to the primary header, which is what automatic cache
+            reuse validates against.
+    """
     sort_idx = np.argsort(sep)
     col_sep = fits.Column(name="separation_lamD", format="E", array=sep[sort_idx])
     col_thr = fits.Column(name="throughput", format="E", array=throughput[sort_idx])
@@ -181,9 +230,25 @@ def save_coro_performance_to_fits(
     tbhdu.name = "CORO_PERFORMANCE"
 
     primary_hdu = fits.PrimaryHDU()
+    if identity is not None:
+        primary_hdu.header["CACHEKEY"] = cache_identity_digest(identity)
+        primary_hdu.header["CACHEID"] = cache_identity_json(identity)
     hdul = fits.HDUList([primary_hdu, tbhdu])
     outpath = outdir / filename
     hdul.writeto(outpath, overwrite=overwrite)
+
+
+def read_performance_cache_key(path: Path) -> str | None:
+    """Return the ``CACHEKEY`` digest of a performance table, or None.
+
+    Unreadable files and tables written without identity metadata return
+    None, so a caller comparing against an expected digest treats them as a
+    cache miss.
+    """
+    try:
+        return fits.getheader(path, 0).get("CACHEKEY")
+    except (OSError, ValueError):
+        return None
 
 
 def load_coro_performance_from_fits(filename: str, indir: Path):

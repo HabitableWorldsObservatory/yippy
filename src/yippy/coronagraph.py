@@ -18,28 +18,32 @@ from .header import HeaderData
 from .logger import logger
 from .offjax import OffJAX
 from .performance import (
-    _build_perf_interps,
-    _compute_iwa_owa,
+    compute_all_performance_curves as _compute_all_perf,
+)
+from .performance import (
     compute_core_area_curve,
     compute_core_mean_intensity_curve,
     compute_occ_trans_curve,
     compute_radial_average,
     compute_raw_contrast_curve,
     compute_throughput_curve,
-    compute_truncation_core_area_curve,
-    compute_truncation_throughput_curve,
     plot_performance_curve,
-)
-from .performance import (
-    compute_all_performance_curves as _compute_all_perf,
 )
 from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
-from .util import load_coro_performance_from_fits, save_coro_performance_to_fits
+from .util import cache_identity_digest, read_performance_cache_key
 
 # Invalidate artifacts generated before conservative PSF rebinning. Unlike a
 # release version this also protects development checkouts using the same tag.
 _SAMPLING_CACHE_VERSION = 1
+
+# Namespace of automatically managed cache entries. Schema 2 keys every entry
+# by a digest of its complete calculation identity; entries from earlier
+# schemas have different names and are never read.
+_CACHE_SCHEMA_VERSION = 2
+
+# Oversampling factor for automatically computed performance tables.
+_DEFAULT_OVERSAMPLE = 2
 
 
 class Coronagraph:
@@ -136,6 +140,19 @@ class Coronagraph:
         yip_path = Path(yip_path)
         self.yip_path = yip_path
 
+        # Capture the source generation before reading any data, so cache
+        # entries written later by this object are labeled with the files it
+        # actually loaded even if the package is edited in the meantime.
+        self._source_sig = self._source_signature()
+        self._source_files = {
+            "stellar_intens": stellar_intens_file,
+            "stellar_diams": stellar_diam_file,
+            "offax_psf": offax_data_file,
+            "offax_offsets": offax_offsets_file,
+        }
+        self.x_symmetric = x_symmetric
+        self.y_symmetric = y_symmetric
+
         logger.info(f"Creating {yip_path.stem} coronagraph")
 
         self.name = yip_path.stem
@@ -212,42 +229,47 @@ class Coronagraph:
 
         self.interp_order = interp_order
 
+        self._load_or_compute_performance()
+
+        logger.info(f"Created {yip_path.stem}")
+
+    def _load_or_compute_performance(self):
+        """Build performance interpolators from a valid cache entry or afresh.
+
+        Shared by the constructor and ``set_psf_trunc_ratio`` so both use the
+        same settings and the same stored-value meaning. An entry is reused
+        only when its recorded identity digest equals the identity of the
+        current request; anything else (missing, legacy, unreadable, or
+        written under other settings) is a miss and is overwritten.
+        """
         perf_file = self._perf_filename()
         perf_path = self._perf_dir / perf_file
+        expected = cache_identity_digest(self._auto_perf_identity())
+        hit = perf_path.exists() and read_performance_cache_key(perf_path) == expected
 
-        if perf_path.exists():
+        if hit:
             logger.info(f"Loading performance metrics from {perf_path}")
-            self.compute_all_performance_curves(
-                aperture_radius_lod=self.aperture_radius_lod,
-                save_to_fits=False,
-                load_from_file=perf_file,
-                cache_dir=self._perf_dir,
-                plot=False,
-                psf_trunc_ratio=self.psf_trunc_ratio,
-                interp_order=interp_order,
-            )
         else:
+            if perf_path.exists():
+                logger.info(f"Ignoring incompatible performance cache {perf_path}")
             if self.psf_trunc_ratio is not None:
                 logger.info(
                     f"Computing performance with PSF trunc ratio "
                     f"= {self.psf_trunc_ratio}..."
                 )
             else:
-                logger.info(
-                    "No precomputed performance file found. "
-                    "Computing all performance metrics..."
-                )
-            self.compute_all_performance_curves(
-                aperture_radius_lod=self.aperture_radius_lod,
-                save_to_fits=True,
-                performance_file=perf_file,
-                cache_dir=self._perf_dir,
-                plot=False,
-                psf_trunc_ratio=self.psf_trunc_ratio,
-                interp_order=interp_order,
-            )
-
-        logger.info(f"Created {yip_path.stem}")
+                logger.info("Computing all performance metrics...")
+        self.compute_all_performance_curves(
+            aperture_radius_lod=self.aperture_radius_lod,
+            oversample=_DEFAULT_OVERSAMPLE,
+            save_to_fits=not hit,
+            performance_file=perf_file,
+            load_from_file=perf_file if hit else None,
+            cache_dir=self._perf_dir,
+            plot=False,
+            psf_trunc_ratio=self.psf_trunc_ratio,
+            interp_order=self.interp_order,
+        )
 
     def create_psf_datacube(self, batch_size=128):
         """Load the PSF datacube from a file or generate it if it doesn't exist.
@@ -478,19 +500,55 @@ class Coronagraph:
             stat_bits.append(f"{fits_path.name}:{st.st_size}:{st.st_mtime_ns}")
         return hashlib.sha1("|".join(stat_bits).encode()).hexdigest()[:8]
 
+    def _cache_identity_base(self, artifact: str, source_roles) -> dict:
+        """Identity components shared by every automatically cached artifact.
+
+        Args:
+            artifact: Artifact kind, e.g. ``"performance"``.
+            source_roles: Keys of ``self._source_files`` whose selected file
+                names the artifact depends on.
+        """
+        return {
+            "artifact": artifact,
+            "schema": _CACHE_SCHEMA_VERSION,
+            "sampling": _SAMPLING_CACHE_VERSION,
+            "source_signature": self._source_sig,
+            "source_files": {role: self._source_files[role] for role in source_roles},
+            "npixels": int(self.npixels),
+            "dtype": dtype_tag(),
+        }
+
+    def _datacube_identity(self) -> dict:
+        """Complete identity of the PSF datacube this object would store.
+
+        The physical symmetry flags only change PSFs synthesized at negative
+        offsets, which a quarter cube never evaluates, so they are part of the
+        identity of full cubes only.
+        """
+        identity = self._cache_identity_base(
+            "psf_datacube", ("offax_psf", "offax_offsets")
+        )
+        identity["storage"] = "quarter" if self.use_quarter_psf_datacube else "full"
+        if not self.use_quarter_psf_datacube:
+            identity["x_symmetric"] = bool(self.x_symmetric)
+            identity["y_symmetric"] = bool(self.y_symmetric)
+        return identity
+
     @property
     def _datacube_cache_path(self) -> Path:
         """PSF datacube cache file.
 
-        Keyed by quarter/full, active float dtype, the realized PSF pixel
-        shape (so a different ``downsample_shape`` gets its own cache entry),
-        the source signature, and the sampling implementation version. This
-        prevents reuse of cubes computed from center-sampled downsampled PSFs.
+        The name carries quarter/full, active float dtype, the realized PSF
+        pixel count, the source signature, and a digest of the complete
+        identity (see ``_datacube_identity``), which also covers the selected
+        source files, symmetry flags of full cubes, the sampling implementation
+        version, and the cache schema.
         """
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
+        digest = cache_identity_digest(self._datacube_identity())[:16]
         return (
             self._cache_dir / f"psf_datacube{ext}_{dtype_tag()}_{self.npixels}px_"
-            f"{self._source_signature()}_sampling{_SAMPLING_CACHE_VERSION}.npy"
+            f"{self._source_sig}_{digest}.npy"
         )
 
     @property
@@ -500,64 +558,75 @@ class Coronagraph:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _perf_filename(self) -> str:
-        """Build a performance cache filename encoding the aperture mode.
+    def _perf_identity(
+        self, aperture_radius_lod, psf_trunc_ratio, oversample, stellar_diam
+    ) -> dict:
+        """Complete identity of a stored performance table.
 
-        Also folds in the source signature (see ``_source_signature``) so a
-        stale performance curve is not reused after the source YIP data
-        changes. Pixel shape, dtype, and sampling version distinguish curves
-        computed before conservative rebinning or at a different resolution.
+        The table holds separation, throughput and unfloored raw contrast, so
+        the identity covers everything those depend on: the source files and
+        their generation, realized resolution and dtype, the circular aperture
+        radius (which sets contrast even in truncation mode), the aperture
+        mode and threshold, the effective oversampling, and the stellar
+        diameter of the contrast calculation. Settings applied after loading
+        (contrast floor, inscribed-diameter scaling, interpolation order) and
+        quantities recomputed on every construction (core area, occulter
+        transmission, core mean intensity) are not part of it.
         """
-        sig = self._source_signature()
-        sampling = f"{self.npixels}px_{dtype_tag()}_sampling{_SAMPLING_CACHE_VERSION}"
-        if self.psf_trunc_ratio is not None:
-            return (
-                f"trunc_{self.psf_trunc_ratio:.2f}_v{__version__}_{sig}_{sampling}.fits"
-            )
+        identity = self._cache_identity_base(
+            "performance",
+            ("stellar_intens", "stellar_diams", "offax_psf", "offax_offsets"),
+        )
+        identity.update(
+            {
+                "yippy_version": __version__,
+                "aperture": "circular" if psf_trunc_ratio is None else "truncation",
+                "aperture_radius_lod": aperture_radius_lod,
+                "psf_trunc_ratio": psf_trunc_ratio,
+                "oversample": oversample,
+                "stellar_diam_lod": getattr(stellar_diam, "value", stellar_diam),
+            }
+        )
+        return identity
+
+    def _auto_perf_identity(self) -> dict:
+        """Identity of the automatically managed table for current settings."""
+        return self._perf_identity(
+            aperture_radius_lod=self.aperture_radius_lod,
+            psf_trunc_ratio=self.psf_trunc_ratio,
+            oversample=_DEFAULT_OVERSAMPLE,
+            stellar_diam=self.stellar_intens.diams[0],
+        )
+
+    def _perf_filename(self) -> str:
+        """Performance cache filename for the current settings.
+
+        The readable prefix gives the aperture mode, realized pixel count,
+        dtype and source signature; the trailing digest identifies the
+        complete calculation (see ``_perf_identity``), so parameters that
+        differ in any bit never share a name. The file's header carries the
+        full digest, which is checked before reuse.
+        """
+        mode = "aper" if self.psf_trunc_ratio is None else "trunc"
+        digest = cache_identity_digest(self._auto_perf_identity())[:16]
         return (
-            f"aper_{self.aperture_radius_lod:.2f}_v{__version__}_{sig}_{sampling}.fits"
+            f"perf_{mode}_{self.npixels}px_{dtype_tag()}_{self._source_sig}_"
+            f"{digest}.fits"
         )
 
     def set_psf_trunc_ratio(self, ratio: float) -> None:
-        """Switch PSF truncation ratio, recomputing only the affected curves.
+        """Switch PSF truncation ratio and rebuild the performance curves.
 
-        Throughput and core area curves depend on the truncation ratio.
-        Contrast, occulter transmission, and core mean intensity do not.
+        Uses the same settings, cache identity and stored-value definitions as
+        construction with ``psf_trunc_ratio=ratio``, so the resulting curves do
+        not depend on whether a table was produced here or by the constructor.
         Results are cached to ``yippy_cache/performance/`` for reuse.
 
         Args:
             ratio: PSF truncation ratio (e.g. 0.3).
         """
         self.psf_trunc_ratio = ratio
-        perf_file = self._perf_filename()
-        perf_path = self._perf_dir / perf_file
-
-        if perf_path.exists():
-            logger.info(f"Loading cached performance for trunc_ratio={ratio:.2f}")
-            sep, throughput, raw_contrast = load_coro_performance_from_fits(
-                perf_file, self._perf_dir
-            )
-        else:
-            logger.info(
-                f"Computing throughput + core area for trunc_ratio={ratio:.2f}..."
-            )
-            sep, throughput = compute_truncation_throughput_curve(
-                self, psf_trunc_ratio=ratio
-            )
-            raw_contrast = np.array([self.raw_contrast(s) for s in sep])
-            save_coro_performance_to_fits(
-                sep, throughput, raw_contrast, perf_file, self._perf_dir
-            )
-
-        sep_ca, core_area = compute_truncation_core_area_curve(
-            self, psf_trunc_ratio=ratio
-        )
-
-        _build_perf_interps(
-            self, sep, throughput, raw_contrast, sep_ca, core_area, self.interp_order
-        )
-
-        _compute_iwa_owa(self, sep, throughput)
+        self._load_or_compute_performance()
 
         logger.info(
             f"Switched to trunc_ratio={ratio:.2f} "
