@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.6](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.5...v2.10.6) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cache:** key performance and datacube caches by complete calculation identity ([704c28d](https://github.com/HabitableWorldsObservatory/yippy/commit/704c28d126a2f731444dbcc77d68acc7a604be94))
+
 ## [2.10.5](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.4...v2.10.5) (2026-09-15)
 
 
