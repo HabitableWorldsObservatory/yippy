@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.5](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.4...v2.10.5) (2026-09-15)
+
+
+### Bug Fixes
+
+* require hwoutils&gt;=1.10.0 for corrected rotation/shear math ([8b07b81](https://github.com/HabitableWorldsObservatory/yippy/commit/8b07b81f91003466c0f0700bc8200f3f06202b2d))
+
 ## [2.10.4](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.3...v2.10.4) (2026-09-14)
 
 
