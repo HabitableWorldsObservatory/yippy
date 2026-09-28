@@ -7,7 +7,7 @@ authors:
   - family-names: Spohn
     given-names: Corey
     orcid: "https://orcid.org/0000-0002-3138-0240"
-    affiliation: "NASA Goddard Space Flight Center"
+    affiliation: "University of Maryland, Baltimore County; NASA Goddard Space Flight Center; CRESST II"
 repository-code: "https://github.com/HabitableWorldsObservatory/yippy"
 license: MIT
 doi: "10.5281/zenodo.20172435"
