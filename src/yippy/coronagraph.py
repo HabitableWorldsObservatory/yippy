@@ -1,6 +1,7 @@
 """Base coronagraph class."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import astropy.io.fits as pyfits
@@ -44,6 +45,38 @@ _CACHE_SCHEMA_VERSION = 2
 
 # Oversampling factor for automatically computed performance tables.
 _DEFAULT_OVERSAMPLE = 2
+
+
+def _load_cached_datacube(path: Path) -> np.ndarray | None:
+    """The cached PSF datacube at ``path``, or None when it is missing or unreadable.
+
+    A run interrupted while writing the cache leaves a truncated file that
+    can never load. Such a file is removed, with a warning, so the caller
+    rebuilds the cube instead of failing on every later run.
+    """
+    if not path.exists():
+        return None
+    try:
+        return np.load(path)
+    except (ValueError, EOFError, OSError) as err:
+        logger.warning(f"Discarding unreadable PSF datacube cache {path}: {err}")
+        path.unlink(missing_ok=True)
+        return None
+
+
+def _save_datacube(path: Path, psfs) -> None:
+    """Write the PSF datacube to ``path`` through a temporary file.
+
+    The file is renamed into place only once it is complete, so an
+    interrupted write never leaves a truncated cache behind.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            np.save(fh, np.asarray(psfs))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class Coronagraph:
@@ -288,9 +321,10 @@ class Coronagraph:
             return self._create_psf_datacube_gpu(batch_size=batch_size)
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
         datacube_path = self._datacube_cache_path
-        if datacube_path.exists():
+        cached = _load_cached_datacube(datacube_path)
+        if cached is not None:
             logger.info(f"Loading PSF datacube from {datacube_path}.")
-            psfs = jnp.asarray(jnp.load(datacube_path))
+            psfs = jnp.asarray(cached)
         else:
             # Create data cube of spatially dependent PSFs.
             psfs_shape = (*self.psf_shape, *self.psf_shape)
@@ -334,7 +368,7 @@ class Coronagraph:
                         i : i + batch_size
                     ] = batch_psfs
                     pb.update(batch_points.shape[0])
-            jnp.save(datacube_path, psfs)
+            _save_datacube(datacube_path, psfs)
             logger.info(f"PSF datacube saved to {datacube_path}.")
 
         # Move datacube to GPU/TPU device if conditions are met
@@ -389,9 +423,10 @@ class Coronagraph:
         """
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
         datacube_path = self._datacube_cache_path
-        if datacube_path.exists():
+        cached = _load_cached_datacube(datacube_path)
+        if cached is not None:
             logger.info(f"Loading PSF datacube from {datacube_path}.")
-            psfs = jnp.asarray(jnp.load(datacube_path))
+            psfs = jnp.asarray(cached)
         else:
             if not self.use_quarter_psf_datacube:
                 pixel_lod = (
@@ -434,7 +469,7 @@ class Coronagraph:
                     flat_view[i : i + batch_size] = np.asarray(batch_psfs)
                     pb.update(batch_x.shape[0])
 
-            np.save(datacube_path, psfs)
+            _save_datacube(datacube_path, psfs)
             logger.info(f"PSF datacube saved to {datacube_path}.")
 
         target_device = jax.devices()[0]
