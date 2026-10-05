@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 import pooch
 import pytest
@@ -277,3 +279,45 @@ def test_fetch_smallest_yip_loads_as_coronagraph(tmp_path):
 
     coro = Coronagraph(yip_path)
     assert coro is not None
+
+
+def _unpacked(root, name, clutter=()):
+    """An unzip folder holding a YIP folder plus clutter, listed in os.walk order."""
+    yip = root / name
+    yip.mkdir(parents=True)
+    for f in ("yip.fits", "offax_psf.fits"):
+        (yip / f).write_bytes(b"")
+    for f in clutter:
+        (root / f).write_bytes(b"")
+    return [Path(d) / f for d, _, files in os.walk(root) for f in sorted(files)]
+
+
+def test_yip_dir_ignores_clutter_in_the_unzip_folder(tmp_path):
+    """A file the archive never held, listed first, does not move the YIP folder."""
+    root = tmp_path / "eac1_aavc_2d.zip.unzip"
+    paths = _unpacked(root, "eac1_aavc_2d", clutter=(".DS_Store", "Thumbs.db"))
+    assert paths[0].parent == root  # the clutter is listed first
+    assert datasets._yip_dir(paths, "eac1_aavc_2d") == root / "eac1_aavc_2d"
+
+
+def test_yip_dir_without_clutter(tmp_path):
+    """The YIP folder is found when the unzip folder holds only the archive."""
+    root = tmp_path / "eac1_aavc_2d.zip.unzip"
+    paths = _unpacked(root, "eac1_aavc_2d")
+    assert datasets._yip_dir(paths, "eac1_aavc_2d") == root / "eac1_aavc_2d"
+
+
+def test_fetch_yip_returns_the_yip_folder_despite_clutter(tmp_path, monkeypatch):
+    """fetch_yip returns the YIP folder, not the unzip folder, despite clutter."""
+    root = tmp_path / "eac1_aavc_2d.zip.unzip"
+    paths = _unpacked(root, "eac1_aavc_2d", clutter=(".DS_Store",))
+
+    class Stub:
+        path = tmp_path
+
+        def fetch(self, fname, processor=None):
+            return [str(p) for p in paths]
+
+    monkeypatch.setattr(datasets, "_PIKACHU", Stub())
+    monkeypatch.delenv(datasets.CACHE_DIR_ENV_VAR, raising=False)
+    assert datasets.fetch_yip("eac1_aavc_2d") == str(root / "eac1_aavc_2d")

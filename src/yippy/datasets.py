@@ -212,26 +212,33 @@ def fetch_yip(
         pikachu = _PIKACHU
     logger.info(f"Fetching YIP {resolved!r} (cache: {pikachu.path})")
     paths = pikachu.fetch(f"{resolved}.zip", processor=Unzip())
-    # Unzip returns a list of paths under the unzipped dir. The YIP itself
-    # lives at the archive root under `{name}/`. Resolve to that directory.
-    sample_path = Path(paths[0])
-    yip_dir = sample_path.parent
-    # Walk up looking for a directory named after the YIP. If we hit a
-    # `{resolved}.zip` directory first (e.g. the unzip cache folder),
-    # treat its sibling/parent path as the YIP directory.
-    while yip_dir.parent != yip_dir:
-        if yip_dir.name == resolved:
-            break
-        if yip_dir.name == f"{resolved}.zip":
-            yip_dir = yip_dir.parent / resolved
-            break
-        yip_dir = yip_dir.parent
-    else:
-        # Fallback: the immediate parent of the sample file.
-        yip_dir = sample_path.parent
+    yip_dir = _yip_dir([Path(p) for p in paths], resolved)
 
     logger.info(f"YIP {resolved!r} available at {yip_dir}")
     return str(yip_dir)
+
+
+def _yip_dir(paths: list[Path], name: str) -> Path:
+    """The YIP directory among the files Unzip reports for an archive.
+
+    The YIP lives at the archive root under ``{name}/``. Unzip lists every
+    file in the unzip folder, including ones the archive never held (a
+    ``.DS_Store`` that Finder writes when the cache is browsed, say), so no
+    single path is trusted: the first file under a folder named after the
+    YIP decides. Without one, the first file's folder is walked up as before,
+    treating a ``{name}.zip`` folder as the parent of the YIP folder.
+    """
+    for path in paths:
+        for parent in path.parents:
+            if parent.name == name:
+                return parent
+    sample_path = paths[0]
+    yip_dir = sample_path.parent
+    while yip_dir.parent != yip_dir:
+        if yip_dir.name == f"{name}.zip":
+            return yip_dir.parent / name
+        yip_dir = yip_dir.parent
+    return sample_path.parent
 
 
 _FILTERABLE_FIELDS = frozenset({"telescope", "coronagraph", "sampling"})
