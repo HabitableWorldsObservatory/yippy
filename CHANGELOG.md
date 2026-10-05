@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.10.7](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.6...v2.10.7) (2026-10-05)
+
+
+### Bug Fixes
+
+* **coronagraph:** write the PSF datacube cache atomically and rebuild a truncated cache instead of failing on every load ([7bba536](https://github.com/HabitableWorldsObservatory/yippy/commit/7bba536a1d859f2f1e66e588787692102a965ad1))
+* **datasets:** find the YIP folder among the unpacked files even when the unzip folder holds clutter such as a Finder .DS_Store ([b675625](https://github.com/HabitableWorldsObservatory/yippy/commit/b6756250ab5c8455228a98f5739003483b5c2acb))
+
 ## [2.10.6](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.5...v2.10.6) (2026-09-15)
 
 
