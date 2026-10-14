@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.10.7](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.6...v2.10.7) (2026-10-14)
+
+
+### Bug Fixes
+
+* **coronagraph:** center separation_map on the optical axis ([be8f470](https://github.com/HabitableWorldsObservatory/yippy/commit/be8f4704b0f065b6e7e4682dd72ea4f354a7e405))
+* **coronagraph:** write the PSF datacube cache atomically and rebuild a truncated cache instead of failing on every load ([7bba536](https://github.com/HabitableWorldsObservatory/yippy/commit/7bba536a1d859f2f1e66e588787692102a965ad1))
+* **datasets:** find the YIP folder among the unpacked files even when the unzip folder holds clutter such as a Finder .DS_Store ([b675625](https://github.com/HabitableWorldsObservatory/yippy/commit/b6756250ab5c8455228a98f5739003483b5c2acb))
+* **performance:** measure the core mean intensity profile about the optical axis ([9e676cb](https://github.com/HabitableWorldsObservatory/yippy/commit/9e676cbff92a12bf7351521c50c77c7602c45f2f))
+
 ## [2.10.6](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.5...v2.10.6) (2026-09-15)
 
 
