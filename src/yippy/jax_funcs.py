@@ -522,6 +522,11 @@ def synthesize_psf_separable(
     Optimized for speed and stability with even-sized padding.
     Uses flat_psfs with offset_to_flat_idx mapping for memory efficiency.
 
+    For 1D input the neighbors are the tabulated PSFs along +x at the radial
+    separation of (x, y). They are mirrored for x < 0 or y < 0 and translated,
+    but not rotated to the position angle: rotation would also rotate the
+    pupil's diffraction structure, which is fixed on the detector.
+
     Args:
         x (float):
             X coordinate in lambda/D.
