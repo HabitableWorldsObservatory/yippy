@@ -1,13 +1,24 @@
 """Shared fixtures for yippy tests."""
 
+import importlib.util
 import os
 
 import numpy as np
 import pytest
+from hypothesis import settings
 
 from yippy import Coronagraph
 from yippy._precision import float_dtype
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
+
+# Released hwoutils versions may not include the optional budget plugin yet.
+pytest_plugins = []
+if importlib.util.find_spec("hwoutils.testbudget") is not None:
+    pytest_plugins.append("hwoutils.testbudget.plugin")
+
+settings.register_profile("quick", max_examples=25, deadline=None)
+settings.register_profile("nightly", max_examples=200, deadline=None)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 
 def assert_eqx_arrays_match_active_dtype(eqx_coro):
