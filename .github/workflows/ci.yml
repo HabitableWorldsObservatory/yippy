@@ -1,0 +1,193 @@
+name: CI
+
+# Replaces tests.yml. Quick tier on every push and pull request, docs with executed
+# examples, and the slow tier on a nightly schedule. No secrets are used: the default
+# GITHUB_TOKEN with read access is enough because every sibling library is public.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "17 7 * * *"   # nightly, 07:17 UTC (default branch only)
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Test selection for a manual run"
+        default: "not slow"
+        type: choice
+        options: [ "not slow", "slow", "all" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+env:
+  JAX_PLATFORMS: cpu
+  # Batched programs can stall on 2-vCPU runners with the default Eigen threading.
+  XLA_FLAGS: --xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1
+  JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+  JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "1"
+  PYTHONHASHSEED: "0"
+  # Preserve the reference-data requirement from tests.yml.
+  YIPPY_REQUIRE_REFERENCE_DATA: "1"
+
+jobs:
+  quick:
+    name: Quick tier (py${{ matrix.python-version }})
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.tier != 'slow')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Restore the JAX compile cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .jax_cache
+          key: jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-
+            jax-${{ runner.os }}-py${{ matrix.python-version }}-
+
+      - name: Install the package and test tools
+        run: |
+          uv venv .venv --python ${{ matrix.python-version }}
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          # One resolve, so pinned siblings satisfy the package floors.
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt ruff==0.15.18 deptry ty==0.0.96
+
+      - name: Lint and formatting
+        run: |
+          ruff check src/yippy tests
+          ruff format --check src/yippy tests
+
+      - name: Check dependencies
+        run: deptry src/yippy
+
+      - name: Check types (advisory)
+        continue-on-error: true
+        run: ty check src/yippy
+
+      - name: Quick tier
+        run: |
+          pytest tests/ -m "not slow and not network" -ra --tb=short \
+            --timeout=300 --fail-slow=30s \
+            --durations=15 --durations-min=1.0 \
+            --junitxml=junit-quick.xml
+
+      # Existing strict xfails and the float64-only module intentionally skip.
+      # Missing reference data still fails via YIPPY_REQUIRE_REFERENCE_DATA.
+      - name: Job summary
+        if: always()
+        run: python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" --budget-seconds 600 --allow-skips
+
+  docs:
+    name: Docs with executed examples
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.tier != 'slow')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # hatch-vcs needs tags for the docs version
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .jax_cache
+          key: jax-docs-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: jax-docs-${{ hashFiles('pyproject.toml') }}-
+
+      - name: Install docs dependencies
+        run: |
+          uv venv .venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          # One resolve, so pinned siblings satisfy the package floors.
+          uv pip install --python .venv/bin/python -e ".[docs,test]" --override .github/sibling-pins.txt
+
+      # Every Python fence in README.md and docs runs as a test. A block that cannot run on a
+      # runner carries the info string `python notest` and a one-line reason above it.
+      - name: Execute fenced code blocks
+        run: |
+          pytest README.md docs --markdown-docs --markdown-docs-syntax=superfences \
+            -p no:cacheprovider --timeout=120 -ra --tb=short \
+            --junitxml=junit-docs.xml
+
+      # Executes {code-cell} blocks and notebooks, and fails on any Sphinx warning.
+      - name: Build docs with execution forced
+        run: |
+          sphinx-build -W --keep-going -b html \
+            -D nb_execution_mode=force -D nb_execution_raise_on_error=1 \
+            docs docs/_build/html
+
+      - name: Job summary
+        if: always()
+        run: python .github/scripts/ci_summary.py junit-docs.xml --title "Docs examples" --budget-seconds 300 --allow-skips
+
+  slow:
+    name: Slow tier
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier != 'not slow')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .jax_cache
+          key: jax-slow-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: jax-slow-${{ hashFiles('pyproject.toml') }}-
+
+      - name: Install the package and test tools
+        run: |
+          uv venv .venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          # One resolve, so pinned siblings satisfy the package floors.
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+
+      - name: Slow tier (hypothesis nightly profile)
+        env:
+          HYPOTHESIS_PROFILE: nightly
+        run: |
+          status=0
+          pytest tests/ -m slow -ra --tb=short --timeout=900 \
+            --durations=25 --junitxml=junit-slow.xml || status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
+            exit "$status"
+          fi
+
+      - name: Job summary
+        if: always()
+        run: python .github/scripts/ci_summary.py junit-slow.xml --title "Slow tier" --allow-skips
