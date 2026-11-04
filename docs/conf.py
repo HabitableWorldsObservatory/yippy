@@ -37,7 +37,6 @@ exclude_patterns = ["_build", ".build", "Thumbs.db", ".DS_Store"]
 language = "en"
 
 autoapi_dirs = ["../src"]
-autoapi_ignore = ["**/*version.py"]
 autodoc_typehints = "description"
 # AutoAPI already indexes fields; Napoleon should render their descriptions only.
 napoleon_use_ivar = True
@@ -110,6 +109,18 @@ def _generate_yip_catalog_table(app):
     (out_dir / "yip_catalog.md").write_text("\n".join(rows) + "\n")
 
 
+def _skip_autoapi_member(app, what, name, obj, skip, options):
+    """Keep generated version details and the colliding logger alias out of the API."""
+    # Parse the generated file so its public __version__ import resolves, but
+    # document only the package-level version and the logger module.
+    if name == "yippy._version" or name.startswith("yippy._version."):
+        return True
+    if what == "data" and name == "yippy.logger":
+        return True
+    return skip
+
+
 def setup(app):
     """Register Sphinx hooks for yippy's docs build."""
     app.connect("builder-inited", _generate_yip_catalog_table)
+    app.connect("autoapi-skip-member", _skip_autoapi_member)

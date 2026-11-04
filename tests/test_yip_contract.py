@@ -103,7 +103,9 @@ def test_the_inscribed_diameter_option_is_exactly_a_separation_rescaling(shipped
     The option exists for compatibility with a yield code that measures
     separations in inscribed lambda/D. If it did anything besides scale the
     argument, the two routes would disagree, and a consumer mixing them would
-    get two different throughputs for one planet.
+    get two different throughputs for one planet. Both routes evaluate the
+    same table at the same float64 separation, so they must agree bitwise,
+    including when one table was just computed and the other loaded from FITS.
     """
     from yippy import Coronagraph
 
@@ -116,7 +118,7 @@ def test_the_inscribed_diameter_option_is_exactly_a_separation_rescaling(shipped
     for separation in (5.0, 10.0):
         through_option = float(inscribed.throughput(separation))
         through_scaling = float(plain.throughput(separation * ratio))
-        assert through_option == pytest.approx(through_scaling, rel=1e-10), (
+        assert through_option == through_scaling, (
             f"at {separation} inscribed lambda/D the option gives "
             f"{through_option:.10f} but rescaling the separation gives "
             f"{through_scaling:.10f}"

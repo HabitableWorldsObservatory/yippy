@@ -6,12 +6,11 @@ directory, which cannot share cache entries with it (cold). The two must agree
 to the precision of the stored table, and a cache entry written under different
 settings must never be reused.
 
-Tolerance basis: the performance table is stored as single precision FITS
-columns (format ``E``), so a value read back differs from the value computed in
-the same process by up to one float32 unit roundoff (about 6e-8 relative). The
-spline evaluation adds roundoff of the same order. ``RTOL = 1e-6`` leaves an
-order of magnitude of margin while staying far below any physical difference
-(the defects these tests guard against differ at the 1e-3 to 1e-1 level).
+Performance tables preserve float64 values through FITS storage. Independent
+calculations still start with the active JAX dtype, which defaults to float32;
+``RTOL = 1e-6`` allows kernel roundoff across cold calculations while staying
+below the physical differences guarded here (1e-3 to 1e-1). The storage
+round-trip itself is checked for exact equality.
 """
 
 import json
@@ -29,7 +28,10 @@ from test_band_limited_apertures import reference_circle_weights
 import yippy.coronagraph as coronagraph_module
 import yippy.performance as perf
 from yippy import Coronagraph
-from yippy.util import save_coro_performance_to_fits
+from yippy.util import (
+    load_coro_performance_from_fits,
+    save_coro_performance_to_fits,
+)
 
 RTOL = 1e-6
 SEPS = np.array([1.5, 3.0, 4.25])
@@ -532,3 +534,19 @@ def test_center_counting_method_is_not_reused(tmp_path, trunc):
     warm = Coronagraph(path, psf_trunc_ratio=trunc)
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
+
+
+def test_performance_fits_preserves_every_float64_bit(tmp_path):
+    """Loading a measured table must not round its values before interpolation."""
+    separation = np.array([10.123456789012345, 5.123456789012345])
+    throughput = np.array([0.17721052431234567, 0.28832163542345678])
+    contrast = np.array([1.234567890123456e-11, 2.345678901234567e-10])
+    save_coro_performance_to_fits(
+        separation, throughput, contrast, "performance.fits", tmp_path
+    )
+    loaded = load_coro_performance_from_fits("performance.fits", tmp_path)
+    order = np.argsort(separation)
+    for actual, expected in zip(
+        loaded, (separation, throughput, contrast), strict=True
+    ):
+        np.testing.assert_array_equal(actual, expected[order])

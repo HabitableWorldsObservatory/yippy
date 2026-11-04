@@ -210,6 +210,8 @@ def save_coro_performance_to_fits(
 ):
     """Save coronagraph performance (throughput, raw_contrast) to a FITS file.
 
+    Double-precision columns preserve measured float64 values across cache reloads.
+
     Args:
         sep: Separations in lambda/D.
         throughput: Throughput at each separation.
@@ -226,9 +228,9 @@ def save_coro_performance_to_fits(
             on its own separation grid.
     """
     sort_idx = np.argsort(sep)
-    col_sep = fits.Column(name="separation_lamD", format="E", array=sep[sort_idx])
-    col_thr = fits.Column(name="throughput", format="E", array=throughput[sort_idx])
-    col_con = fits.Column(name="raw_contrast", format="E", array=raw_contrast[sort_idx])
+    col_sep = fits.Column(name="separation_lamD", format="D", array=sep[sort_idx])
+    col_thr = fits.Column(name="throughput", format="D", array=throughput[sort_idx])
+    col_con = fits.Column(name="raw_contrast", format="D", array=raw_contrast[sort_idx])
     cols = fits.ColDefs([col_sep, col_thr, col_con])
     tbhdu = fits.BinTableHDU.from_columns(cols)
     tbhdu.name = "CORO_PERFORMANCE"
@@ -320,16 +322,9 @@ def extract_and_oversample_subarray(
             The oversampling factor
 
     Returns:
-        subarr_oversamp (np.ndarray):
-            The oversampled subarray
-        center_x_os (float):
-            center_x in oversampled subarray coords
-        center_y_os (float):
-            center_y in oversampled subarray coords
-        radius_os (float):
-            radius_pix * oversample
-        subarr (np.ndarray):
-            the original subarray (for flux renormalization)
+        tuple: The oversampled subarray, its center x/y coordinates and aperture
+            radius in oversampled pixels, and the original subarray for flux
+            renormalization.
     """
     ny, nx = psf_img.shape
     margin = int(np.ceil(radius_pix * 3))

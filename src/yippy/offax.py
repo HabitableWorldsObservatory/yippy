@@ -272,9 +272,8 @@ class OffAx:
     def create_psf(self, x: float, y: float):
         """Create and return the PSF at the specified off-axis position.
 
-        .. deprecated::
-            The pure-Python implementation is deprecated.  Use
-            ``Coronagraph`` (which uses ``OffJAX``) instead.
+        The pure-Python implementation is deprecated. Use ``Coronagraph``
+        (which uses ``OffJAX``) instead.
 
         Interpolates and returns the Point Spread Function (PSF) at the specified
         off-axis position (x, y). If the exact (x, y) position matches one of the
@@ -294,16 +293,16 @@ class OffAx:
 
         Notes:
             - If `self.type` is "1d", the (x, y) position is converted to a
-            radial separation and angle for interpolation.
+              radial separation and angle for interpolation.
             - If `self.type` is "2dq", the (x, y) position is mirrored to the
-            first quadrant, and the PSF is flipped accordingly after
-            interpolation.
+              first quadrant, and the PSF is flipped accordingly after
+              interpolation.
             - Gaussian weighting is used to combine the nearest PSFs when the
-            exact (x, y) position does not match any precomputed PSF. The
-            weighting is based on the distance from the input position.
+              exact (x, y) position does not match any precomputed PSF. The
+              weighting is based on the distance from the input position.
             - The PSFs are shifted to align with the input position before
-            combining, and the final PSF is normalized by the cumulative weight
-            for each pixel.
+              combining, and the final PSF is normalized by the cumulative weight
+              for each pixel.
 
         """
         warnings.warn(
@@ -422,9 +421,8 @@ class OffAx:
     def create_psfs(self, x: NDArray, y: NDArray) -> NDArray:
         """Create and return the PSFs at the specified off-axis positions.
 
-        .. deprecated::
-            The pure-Python implementation is deprecated.  Use
-            ``Coronagraph`` (which uses ``OffJAX``) instead.
+        The pure-Python implementation is deprecated. Use ``Coronagraph``
+        (which uses ``OffJAX``) instead.
         """
         warnings.warn(
             "OffAx.create_psfs is deprecated; use Coronagraph (OffJAX) instead.",
@@ -447,9 +445,8 @@ class OffAx:
     ) -> np.ndarray:
         """Compute PSFs for batches of (x, y) arrays using multiprocessing.
 
-        .. deprecated::
-            The pure-Python implementation is deprecated.  Use
-            ``Coronagraph`` (which uses ``OffJAX``) instead.
+        The pure-Python implementation is deprecated. Use ``Coronagraph``
+        (which uses ``OffJAX``) instead.
 
         Args:
             x (np.ndarray):
@@ -510,11 +507,11 @@ class OffAx:
 
         This function (via util.convert_to_lod) has the following assumptions
         on the x/y values provided:
-            - If units are pixels, they follow the 00LL convention. As in the
-              (0,0) point is the lower left corner of the image.
-            - If the x/y values are in lambda/D, angular, or length units the
-              (0,0) point is the center of the image, where the star is
-              (hopefully) located.
+
+        - If units are pixels, they follow the 00LL convention: (0, 0) is the
+          lower left corner of the image.
+        - If the x/y values are in lambda/D, angular, or length units, (0, 0)
+          is the center of the image, where the star is located.
 
         Args:
             x (astropy.units.Quantity):

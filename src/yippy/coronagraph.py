@@ -647,6 +647,7 @@ class Coronagraph:
         identity.update(
             {
                 "yippy_version": __version__,
+                "table_storage": "float64",
                 "aperture": "circular" if psf_trunc_ratio is None else "truncation",
                 "aperture_radius_lod": aperture_radius_lod,
                 "psf_trunc_ratio": psf_trunc_ratio,

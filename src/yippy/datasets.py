@@ -19,12 +19,12 @@ by ExEP, and when that catalog comes online the discovery API here will
 grow back into a thin proxy over it.
 
 Public API:
-- ``fetch_yip(name=None, *, telescope=None, coronagraph=None, sampling=None,
-              cache_path=None) -> str``
-- ``cache_dir() -> Path``
-- ``list_yips(**filters) -> list[str]``
-- ``yip_exists(name) -> bool``
-- ``yip_info(name) -> dict``
+
+- :func:`fetch_yip`: download and unpack a YIP by name or metadata filters.
+- :func:`cache_dir`: locate the default YIP cache.
+- :func:`list_yips`: list YIPs matching metadata filters.
+- :func:`yip_exists`: check whether a YIP is in the catalog.
+- :func:`yip_info`: retrieve a YIP's metadata.
 """
 
 from __future__ import annotations

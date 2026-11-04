@@ -167,7 +167,14 @@ def test_truncation_matches_independently_sampled_airy(pixel_lod, shift_pix):
     assert float(flux) == pytest.approx(expected_flux, rel=2e-6)
 
 
-@pytest.mark.parametrize("aperture", ["circle", "truncation"])
+@pytest.mark.parametrize(
+    "aperture",
+    [
+        "circle",
+        # The 40x truncation reference costs over 40 s per metric in CI.
+        pytest.param("truncation", marks=pytest.mark.slow),
+    ],
+)
 @pytest.mark.parametrize("metric", ["throughput", "area"])
 def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
     """Quantify 10x boundary quadrature against 40x on a native shipped PSF."""
