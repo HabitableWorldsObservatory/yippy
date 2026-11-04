@@ -101,6 +101,7 @@ known-first-party = ["yippy"]
 convention = "google"
 
 [tool.pytest.ini_options]
+filterwarnings = ["error"]
 markers = [
     "network: requires network access (skipped by default in CI)",
     "medium: tests with a 30-second default time budget",
