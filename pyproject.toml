@@ -8,6 +8,8 @@ authors = [{ name = "Corey Spohn", email = "corey.a.spohn@nasa.gov" }]
 description = "A Python and JAX wrapper to create a coronagraph object from a yield input package"
 dependencies = [
   "astropy",
+  "matplotlib",
+  "numpy",
   "scipy",
   "hwoutils>=1.10.0",
   "lod_unit",
@@ -50,10 +52,18 @@ docs = [
   "myst-nb",
   "sphinx-book-theme",
   "sphinx-autoapi",
-  "sphinx_autodoc_typehints",
-  "matplotlib",
+  "ipython",
 ]
-test = ["nox", "pytest", "hypothesis", "pytest-cov"]
+test = [
+  "pytest",
+  "hypothesis",
+  "pytest-cov",
+  "pytest-xdist",
+  "pytest-testmon",
+  "pytest-markdown-docs",
+  "pytest-timeout",
+  "pytest-fail-slow",
+]
 
 # Validation evidence, collected by the ineedvalidation pytest plugin when it
 # is installed and ignored when it is not, so this table adds no dependency.
@@ -89,5 +99,24 @@ convention = "google"
 [tool.pytest.ini_options]
 markers = [
     "network: requires network access (skipped by default in CI)",
+    "medium: tests with a 30-second default time budget",
+    "slow: tests with a 300-second default time budget, run nightly",
 ]
 addopts = "-m 'not network'"
+
+[tool.testbudget]
+library = "yippy"
+mode = "report"
+unit_s = 5
+medium_s = 30
+slow_s = 300
+
+[tool.deptry]
+known_first_party = ["yippy"]
+optional_dependencies_dev_groups = ["docs", "test"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src/yippy"]
