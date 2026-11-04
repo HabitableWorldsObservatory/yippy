@@ -9,7 +9,7 @@
   <a href="https://github.com/HabitableWorldsObservatory/yippy/blob/main/LICENSE"><img src="https://img.shields.io/github/license/HabitableWorldsObservatory/yippy?style=flat-square" alt="License"/></a>
   <a href="https://pypi.org/project/yippy/"><img src="https://img.shields.io/pypi/pyversions/yippy?style=flat-square" alt="Python"/></a>
   <a href="https://doi.org/10.5281/zenodo.20172435"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20172435-blue?style=flat-square" alt="DOI"></a>
-  <a href="https://github.com/HabitableWorldsObservatory/yippy/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/HabitableWorldsObservatory/yippy/tests.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
+  <a href="https://github.com/HabitableWorldsObservatory/yippy/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HabitableWorldsObservatory/yippy/ci.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
   <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=flat-square&logo=pre-commit" alt="pre-commit"/></a>
 </p>
 
@@ -33,7 +33,9 @@ pip install yippy
 The primary workflow is to point yippy at a YIP directory you already have
 on disk -- either one you built yourself or one you downloaded:
 
-```python
+This example needs a user-supplied YIP directory.
+
+```python notest
 from yippy import Coronagraph
 
 # Load a YIP from a folder on disk
@@ -75,7 +77,9 @@ yippy provides two coronagraph classes for different use cases:
 The primary class for loading YIPs, computing performance curves, and
 exporting to external formats:
 
-```python
+This example needs a user-supplied YIP directory.
+
+```python notest
 from yippy import Coronagraph
 
 coro = Coronagraph("path/to/yip")
@@ -107,7 +111,9 @@ coro.dump_ayo_csv("output.csv")
 
 A pure JAX/Equinox module for use inside `jax.jit`-compiled pipelines:
 
-```python
+This example needs a user-supplied YIP directory.
+
+```python notest
 from yippy import EqxCoronagraph
 import equinox as eqx
 
@@ -129,7 +135,9 @@ def simulate(coro, x, y):
 Individual metric functions are available in `yippy.performance` for
 standalone analysis:
 
-```python
+This example needs a configured coronagraph (`coro`).
+
+```python notest
 from yippy.performance import (
     compute_throughput_curve,
     compute_raw_contrast_curve,
@@ -223,7 +231,9 @@ the cache elsewhere:
 export YIPPY_CACHE_DIR=~/Documents/YIPs
 ```
 
-```python
+This example downloads a YIP into a user-configured shared cache directory.
+
+```python notest
 # Per-call override (wins over the env var)
 yip_path = fetch_yip("eac1_aavc_2d", cache_path="/data/shared/yips")
 
@@ -241,7 +251,9 @@ memory). For a uniform `float64` pipeline -- needed for high-fidelity work or
 backends that require double precision -- enable x64 *before* building a
 coronagraph:
 
-```python
+This example needs a user-supplied YIP directory.
+
+```python notest
 import jax
 
 jax.config.update("jax_enable_x64", True)  # or set JAX_ENABLE_X64=1 in the env
@@ -264,7 +276,9 @@ it can use three different `astropy` units: pixels (as defined by the yield
 input package), angular separation (angle units), or apparent separation
 (length units). If no units are provided it assumes the input is in $`\lambda / D`$.
 
-```python
+This example needs a configured coronagraph (`coro`).
+
+```python notest
 import astropy.units as u
 
 # pixels

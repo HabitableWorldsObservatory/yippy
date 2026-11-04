@@ -4,7 +4,9 @@ The primary way to use yippy is to point it at a YIP directory you already
 have on disk -- either one you built yourself or one provided by a
 coronagraph designer:
 
-```python
+This example needs a user-supplied YIP directory.
+
+```python notest
 from yippy import Coronagraph
 
 coro = Coronagraph("path/to/eac1_aavc_2d")
@@ -100,7 +102,9 @@ There are two override mechanisms, in priority order:
 
 1. **`cache_path` keyword** -- per-call override. Wins over everything else.
 
-   ```python
+   This example writes to a user-configured shared cache directory.
+
+   ```python notest
    path = fetch_yip("eac1_aavc_2d", cache_path="/data/shared/yips")
    ```
 
@@ -139,7 +143,9 @@ There are two override mechanisms, in priority order:
    **From inside a Python script** (only affects this script's run, and
    must be set *before* importing yippy):
 
-   ```python
+   This example sets a user-specific cache directory.
+
+   ```python notest
    import os
    os.environ["YIPPY_CACHE_DIR"] = "/path/to/YIPs"
    from yippy import fetch_yip   # picks up the value above
@@ -154,9 +160,9 @@ If neither is set, yippy uses the platform default.
 ### Inspecting the resolved cache
 
 ```python
->>> from yippy import cache_dir
->>> cache_dir()
-PosixPath('/Users/me/Library/Caches/yippy')
+from yippy import cache_dir
+
+print(cache_dir())
 ```
 
 `cache_dir()` honors `YIPPY_CACHE_DIR` so it reflects the location the
@@ -169,18 +175,15 @@ Three small helpers let you browse the catalog without downloading anything.
 ### `list_yips` -- filter the catalog
 
 ```python
->>> from yippy import list_yips
->>> list_yips(telescope="eac1")
-['eac1_aavc_2d',
- 'eac1_optimal_order_6_1d']
+from yippy import list_yips
 
->>> list_yips(coronagraph="optimal_order_6")
-['eac1_optimal_order_6_1d']
-
->>> list_yips(sampling="2d")
-['eac1_aavc_2d']
-
->>> list_yips()  # everything
+print(list_yips(telescope="eac1"))
+# ['eac1_aavc_2d', 'eac1_optimal_order_6_1d']
+print(list_yips(coronagraph="optimal_order_6"))
+# ['eac1_optimal_order_6_1d']
+print(list_yips(sampling="2d"))
+# ['eac1_aavc_2d']
+print(list_yips())  # everything
 ```
 
 Valid filter keys are `telescope`, `coronagraph`, and `sampling`. Combine
@@ -189,23 +192,20 @@ any of them; the call returns names whose metadata matches every filter.
 ### `yip_exists` -- membership check
 
 ```python
->>> from yippy import yip_exists
->>> yip_exists("eac1_aavc_2d")
-True
->>> yip_exists("not_a_yip")
-False
+from yippy import yip_exists
+
+print(yip_exists("eac1_aavc_2d"))  # True
+print(yip_exists("not_a_yip"))  # False
 ```
 
 ### `yip_info` -- inspect metadata
 
 ```python
->>> from yippy import yip_info
->>> yip_info("eac1_aavc_2d")
-{'telescope': 'eac1',
- 'coronagraph': 'aavc',
- 'designer': 'Susan Redmond',
- 'md5': 'md5:1f4892faff18e55cbec9781a055bea4d',
- 'sampling': '2d'}
+from yippy import yip_info
+
+print(yip_info("eac1_aavc_2d"))
+# {'telescope': 'eac1', 'coronagraph': 'aavc', 'designer': 'Susan Redmond',
+#  'md5': 'md5:1f4892faff18e55cbec9781a055bea4d', 'sampling': '2d'}
 ```
 
 Descriptive metadata beyond these fields (wavelengths, dark-zone extent,

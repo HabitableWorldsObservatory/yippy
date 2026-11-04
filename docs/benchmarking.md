@@ -10,8 +10,8 @@ PSFs at their own offsets and interpolate the resulting values.
 Performance curves are PCHIP-interpolated between the YIP's offsets by
 default. PCHIP preserves the shape of the tabulated curves without overshoot
 near the inner working angle (Fritsch, F. N. and Carlson, R. E. 1980,
-*SIAM J. Numer. Anal.* 17, 238). Set `interp_order=1` to restore the previous
-linear interpolation. Outside the tabulated range, curves retain linear
+*SIAM Journal on Numerical Analysis* 17, 238). Set `interp_order=1` to restore
+the previous linear interpolation. Outside the tabulated range, curves retain linear
 end-segment extrapolation.
 
 ## Key Results
@@ -33,11 +33,7 @@ interpolates linearly between the tabulated offsets.
 
 Raw contrast and noise floor match exactly because both AYO and yippy
 clamp values at the contrast floor ($10^{-10}$), which dominates across
-most of the science region. The figure below focuses on throughput and
-sky transmission, the two metrics with meaningful variation.
-
-![Yippy vs AYO validation](_static/fig_benchmarking_all_metrics.png)
-
+most of the science region.
 
 ## Reproducible aperture accuracy benchmark
 

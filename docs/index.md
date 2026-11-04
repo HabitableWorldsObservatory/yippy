@@ -58,7 +58,9 @@ samples.
 For photometry on an arbitrary image at a known centroid, pass an explicit
 `fixed_center=(row, column)` in original pixel coordinates:
 
-```python
+This example needs a user-supplied image (`image`).
+
+```python notest
 from yippy import circular_aperture
 
 flux, area, _ = circular_aperture(

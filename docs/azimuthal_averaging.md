@@ -18,7 +18,9 @@ not its arbitrary position angle.
 
 Rotate the 2D stellar intensity image through many angles and average:
 
-```python
+This example needs a user-supplied stellar intensity image (`istar_2d`).
+
+```python notest
 from scipy.ndimage import rotate
 import numpy as np
 
@@ -44,7 +46,9 @@ Average the map on circles about the optical axis, tabulate that mean
 against radius, fit a 1D interpolator, and project back onto the pixel
 grid:
 
-```python
+This example needs a user-supplied YIP directory (`yip_path`).
+
+```python notest
 from yippy import Coronagraph
 
 coro = Coronagraph(yip_path, psf_trunc_ratio=0.3)
@@ -82,15 +86,6 @@ to the center where relative percentages blow up. The mean ~3% difference
 is real and originates from rotation interpolation artifacts in the
 rotate-and-average method.
 
-![Comparison of rotate vs radial profile azimuthal averaging](_static/fig_az_avg_comparison.png)
-
-**Left pair**: 2D maps (log scale) from each method appear visually
-similar, with clear Airy ring structure. **Third column**: relative
-difference map reveals systematic ring-pattern offsets at Airy ring
-peaks/troughs. **Right**: radial profiles overlay, showing the radial
-profile method (blue dashed) produces a smoother curve than the
-rotate method (orange solid).
-
 ## Profile Sampling
 
 The profile is tabulated every quarter pixel in radius, from the axis to the
@@ -118,7 +113,9 @@ cleaner azimuthal averages.
 
 For the noise floor, divide by the post-processing factor:
 
-```python
+This example needs a configured coronagraph, separation, and post-processing factor.
+
+```python notest
 noise_floor_ayo = coro.core_mean_intensity(separation) / ppf
 ```
 

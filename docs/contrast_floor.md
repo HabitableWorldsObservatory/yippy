@@ -37,7 +37,9 @@ the shipped `eac1_aavc_2d` YIP, whose design contrast runs from roughly
 2e-11 to 2e-10 across the dark zone, a 4e-10 floor dominates at every
 separation:
 
-```python
+This example needs the coronagraph configured above.
+
+```python notest
 coro.raw_contrast([3.0, 5.0, 10.0, 20.0])
 # array([4.e-10, 4.e-10, 4.e-10, 4.e-10])
 ```
@@ -69,7 +71,9 @@ relate.
 `contrast_floor` is stored on the coronagraph and is `None` when no
 floor was requested:
 
-```python
+This example needs the coronagraph configured above.
+
+```python notest
 >>> coro.contrast_floor
 4e-10
 ```
