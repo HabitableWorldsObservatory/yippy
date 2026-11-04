@@ -38,6 +38,7 @@ examples/06_Noise_Floor_Conventions.ipynb
 :caption: Reference
 contrast_floor.md
 azimuthal_averaging.md
+circle_reader_accuracy.md
 benchmarking.md
 ```
 
