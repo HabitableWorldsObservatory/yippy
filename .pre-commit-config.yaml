@@ -16,11 +16,15 @@ repos:
         exclude: ^tests/synthetic_yip\.py$
       - id: end-of-file-fixer
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.15
+    rev: v0.15.18
     hooks:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
     hooks:

@@ -170,3 +170,8 @@ scripts/*
 # Build artifacts from scripts/build_zenodo_archives.py (zips for Zenodo upload)
 dist/
 *.png
+
+# Local tooling caches
+.claude/
+.jax_cache/
+.ruff_cache/
