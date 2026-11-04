@@ -1,0 +1,40 @@
+name: hygiene
+
+# Checks that do not depend on JAX: workflow security, spelling, and hooks.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 6 * * 1"   # weekly, so the repo has activity and new lint rules are noticed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+
+      - name: Lint workflows (zizmor)
+        run: uvx zizmor --format=github --min-severity=medium .github
+
+      - name: Spelling (codespell)
+        run: uvx codespell --check-hidden
+
+      - name: Pre-commit hooks
+        run: uvx pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: conventional-pre-commit   # only runs with a commit message

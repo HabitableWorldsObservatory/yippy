@@ -1,0 +1,4 @@
+[codespell]
+skip = .git,*.ipynb,uv.lock,*/_build,*.fits
+# lod is the public lod_unit symbol for lambda/D.
+ignore-words-list = lod

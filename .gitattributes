@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.ipynb  text eol=lf linguist-documentation
+docs/**  linguist-documentation
+*.fits   binary
+*.npy    binary
+*.npz    binary
+*.png    binary
+*.pdf    binary
+uv.lock  linguist-generated -diff
+CHANGELOG.md linguist-generated

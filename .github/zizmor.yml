@@ -1,0 +1,6 @@
+# Require immutable action references, including first-party actions.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin

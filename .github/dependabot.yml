@@ -1,6 +1,30 @@
+# Drop-in for every owned library. One config, low noise: one grouped pull request per month,
+# new releases wait a week (cooldown) so a yanked or compromised release is seen before it lands.
+# Security updates ignore the cooldown and are configured separately in repository settings.
 version: 2
 updates:
-    - package-ecosystem: "github-actions"
-      directory: "/"
-      schedule:
-          interval: "monthly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"   # conventional commit type that release-please ignores
+
+  # Only for repos with a committed uv.lock or a pre-commit config worth bumping.
+  # The libraries pin no lockfile, so the uv ecosystem is deliberately absent here.
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    groups:
+      hooks:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
