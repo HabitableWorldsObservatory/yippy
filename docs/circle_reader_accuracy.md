@@ -1,31 +1,75 @@
 # Spatial circle-reader accuracy
 
-`azimuthal_mean_profile` in `src/yippy/performance.py` reads the mean of a
-**Keys cubic interpolant** on each requested circle. It does not promise the
+`azimuthal_mean_profile` in `src/yippy/performance.py` defaults to the mean of a
+**Keys cubic interpolant** on each requested circle. Pass
+`interpolation="quintic"` to opt into a degree-5 cardinal B-spline. It does not promise the
 mean of the continuous optical intensity that was sampled to make the image.
 Increasing the angle count converges the angular integral of that interpolant;
-it does not remove spatial interpolation error. No production numerics or cache
-identities were changed in this investigation.
+it does not remove spatial interpolation error. The default Keys calculations and persistent performance-cache identities
+remain unchanged.
 
 **Verdict: this is an accuracy limit of the chosen spatial interpolant, not a
-center, axis-order, unit, or indexing bug.** Retain the production reader for
-this change. Recommend a separately reviewed quintic spline option when a
-sub-percent circle mean is required on the coarse grid, with an absolute-error
-criterion near nulls and validation against the original optical model.
+center, axis-order, unit, or indexing bug.** Use the opt-in quintic reader when sub-percent circle means are needed on
+the coarse grid, with an absolute-error criterion near nulls and validation
+against the original optical model. Changing the default remains an owner
+decision because downstream cached products depend on that choice.
+
+## Select the spatial reader
+
+```python
+import equinox as eqx
+from yippy.performance import azimuthal_mean_profile
+
+read = eqx.filter_jit(azimuthal_mean_profile)
+profile = read(image, center, radii_pix, n_theta=256, interpolation="quintic")
+```
+
+`interpolation` is a static string under JIT; with raw `jax.jit`, include it
+and `n_theta` in `static_argnames`. Enable JAX float64 for the precision
+reported here. The option is also available on `core_mean_intensity_profile`,
+`compute_core_mean_intensity_curve`, `Coronagraph.core_mean_intensity_curve`,
+and both `Coronagraph.core_mean_intensity` and
+`EqxCoronagraph.core_mean_intensity`. The intensity map and AYO noise-floor
+helpers forward it. This controls spatial interpolation; `interp_order`
+still controls the subsequent interpolation between radial profile knots.
+
+The quintic implementation is pure JAX, with no SciPy at read time. It follows
+P. Thevenaz, T. Blu and M. Unser, "Interpolation Revisited", *IEEE Transactions
+on Medical Imaging* **19**(7), 739-758 (2000), doi:10.1109/42.875199.
+Two causal/anticausal recursive filters per axis solve for the cardinal
+B-spline coefficients once per image per call. All radii and tangent endpoints
+reuse those coefficients, with a separable six-by-six evaluation stencil.
+The prefilter itself is JIT-compiled for reuse across calls of the same shape
+and dtype; image-dependent coefficients are recomputed when the image changes.
+
+Nearest-edge extension applies to the **input samples**, before prefiltering.
+A 48-pixel halo suppresses finite filter initialization effects below float64
+roundoff at the original image (the largest pole has magnitude 0.431).
+Stencil reads retain this halo. Clamping the coefficients themselves would
+be a different boundary condition. Angular normalization is unchanged:
+only in-image arcs contribute, tangencies use endpoint values, and circles
+entirely outside return zero. No high-order accuracy is promised at an edge,
+or for negative lobes introduced by interpolation near a null.
+
+`Coronagraph` keeps on-demand profiles separately by reader and diameter.
+Quintic calls recompute from the stellar map when a precomputed Keys profile
+would otherwise be used, including point sources and the single-profile fast path.
+`compute_all_performance_curves(interpolation="quintic")` can explicitly
+rebuild the in-memory core intensity tables; later calls still default to
+Keys and select or compute the appropriate profile. These core intensity
+tables are rebuilt from maps, not read from or written to the performance
+FITS cache. Throughput, raw contrast and persistent cache identities are
+unchanged. Consumers saving their own quintic-derived products must distinguish
+them from Keys-derived products.
 
 ## Reproduce without data files
 
 From the repository root, using an environment with yippy's dependencies:
 
 ```sh
-PYTHONPATH=src python tools/check_circle_reader.py
+JAX_PLATFORMS=cpu PYTHONPATH=src python tools/check_circle_reader.py
 PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests/test_circle_reader.py
 ```
-
-The four regressions passed in 0.61 s on the CPU setup described below, with
-two JIT compilations. They share a compiled reader across cases and materialize
-NumPy results inside the float64 context so assertion arithmetic retains that
-precision.
 
 The diagnostic prints the radius scan as CSV to stdout. Coordinate checks,
 alternative-reader results, and timings go to stderr. It builds two analytic
@@ -43,7 +87,9 @@ not integrals over pixel footprints. The reader's result is divided by that
 same area once. A second grid halves the pixel scale while keeping the physical
 field of view fixed. The script compares the default angle count (256 on the
 first grid, 512 on the second), 2048 angles, independently constructed
-2048-angle coordinates evaluated with Keys, and a quintic bivariate spline.
+2048-angle coordinates evaluated with Keys, the JAX quintic reader at both
+angle counts, and an independent SciPy quintic bivariate spline. The complete
+measured scan is in [circle_reader_accuracy.csv](circle_reader_accuracy.csv).
 
 ## Coordinate and boundary checks
 
@@ -76,8 +122,16 @@ first grid, 512 on the second), 2048 angles, independently constructed
 
 The analytic Airy map exposes percent-level spatial error even though its
 circle mean is known exactly. Signed relative errors below are percentages
-against the analytic mean, not against the quintic interpolant. These results
-are from the unchanged production reader at 0.25 lambda/D per pixel:
+against the analytic mean, not against the quintic interpolant. The tables below preserve the original study
+measurements (the quintic columns used SciPy). The new JAX quintic reader
+reproduces those interior spline results; the CSV records both implementations
+and both angle counts. At 3, 5 and 10 lambda/D its coarse-grid errors are
+0.0844264%, 0.0672181% and 0.0387699%, and its fine-grid errors are
+0.000600227%, 0.000424109% and 0.000228349%. Tests require each absolute
+percentage error to be less than twice the corresponding study measurement,
+for both Airy and displaced Gaussian maps.
+
+The coarse-grid study results at 0.25 lambda/D per pixel are:
 
 | Radius (lambda/D) | Keys, 256 angles | Keys, 2048 angles | Quintic, 2048 angles |
 | ---: | ---: | ---: | ---: |
@@ -179,15 +233,14 @@ on the optical design, whose map and direct propagation were not used here.
 
 ## Options and cached products
 
-The present kernel is retained. The diagnostic measures the following options
-as separate prototypes; none changes production numerics:
+Keys remains the default. The diagnostic compares the opt-in quintic reader
+with the following alternative sampling strategies:
 
-1. **Quintic spline on the existing grid (recommended next change).** At radii
+1. **Quintic spline on the existing grid (available opt-in).** At radii
    3, 5 and 10 its errors are 0.08443%, 0.06722% and 0.03877%, versus Keys'
    3.97591%, 2.51103% and 1.35708%. This is the most accurate measured
-   point-circle read on the coarse samples. It needs coefficient construction,
-   a defined boundary policy, a JAX-compatible implementation if required by
-   callers, and validation near nulls; sub-percent error is not guaranteed
+   point-circle read on the coarse samples. The JAX implementation supplies coefficient construction and
+   nearest-edge sample extension. It still needs validation near nulls; sub-percent error is not guaranteed
    arbitrarily close to a null.
 2. **Finer samples before the read.** Regenerating the map at scale 0.125
    reduces Keys' errors at those radii to 0.29317%, 0.19001% and 0.10480%.
@@ -227,7 +280,66 @@ relative over the entire scan. Footprint averaging reduces sensitivity to a
 null by including adjacent intensities, but the resulting mean is different
 from the original point-circle reference even with exact optical samples.
 
-### Measured cost
+### JAX quintic accuracy and cost
+
+The implemented readers give these signed percentage errors at 2048 angles.
+The CSV contains all 15 radii, both maps and scales, default-angle results,
+and the independent SciPy spline comparison.
+
+| Map | Pixel scale (lambda/D) | Radius (lambda/D) | Keys error (%) | JAX quintic error (%) |
+| --- | ---: | ---: | ---: | ---: |
+| Airy | 0.25 | 3 | 3.97591 | 0.0844264 |
+| Airy | 0.25 | 5 | 2.51103 | 0.0672181 |
+| Airy | 0.25 | 10 | 1.35708 | 0.0387699 |
+| Airy | 0.125 | 3 | 0.293174 | 0.000600227 |
+| Airy | 0.125 | 5 | 0.190011 | 0.000424109 |
+| Airy | 0.125 | 10 | 0.104803 | 0.000228349 |
+| Gaussian | 0.25 | 3 | 0.0000624349 | -2.91480e-9 |
+| Gaussian | 0.25 | 5 | 0.000208256 | 1.07434e-8 |
+| Gaussian | 0.25 | 10 | -0.00132996 | -6.25956e-8 |
+| Gaussian | 0.125 | 3 | 0.00000742804 | -4.75842e-11 |
+| Gaussian | 0.125 | 5 | 0.0000150207 | 1.60183e-10 |
+| Gaussian | 0.125 | 10 | -0.000103320 | -9.59421e-10 |
+
+At the default 256 angles, the coarse-grid quintic Airy errors at 3, 5 and
+10 are 0.0844265%, 0.0672190% and 0.0387492%. Thus the accuracy improvement
+also holds without raising the angle count. Near the 3.23 lambda/D null,
+the coarse-grid quintic error is still 22.8%; use an absolute error budget
+there and validate against optical propagation.
+
+A CPU run on 2026-11-04 used arm64, Python 3.12.12, JAX 0.12.0.1, float64
+and four threads. Each row evaluates the same 15 radii on a 128 by 128 map
+with 256 angles. Warm times are medians of seven synchronized calls.
+Compilation is measured with `lower(...).compile()`; tracing/lowering is
+reported separately. The first execution is also synchronized.
+
+| Reader | Trace/lower (ms) | Compile (ms) | First execution (ms) | Warm JIT (ms) | Warm eager (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Keys | 22.28 | 104.85 | 0.52 | 0.1768 | 1.1818 |
+| Quintic | 37.47 | 136.34 | 2.94 | 0.8707 | 4.3667 |
+
+These end-to-end quintic times include computing coefficients for the image,
+arc construction, spatial evaluation, and reduction for every call. The
+quintic prefilter has a reusable JIT executable but does not cache image
+values. Its padded coefficient array has 224 by 224 entries (392 KiB in
+float64), compared with the 128 KiB input. Quintic's warm JIT cost was about
+4.9 times Keys in this run. Timings on this shared host are indicative,
+not portable speed ratios; no GPU or optical-propagation cost was measured.
+
+The reader regressions cover both analytic maps at both scales, exact
+pre-change CPU Keys bits, nearest extension for nonconstant edge samples,
+short arcs and tangencies, and small/degenerate images. Reverse-mode image
+gradients are finite; center/radius gradients away from tangencies also
+pass a finite-difference check. Arc topology changes at tangency are not
+smooth. All 17 reader tests passed in 4.52 s, with the slowest test at 1.25 s.
+Public-caller tests cover both radial interpolation modes, cache separation,
+point sources, extended sources, the single-profile fast path and rebuilding
+the in-memory tables at a nonzero default diameter. All 12 caller tests
+passed in 8.98 s; the slowest test call was 2.60 s. The single-profile fixture
+uses valid spline support knots because the existing stellar FITS loader
+requires at least two diameter knots.
+
+### Original study cost
 
 One local run used an arm64 CPU, Python 3.12.12, JAX 0.12.0.1, float64, and
 a four-thread limit. The following milliseconds are medians of seven warmed
@@ -252,8 +364,8 @@ propagation cost was measured.
 
 Spline preparation is measured separately and can be reused across circle
 reads. SciPy evaluation uses precomputed angular coordinates, whereas the Keys
-calls include construction of in-image arcs and coordinates. A JIT-compatible
-quintic implementation was not benchmarked. The prototype spline footprint
+calls include construction of in-image arcs and coordinates. The original study did not benchmark a JIT-compatible quintic reader;
+the new implementation is measured separately below. The prototype spline footprint
 read is about 104 times the coarse point-spline read in this run, with 64
 quadrature samples per footprint. Analytic Airy map generation itself takes
 0.334 ms on the coarse grid and 1.291 ms on the fine grid; these are sampling
@@ -271,7 +383,7 @@ More angles alone do not resolve a spatial interpolation limit. An absolute
 error budget alongside relative error is useful near nulls, but does not
 justify silently relaxing a requested relative-accuracy requirement.
 
-This change adds diagnostics, tests and this note only. Existing stellar maps,
-performance files, cache keys and computed outputs remain unchanged. A future
-reader change would change core-intensity profiles and quantities derived from
-them (including contrast); its cache implications would need review then.
+Existing stellar maps, performance files, cache keys and default computed
+outputs remain unchanged. Explicit quintic reads change core-intensity
+profiles and quantities a consumer derives from them. Switching the default
+would require a separate decision and review of downstream cached products.

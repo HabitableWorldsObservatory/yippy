@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1246,12 +1247,81 @@ def profile_radii(shape: tuple[int, int], center: tuple[float, float]) -> np.nda
     return np.arange(int(np.floor(r_max / PROFILE_STEP_PIX)) + 1) * PROFILE_STEP_PIX
 
 
-def azimuthal_mean_profile(image, center, radii_pix, n_theta=None):
+_QUINTIC_PAD = 48
+
+
+@eqx.filter_jit
+def _quintic_coefficients(image):
+    """Prefilter nearest-extended samples into cardinal quintic coefficients.
+
+    Uses the causal/anticausal inverse B-spline filter of P. Thevenaz,
+    T. Blu and M. Unser, "Interpolation Revisited", IEEE Transactions on
+    Medical Imaging 19(7), 739-758 (2000), doi:10.1109/42.875199.
+    The two stable poles factor the degree-5 interpolation system; each
+    scan solves one triangular recurrence for every line simultaneously.
+
+    A 48-sample nearest-edge halo makes the finite initialization error
+    smaller than float64 roundoff at the image (largest pole magnitude
+    0.431, so its tail is below 3e-18). Keep the halo for stencil reads:
+    extending coefficients directly would not extend the original samples.
+    """
+    poles = (-0.4305753470999738, -0.04309628820326465)
+    coefficients = jnp.pad(image, _QUINTIC_PAD, mode="edge")
+    for axis in (0, 1):
+        lines = jnp.moveaxis(coefficients, axis, 0)
+        for pole in poles:
+            lines = lines * ((1 - pole) * (1 - 1 / pole))
+
+            def causal(previous, sample, pole=pole):
+                value = sample + pole * previous
+                return value, value
+
+            first = lines[0] / (1 - pole)
+            _, forward = jax.lax.scan(causal, first, lines[1:])
+            forward = jnp.concatenate([first[None], forward])
+
+            def anticausal(following, sample, pole=pole):
+                value = pole * (following - sample)
+                return value, value
+
+            last = -pole * forward[-1] / (1 - pole)
+            _, backward = jax.lax.scan(anticausal, last, forward[:-1], reverse=True)
+            lines = jnp.concatenate([backward, last[None]])
+        coefficients = jnp.moveaxis(lines, 0, axis)
+    return coefficients
+
+
+def _quintic_weights(distance):
+    """Evaluate the centered degree-5 B-spline on its six-sample support."""
+    t = jnp.abs(distance)
+    inner = (66 + t**2 * (-60 + t**2 * (30 - 10 * t))) / 120
+    middle = ((3 - t) ** 5 - 6 * (2 - t) ** 5) / 120
+    outer = jnp.maximum(3 - t, 0) ** 5 / 120
+    return jnp.where(t < 1, inner, jnp.where(t < 2, middle, outer))
+
+
+def _quintic_sample(coefficients, coordinates):
+    """Read a prefiltered image with a separable six-by-six stencil."""
+    rows, cols = coordinates
+    offsets = jnp.arange(-2, 4)
+    iy = jnp.floor(rows).astype(jnp.int32)[..., None] + offsets
+    ix = jnp.floor(cols).astype(jnp.int32)[..., None] + offsets
+    wy = _quintic_weights(rows[..., None] - iy)
+    wx = _quintic_weights(cols[..., None] - ix)
+    samples = coefficients[
+        jnp.clip(iy + _QUINTIC_PAD, 0, coefficients.shape[0] - 1)[..., :, None],
+        jnp.clip(ix + _QUINTIC_PAD, 0, coefficients.shape[1] - 1)[..., None, :],
+    ]
+    return jnp.sum(jnp.sum(samples * wx[..., None, :], axis=-1) * wy, axis=-1)
+
+
+def azimuthal_mean_profile(
+    image, center, radii_pix, n_theta=None, interpolation="keys"
+):
     """Azimuthal mean of an image on circles about ``center``.
 
     Each circle is sampled at ``n_theta`` equally spaced positions along its
-    in-image angular arcs with
-    Keys cubic interpolation (:func:`hwoutils.map_coordinates.map_coordinates`)
+    in-image angular arcs with the selected spatial interpolant
     and the samples that fall inside the image are averaged. This is the mean
     intensity at exactly that radius. Averaging the pixels whose centers fall
     in an annulus instead mixes a range of radii, which biases the profile by
@@ -1265,12 +1335,26 @@ def azimuthal_mean_profile(image, center, radii_pix, n_theta=None):
         n_theta: Position angles per circle. Defaults to twice the larger
             image dimension, more than the highest azimuthal harmonic a map
             sampled at or above Nyquist carries at its corner radius.
+        interpolation: ``"keys"`` (default, unchanged Keys cubic) or
+            ``"quintic"`` (cardinal degree-5 B-spline). Quintic coefficients
+            are prefiltered once per image per call, shared by all radii.
+            Both extend samples beyond the edge with the nearest pixel and
+            average only in-image arcs; tangencies use endpoint values.
+            This string and ``n_theta`` must be static under JIT (for example,
+            use ``eqx.filter_jit``). Quintic follows P. Thevenaz, T. Blu and
+            M. Unser, "Interpolation Revisited", IEEE Transactions on Medical
+            Imaging 19(7), 739-758 (2000), doi:10.1109/42.875199; the prefilter
+            and evaluation use only JAX and differentiate through the image.
 
     Returns:
         1-D JAX array, the mean of each circle's in-image samples (0 for a
         circle with none).
     """
     image = jnp.asarray(image, dtype=jnp.result_type(image, 1.0))
+    if interpolation not in ("keys", "quintic"):
+        raise ValueError("interpolation must be 'keys' or 'quintic'")
+    if interpolation == "quintic":
+        coefficients = _quintic_coefficients(image)
     ny, nx = image.shape
     if n_theta is None:
         n_theta = 2 * max(ny, nx)
@@ -1280,8 +1364,25 @@ def azimuthal_mean_profile(image, center, radii_pix, n_theta=None):
     # or outside arcs. Sampling arc length cannot miss a short corner arc.
     y_edges = (jnp.array([0, ny - 1]) - center[0]) / safe_radii
     x_edges = (jnp.array([0, nx - 1]) - center[1]) / safe_radii
-    y_angles = jnp.arcsin(jnp.clip(y_edges, -1, 1))
-    x_angles = jnp.arccos(jnp.clip(x_edges, -1, 1))
+    if interpolation == "keys":
+        y_angles = jnp.arcsin(jnp.clip(y_edges, -1, 1))
+        x_angles = jnp.arccos(jnp.clip(x_edges, -1, 1))
+    else:
+        # Clipped inverse trig has 0 * inf derivatives outside [-1, 1].
+        # Sanitize the unused branch before evaluation. Preserve the Keys
+        # path exactly; quintic has finite coordinate gradients off tangency.
+        y_crosses = jnp.abs(y_edges) < 1
+        x_crosses = jnp.abs(x_edges) < 1
+        y_angles = jnp.where(
+            y_crosses,
+            jnp.arcsin(jnp.where(y_crosses, y_edges, 0.0)),
+            jnp.sign(y_edges) * (jnp.pi / 2),
+        )
+        x_angles = jnp.where(
+            x_crosses,
+            jnp.arccos(jnp.where(x_crosses, x_edges, 0.0)),
+            jnp.where(x_edges < 0, jnp.pi, 0.0),
+        )
     crossings = jnp.mod(
         jnp.concatenate([y_angles, jnp.pi - y_angles, x_angles, -x_angles], axis=1),
         2 * jnp.pi,
@@ -1319,11 +1420,17 @@ def azimuthal_mean_profile(image, center, radii_pix, n_theta=None):
         + positions
         - jnp.take_along_axis(cumulative, index, axis=1)
     )
-    values = map_coordinates(image, coordinates(theta), order=3, mode="nearest")
+    if interpolation == "keys":
+        values = map_coordinates(image, coordinates(theta), order=3, mode="nearest")
+    else:
+        values = _quintic_sample(coefficients, coordinates(theta))
     # A tangent circle has zero arc length but can touch one or more corners.
     rows, cols = coordinates(edges)
     inside = in_image(rows, cols, 8 * jnp.finfo(image.dtype).eps * max(ny, nx))
-    endpoints = map_coordinates(image, [rows, cols], order=3, mode="nearest")
+    if interpolation == "keys":
+        endpoints = map_coordinates(image, [rows, cols], order=3, mode="nearest")
+    else:
+        endpoints = _quintic_sample(coefficients, (rows, cols))
     count = jnp.sum(inside, axis=1)
     tangent_mean = jnp.sum(jnp.where(inside, endpoints, 0.0), axis=1) / jnp.maximum(
         count, 1
@@ -1331,7 +1438,9 @@ def azimuthal_mean_profile(image, center, radii_pix, n_theta=None):
     return jnp.where(total_length[:, 0] > 0, jnp.mean(values, axis=1), tangent_mean)
 
 
-def core_mean_intensity_profile(coro: Coronagraph, stellar_diam) -> np.ndarray:
+def core_mean_intensity_profile(
+    coro: Coronagraph, stellar_diam, interpolation="keys"
+) -> np.ndarray:
     """Core mean intensity profile of the stellar map at ``stellar_diam``.
 
     The profile is the azimuthal mean of ``coro.stellar_intens(stellar_diam)``
@@ -1343,6 +1452,8 @@ def core_mean_intensity_profile(coro: Coronagraph, stellar_diam) -> np.ndarray:
     Args:
         coro: Coronagraph instance.
         stellar_diam: Stellar angular diameter (Quantity in lambda/D).
+        interpolation: Spatial reader, ``"keys"`` or ``"quintic"``; see
+            :func:`azimuthal_mean_profile`.
 
     Returns:
         1-D array, per pixel, on the radii of :func:`profile_radii`.
@@ -1350,12 +1461,17 @@ def core_mean_intensity_profile(coro: Coronagraph, stellar_diam) -> np.ndarray:
     psf = np.asarray(coro.stellar_intens(stellar_diam), dtype=np.float64)
     center = stellar_axis_index(coro)
     radii = profile_radii(psf.shape, center)
-    return np.asarray(azimuthal_mean_profile(jnp.asarray(psf), center, radii))
+    return np.asarray(
+        azimuthal_mean_profile(
+            jnp.asarray(psf), center, radii, interpolation=interpolation
+        )
+    )
 
 
 def compute_core_mean_intensity_curve(
     coro: Coronagraph,
     stellar_diam_values=None,
+    interpolation="keys",
 ) -> tuple[np.ndarray, dict]:
     """Compute core mean intensity curves for different stellar diameters.
 
@@ -1363,6 +1479,8 @@ def compute_core_mean_intensity_curve(
         coro: Coronagraph instance.
         stellar_diam_values:
             List of stellar diameters.  ``None`` -> use all available.
+        interpolation: Spatial reader, ``"keys"`` or ``"quintic"``; see
+            :func:`azimuthal_mean_profile`.
 
     Returns:
         ``(separations_lod, intensities_dict)`` where *intensities_dict*
@@ -1388,7 +1506,8 @@ def compute_core_mean_intensity_curve(
     radii = profile_radii(shape, stellar_axis_index(coro))
     separations = radii * coro.pixel_scale_arcsec.value
     intensities = {
-        diam: core_mean_intensity_profile(coro, diam) for diam in stellar_diam_values
+        diam: core_mean_intensity_profile(coro, diam, interpolation=interpolation)
+        for diam in stellar_diam_values
     }
     return separations, intensities
 
@@ -1456,6 +1575,7 @@ def compute_all_performance_curves(
     interp_order: int | None = None,
     _validated_cache: bool = False,
     separation_step_lod: float | None = None,
+    interpolation: str = "keys",
 ) -> dict:
     """Compute (or load) all coronagraph performance curves.
 
@@ -1487,6 +1607,10 @@ def compute_all_performance_curves(
     core table at the package's own off-axis offsets.
     ``separation_step_lod=CORE_STEP_LOD`` opts into a grid of synthesized PSFs
     (:func:`compute_truncation_curves`); the default is ``None``.
+    ``interpolation="quintic"`` opts into the quintic spatial reader for the
+    core intensity tables. Those tables are computed from the maps on every
+    construction, not loaded from or saved to the performance FITS cache.
+    Throughput, raw contrast and their persistent cache identities are unchanged.
 
     Returns a dict of all curve data for convenience. ``throughput`` and
     ``raw_contrast`` are on ``separations``; in truncation mode that
@@ -1495,6 +1619,8 @@ def compute_all_performance_curves(
     ``separations_core_throughput``, which are ``separations`` without a
     truncation ratio.
     """
+    if interpolation not in ("keys", "quintic"):
+        raise ValueError("interpolation must be 'keys' or 'quintic'")
     if stellar_diam is None:
         stellar_diam = coro.stellar_intens.diams[0]
     oversample = _resolve_oversample(coro, oversample)
@@ -1625,13 +1751,15 @@ def compute_all_performance_curves(
     # ------------------------------------------------------------------
     logger.info("Computing core mean intensity curve...")
     sep_core_intensity, core_intensities = compute_core_mean_intensity_curve(
-        coro, stellar_diam_values=None
+        coro, stellar_diam_values=None, interpolation=interpolation
     )
     coro.core_intensity_dict = core_intensities
     coro.core_intensity_separations = sep_core_intensity
     # Profiles at other diameters are computed from the interpolated map on
     # first use, so they always agree with it (Coronagraph.core_mean_intensity).
     coro._core_intensity_cache = {}
+    coro._core_intensity_interpolation = interpolation
+    coro._core_intensity_diameter = float(stellar_diam.value)
 
     # 1D spline for the default stellar diameter (backward compatibility
     # and fast path for the common single-diameter case)

@@ -113,6 +113,8 @@ class EqxCoronagraph(eqx.Module):
         _JaxPchipWithLinearTails | interpax.Interpolator1D | interpax.CubicSpline
     )
     _core_intensity_varies_with_diameter: bool = eqx.field(static=True)
+    _core_intensity_interpolation: str = eqx.field(static=True)
+    _core_intensity_diameter: float = eqx.field(static=True)
     _diam_knot_range: tuple[float, float]
     _profile_radii_pix: Array
     _stellar_axis: tuple[float, float] = eqx.field(static=True)
@@ -227,6 +229,12 @@ class EqxCoronagraph(eqx.Module):
         # interpolated stellar map on the profile radii, computed on demand.
         diam_values = np.asarray(stellar.diams.value, dtype=float)
         self._core_intensity_varies_with_diameter = len(diam_values) > 1
+        self._core_intensity_interpolation = getattr(
+            yippy_coro, "_core_intensity_interpolation", "keys"
+        )
+        self._core_intensity_diameter = getattr(
+            yippy_coro, "_core_intensity_diameter", float(diam_values[0])
+        )
         self._diam_knot_range = (float(diam_values.min()), float(diam_values.max()))
         self._stellar_axis = tuple(float(c) for c in stellar_axis_index(yippy_coro))
         self._profile_radii_pix = jnp.asarray(
@@ -314,6 +322,7 @@ class EqxCoronagraph(eqx.Module):
         self,
         separation_lod: float,
         ppf: float = 30.0,
+        interpolation: str = "keys",
     ) -> Array:
         """Noise floor in AYO/pyEDITH per-pixel convention.
 
@@ -322,11 +331,14 @@ class EqxCoronagraph(eqx.Module):
         Args:
             separation_lod: Separation from the star in lambda/D.
             ppf: Post-processing noise suppression factor.
+            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
 
         Returns:
             Scalar noise floor value (AYO/pyEDITH convention).
         """
-        return self.core_mean_intensity(separation_lod) / ppf
+        return (
+            self.core_mean_intensity(separation_lod, interpolation=interpolation) / ppf
+        )
 
     def occulter_transmission(self, separation_lod: float) -> Array:
         """Evaluate occulter transmission at the given separation.
@@ -351,7 +363,10 @@ class EqxCoronagraph(eqx.Module):
         return self._core_area_interp(separation_lod)
 
     def core_mean_intensity(
-        self, separation_lod: float, stellar_diam_lod: float = 0.0
+        self,
+        separation_lod: float,
+        stellar_diam_lod: float = 0.0,
+        interpolation: str = "keys",
     ) -> Array:
         """Evaluate core mean intensity at the given separation.
 
@@ -371,6 +386,10 @@ class EqxCoronagraph(eqx.Module):
             separation_lod: Separation from the star in lambda/D.
             stellar_diam_lod: Stellar angular diameter in lambda/D.
                 Default is 0.0 (point source).
+            interpolation: Spatial reader, ``"keys"`` (default) or
+                ``"quintic"``. Static under JIT; use ``eqx.filter_jit``.
+                A reader differing from the precomputed table recomputes from
+                the map, including for a point source.
 
         Returns:
             Core mean intensity with the shape of separation_lod: the azimuthal
@@ -380,6 +399,21 @@ class EqxCoronagraph(eqx.Module):
             (lambda/D)^-2.
         """
         separation_lod = jnp.asarray(separation_lod)
+        if interpolation not in ("keys", "quintic"):
+            raise ValueError("interpolation must be 'keys' or 'quintic'")
+        if interpolation != self._core_intensity_interpolation:
+            low, high = self._diam_knot_range
+            diameter = jnp.where(
+                stellar_diam_lod == 0.0,
+                self._core_intensity_diameter,
+                stellar_diam_lod,
+            )
+            if not self._core_intensity_varies_with_diameter:
+                diameter = self._core_intensity_diameter
+            result = self._core_mean_intensity_at(
+                separation_lod, jnp.clip(diameter, low, high), interpolation
+            )
+            return jnp.where((diameter >= low) & (diameter <= high), result, jnp.nan)
         point_source = self._core_mean_intensity_interp(separation_lod.ravel()).reshape(
             separation_lod.shape
         )
@@ -395,14 +429,18 @@ class EqxCoronagraph(eqx.Module):
         result = jax.lax.cond(
             stellar_diam_lod == 0.0,
             lambda: jnp.asarray(point_source),
-            lambda: self._core_mean_intensity_at(separation_lod, clamped),
+            lambda: self._core_mean_intensity_at(
+                separation_lod, clamped, interpolation
+            ),
         )
         valid = (stellar_diam_lod == 0.0) | (
             (stellar_diam_lod >= low) & (stellar_diam_lod <= high)
         )
         return jnp.where(valid, result, jnp.nan)
 
-    def _core_mean_intensity_at(self, separation_lod, stellar_diam_lod) -> Array:
+    def _core_mean_intensity_at(
+        self, separation_lod, stellar_diam_lod, interpolation="keys"
+    ) -> Array:
         """Azimuthal mean of the interpolated stellar map at one diameter."""
         stellar_map = self.stellar_intens(stellar_diam_lod)
         radii = self._profile_radii_pix
@@ -413,11 +451,16 @@ class EqxCoronagraph(eqx.Module):
             i = jnp.clip(jnp.searchsorted(radii, r_pix) - 1, 0, radii.size - 2)
             pair = radii[jnp.stack([i, i + 1])]
             means = azimuthal_mean_profile(
-                stellar_map, self._stellar_axis, pair.ravel()
+                stellar_map,
+                self._stellar_axis,
+                pair.ravel(),
+                interpolation=interpolation,
             ).reshape(pair.shape)
             frac = (r_pix - pair[0]) / (pair[1] - pair[0])
             return means[0] + frac * (means[1] - means[0])
-        profile = azimuthal_mean_profile(stellar_map, self._stellar_axis, radii)
+        profile = azimuthal_mean_profile(
+            stellar_map, self._stellar_axis, radii, interpolation=interpolation
+        )
         nodes = radii * self.pixel_scale_lod
         if self._interp_order is None:
             interp = _JaxPchipWithLinearTails(nodes, profile)

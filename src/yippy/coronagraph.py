@@ -754,6 +754,7 @@ class Coronagraph:
         interp_order: int | None = None,
         _validated_cache=False,
         separation_step_lod=None,
+        interpolation="keys",
     ):
         """Compute all coronagraph performance curves at once.
 
@@ -761,6 +762,7 @@ class Coronagraph:
         ``interp_order=None`` (default) uses PCHIP with linear end-segment
         extrapolation. An integer keeps ``make_interp_spline(k=interp_order)``;
         ``interp_order=1`` restores the previous linear default.
+        ``interpolation`` selects the spatial reader for core intensity tables.
         """
         return _compute_all_perf(
             self,
@@ -778,6 +780,7 @@ class Coronagraph:
             interp_order=interp_order,
             _validated_cache=_validated_cache,
             separation_step_lod=separation_step_lod,
+            interpolation=interpolation,
         )
 
     def _compute_performance_metrics(
@@ -841,14 +844,18 @@ class Coronagraph:
             )
         return sep, occ
 
-    def core_mean_intensity_curve(self, stellar_diam_values=None, plot=True):
+    def core_mean_intensity_curve(
+        self, stellar_diam_values=None, plot=True, interpolation="keys"
+    ):
         """Compute core mean intensity curves.
 
         Delegates to :func:`yippy.performance.compute_core_mean_intensity_curve`.
+        ``interpolation`` selects the spatial reader (``"keys"`` or ``"quintic"``).
         """
         sep, intensities = compute_core_mean_intensity_curve(
             self,
             stellar_diam_values=stellar_diam_values,
+            interpolation=interpolation,
         )
         if plot:
             import matplotlib.pyplot as plt
@@ -965,7 +972,7 @@ class Coronagraph:
             return float(result[0])
         return result
 
-    def noise_floor_ayo(self, separation, ppf=30.0):
+    def noise_floor_ayo(self, separation, ppf=30.0, interpolation="keys"):
         """Return the noise floor in AYO/pyEDITH per-pixel convention.
 
         Computes ``core_mean_intensity(sep) / ppf``.  The result is in
@@ -977,11 +984,12 @@ class Coronagraph:
         Args:
             separation: Separation(s) in lambda/D.
             ppf (float): Post-processing factor. Default is 30.0.
+            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
 
         Returns:
             float or numpy.ndarray: Noise floor in AYO/pyEDITH convention.
         """
-        intensity = self.core_mean_intensity(separation)
+        intensity = self.core_mean_intensity(separation, interpolation=interpolation)
         if np.isscalar(intensity):
             return intensity / ppf
         return np.asarray(intensity) / ppf
@@ -1016,7 +1024,9 @@ class Coronagraph:
             return float(result[0])
         return result
 
-    def core_mean_intensity(self, separation, stellar_diam=0.0 * lod):
+    def core_mean_intensity(
+        self, separation, stellar_diam=0.0 * lod, interpolation="keys"
+    ):
         """Return core mean intensity at the given separation(s).
 
         At a nonzero stellar diameter the profile is the azimuthal mean of
@@ -1025,7 +1035,7 @@ class Coronagraph:
         star at every diameter, not only at the tabulated ones. The profile is
         computed on first use for each diameter and kept. The default
         diameter (point source), or a package with a single diameter, uses
-        the precomputed profile.
+        the precomputed profile when its spatial reader matches the request.
 
         Diameters outside the tabulated range return ``NaN``.
 
@@ -1034,6 +1044,8 @@ class Coronagraph:
             stellar_diam: Stellar angular diameter (Quantity in lod
                 units, float in lod, or array-like).  Default is
                 0.0*lod (point source).
+            interpolation: Spatial reader, ``"keys"`` (default) or
+                ``"quintic"``. Profiles are cached separately by reader.
 
         Returns:
             float or numpy.ndarray: Core mean intensity value(s): the
@@ -1042,6 +1054,8 @@ class Coronagraph:
             ``pixel_scale_arcsec`` (lambda/D per pixel), not per unit solid
             angle; divide by the squared pixel scale for (lambda/D)^-2.
         """
+        if interpolation not in ("keys", "quintic"):
+            raise ValueError("interpolation must be 'keys' or 'quintic'")
         sep_values = self._convert_separation_to_lod(separation)
 
         # Extract unitless diameter value
@@ -1051,26 +1065,41 @@ class Coronagraph:
             diam_val = float(stellar_diam)
 
         diams = np.asarray(self.stellar_intens.diams.value)
-        if diam_val == 0.0 or len(diams) < 2:
+        stored_reader = getattr(self, "_core_intensity_interpolation", "keys")
+        if interpolation != stored_reader:
+            if diam_val == 0.0 or len(diams) < 2:
+                diam_val = getattr(self, "_core_intensity_diameter", float(diams[0]))
+            if not diams.min() <= diam_val <= diams.max():
+                result = np.full(np.shape(sep_values), np.nan)
+            else:
+                result = self._core_intensity_interp_at(
+                    diam_val, interpolation=interpolation
+                )(sep_values)
+        elif diam_val == 0.0 or len(diams) < 2:
             result = self.core_intensity_interp(sep_values)
         elif not diams.min() <= diam_val <= diams.max():
             result = np.full(np.shape(sep_values), np.nan)
         else:
-            result = self._core_intensity_interp_at(diam_val)(sep_values)
+            result = self._core_intensity_interp_at(
+                diam_val, interpolation=interpolation
+            )(sep_values)
 
         if self._is_scalar_input(sep_values, separation):
             return float(result[0])
         return result
 
-    def _core_intensity_interp_at(self, diam_val: float):
+    def _core_intensity_interp_at(self, diam_val: float, interpolation="keys"):
         """Separation interpolator of the core mean intensity at one diameter."""
-        interp = self._core_intensity_cache.get(diam_val)
+        key = diam_val if interpolation == "keys" else (diam_val, interpolation)
+        interp = self._core_intensity_cache.get(key)
         if interp is None:
-            profile = core_mean_intensity_profile(self, diam_val * lod)
+            profile = core_mean_intensity_profile(
+                self, diam_val * lod, interpolation=interpolation
+            )
             interp = _build_curve_interp(
                 self.core_intensity_separations, profile, self.interp_order
             )
-            self._core_intensity_cache[diam_val] = interp
+            self._core_intensity_cache[key] = interp
         return interp
 
     # ------------------------------------------------------------------
@@ -1095,7 +1124,7 @@ class Coronagraph:
         r_pix = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
         return r_pix * self.pixel_scale_arcsec.value
 
-    def core_mean_intensity_map(self, stellar_diam=0.0 * lod):
+    def core_mean_intensity_map(self, stellar_diam=0.0 * lod, interpolation="keys"):
         """Azimuthally averaged stellar intensity projected onto the pixel grid.
 
         Equivalent to computing a radial profile of stellar_intens, fitting a
@@ -1107,16 +1136,19 @@ class Coronagraph:
 
         Args:
             stellar_diam: Stellar angular diameter. Default 0.0 lam/D.
+            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
 
         Returns:
             numpy.ndarray: (npix, npix) core mean intensity values.
         """
         r = self.separation_map()
-        return np.asarray(self.core_mean_intensity(r.ravel(), stellar_diam)).reshape(
-            r.shape
-        )
+        return np.asarray(
+            self.core_mean_intensity(r.ravel(), stellar_diam, interpolation)
+        ).reshape(r.shape)
 
-    def noise_floor_ayo_map(self, ppf=30.0, stellar_diam=0.0 * lod):
+    def noise_floor_ayo_map(
+        self, ppf=30.0, stellar_diam=0.0 * lod, interpolation="keys"
+    ):
         """Noise floor in AYO/pyEDITH per-pixel convention on the pixel grid.
 
         Computes ``core_mean_intensity_map / ppf``.
@@ -1124,11 +1156,12 @@ class Coronagraph:
         Args:
             ppf (float): Post-processing factor. Default 30.0.
             stellar_diam: Stellar angular diameter. Default 0.0 lam/D.
+            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
 
         Returns:
             numpy.ndarray: (npix, npix) noise floor values.
         """
-        return self.core_mean_intensity_map(stellar_diam) / ppf
+        return self.core_mean_intensity_map(stellar_diam, interpolation) / ppf
 
     def throughput_map(self, psf_trunc_ratios=None):
         """Throughput projected from the 1D curve onto the pixel grid.

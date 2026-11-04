@@ -104,7 +104,30 @@ def measurements():
             spline = RectBivariateSpline(
                 np.arange(size), np.arange(size), image, kx=5, ky=5
             )
-            quintic = spline.ev(*coords).mean(axis=1) / pixel_scale**2
+            spline_reference = spline.ev(*coords).mean(axis=1) / pixel_scale**2
+            quintic_default = (
+                np.asarray(
+                    azimuthal_mean_profile(
+                        image,
+                        (center, center),
+                        radii / pixel_scale,
+                        interpolation="quintic",
+                    )
+                )
+                / pixel_scale**2
+            )
+            quintic = (
+                np.asarray(
+                    azimuthal_mean_profile(
+                        image,
+                        (center, center),
+                        radii / pixel_scale,
+                        n_theta=2048,
+                        interpolation="quintic",
+                    )
+                )
+                / pixel_scale**2
+            )
             coordinate_error = np.max(np.abs(dense / direct - 1))
             print(
                 f"{name} pixel_scale={pixel_scale}: "
@@ -120,6 +143,10 @@ def measurements():
                     "default_error_pct": 100 * (default[i] / reference[i] - 1),
                     "dense_error_pct": 100 * (dense[i] / reference[i] - 1),
                     "quintic_error_pct": 100 * (quintic[i] / reference[i] - 1),
+                    "quintic_default_error_pct": 100
+                    * (quintic_default[i] / reference[i] - 1),
+                    "scipy_quintic_error_pct": 100
+                    * (spline_reference[i] / reference[i] - 1),
                 }
 
 
@@ -154,7 +181,7 @@ def alternatives():
     """Measure accuracy and CPU costs of alternatives on the same Airy scan.
 
     Timings go to stderr, separately from the CSV radius scan. These are local
-    prototypes, not a proposed change to the production reader or its caches.
+    prototypes alongside the opt-in JAX quintic reader. No caches are written.
     """
     print(
         f"timings: {platform.machine()}, Python {platform.python_version()}, "
@@ -172,23 +199,45 @@ def alternatives():
         spline = build()
         image = jax.device_put(density)
         radii_pix = jax.device_put(RADII / pixel_scale)
-        for n_theta in (2 * size, 2048):
+        for n_theta, interpolation in (
+            (2 * size, "keys"),
+            (2 * size, "quintic"),
+            (2048, "keys"),
+            (2048, "quintic"),
+        ):
 
-            def read(image, radii_pix, center=center, n_theta=n_theta):
+            def read(
+                image,
+                radii_pix,
+                center=center,
+                n_theta=n_theta,
+                interpolation=interpolation,
+            ):
                 return azimuthal_mean_profile(
-                    image, (center, center), radii_pix, n_theta=n_theta
+                    image,
+                    (center, center),
+                    radii_pix,
+                    n_theta=n_theta,
+                    interpolation=interpolation,
                 )
 
             compiled = jax.jit(read)
             start = perf_counter()
-            compiled(image, radii_pix).block_until_ready()
+            lowered = compiled.lower(image, radii_pix)
+            lower_ms = 1000 * (perf_counter() - start)
+            start = perf_counter()
+            executable = lowered.compile()
+            compile_ms = 1000 * (perf_counter() - start)
+            start = perf_counter()
+            executable(image, radii_pix).block_until_ready()
             first_ms = 1000 * (perf_counter() - start)
             eager_ms = median_ms(partial(read, image, radii_pix))
             jit_ms = median_ms(partial(compiled, image, radii_pix))
             print(
-                f"cost scale={pixel_scale} Keys angles={n_theta}: "
+                f"cost scale={pixel_scale} {interpolation} angles={n_theta}: "
                 f"eager_ms={eager_ms:.4f}, jit_ms={jit_ms:.4f}, "
-                f"jit_first_ms={first_ms:.2f}",
+                f"lower_ms={lower_ms:.2f}, compile_ms={compile_ms:.2f}, "
+                f"first_execution_ms={first_ms:.2f}",
                 file=sys.stderr,
             )
 
