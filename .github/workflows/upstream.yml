@@ -1,0 +1,153 @@
+name: Upstream canary
+
+# Exercise upstream releases before a relock, and the declared dependency floors.
+on:
+  schedule:
+    - cron: "23 5 * * 1,4"   # Monday and Thursday, 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+env:
+  JAX_PLATFORMS: cpu
+  # Batched programs can stall on 2-vCPU runners with the default Eigen threading.
+  XLA_FLAGS: --xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1
+  JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+  JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "1"
+  PYTHONHASHSEED: "0"
+  # Preserve the reference-data requirement from CI.
+  YIPPY_REQUIRE_REFERENCE_DATA: "1"
+
+jobs:
+  upstream-dev:
+    name: Upstream pre-releases (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Install the package and upstream pre-releases
+        run: |
+          uv venv .venv --python 3.12
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+          uv pip install --python .venv/bin/python --upgrade --prerelease=allow \
+            jax jaxlib numpy scipy astropy --override .github/sibling-pins.txt
+          # Nightly-only index verified against the JAX installation docs:
+          # https://docs.jax.dev/en/latest/installation.html#jax-nightly-installation
+          uv pip install --python .venv/bin/python --upgrade --prerelease=allow \
+            --index https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/ \
+            jax jaxlib --override .github/sibling-pins.txt
+          uv pip freeze --python .venv/bin/python
+
+      - name: Quick tier with warnings as errors
+        run: |
+          # Keep JAX compilations bounded by using a fresh process for each file.
+          result=0
+          for test_file in tests/test_*.py; do
+            file_result=0
+            pytest "$test_file" -m "not slow and not network" -q -p no:cacheprovider \
+              --timeout=300 --tb=short || file_result=$?
+            # A file may contain only deselected tests or the float64-only module.
+            if [ "$file_result" -ne 0 ] && [ "$file_result" -ne 5 ]; then
+              result=1
+            fi
+          done
+          exit "$result"
+
+  lowest-direct:
+    name: Lowest direct dependencies (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Install the lowest direct dependencies
+        run: |
+          uv venv .venv --python 3.12
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --python .venv/bin/python --resolution lowest-direct -e ".[test]" --override .github/sibling-pins.txt
+          uv pip freeze --python .venv/bin/python
+
+      - name: Quick tier
+        run: |
+          # Keep JAX compilations bounded by using a fresh process for each file.
+          result=0
+          for test_file in tests/test_*.py; do
+            file_result=0
+            pytest "$test_file" -m "not slow and not network" -q -p no:cacheprovider \
+              --timeout=300 --tb=short || file_result=$?
+            # A file may contain only deselected tests or the float64-only module.
+            if [ "$file_result" -ne 0 ] && [ "$file_result" -ne 5 ]; then
+              result=1
+            fi
+          done
+          exit "$result"
+
+  report:
+    name: Update the tracking issue
+    needs: [upstream-dev, lowest-direct]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Manual runs on other branches share the same tracking issue.
+    concurrency:
+      group: upstream-canary-report
+      cancel-in-progress: false
+    permissions:
+      issues: write # This job alone maintains the canary tracking issue.
+    steps:
+      - name: Open, update or close the tracking issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM_RESULT: ${{ needs.upstream-dev.result }}
+          LOWEST_RESULT: ${{ needs.lowest-direct.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream canary failing"
+          # Match the exact title and reuse closed issues on a later regression.
+          issue=$(gh issue list --state all --search "\"$title\" in:title" --limit 100 \
+            --json number,title,state --jq 'map(select(.title == "Upstream canary failing")) | first // empty')
+          number=$(jq -r '.number // empty' <<< "$issue")
+          state=$(jq -r '.state // empty' <<< "$issue")
+          body=$(printf 'Upstream pre-releases: %s\nLowest direct dependencies: %s\n\nLatest run: %s\n' \
+            "$UPSTREAM_RESULT" "$LOWEST_RESULT" "$RUN_URL")
+          if [ "$UPSTREAM_RESULT" = "failure" ] || [ "$LOWEST_RESULT" = "failure" ]; then
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --body "$body"
+              if [ "$state" = "CLOSED" ]; then
+                gh issue reopen "$number"
+              fi
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+          elif [ "$UPSTREAM_RESULT" = "success" ] && [ "$LOWEST_RESULT" = "success" ]; then
+            if [ -n "$number" ] && [ "$state" = "OPEN" ]; then
+              gh issue edit "$number" --body "$body"
+              gh issue close "$number" --comment "Both canary jobs are passing: $RUN_URL"
+            fi
+          fi
