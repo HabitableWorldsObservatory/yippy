@@ -25,8 +25,8 @@ test that compares against them is checking the reader and not restating it:
   ``psf_flux * occulter(s) * (1 - exp(-a^2 / (2 sigma^2)))``. The occulter is
   what gives the package an inner working angle; without one the throughput
   curve is flat and the half-maximum crossing that defines the angle does not
-  exist. The floor is small and positive so that the offset grid can include
-  the optical axis.
+  exist. The floor is small and non-negative; zero gives an exactly zero
+  image on the optical axis.
 * A stellar intensity map is constant at ``stellar_level`` per pixel, so any
   mean over any aperture is that constant.
 * Sky transmission is ``1 - exp(-(r / sky_trans_r0)^2)`` in lambda/D.
@@ -56,12 +56,10 @@ PSF_FLUX = 1.0
 STELLAR_LEVEL = 1e-10
 SKY_TRANS_R0 = 2.0
 OCCULTER_S0_LOD = 2.0
-# A small residual transmission on axis. Without it the occulter transmits
-# exactly nothing at zero separation, the tabulated throughput there is zero,
-# and the reader's logarithmic contrast interpolant is non-finite, which fails
-# construction inside scipy. A floor keeps the axis on the offset grid so that
-# an on-axis query is a table lookup rather than an interpolation across the
-# mirrored knots.
+# A small residual transmission on axis, so the default package has a finite
+# raw contrast at zero separation. A zero floor (an ideal occulter whose
+# on-axis image is exactly zero) is also accepted; the reader gives that
+# offset the large finite contrast sentinel.
 OCCULTER_FLOOR = 1e-6
 DIAMS_LOD = (0.0, 0.1, 0.2)
 
@@ -202,9 +200,8 @@ def write_synthetic_yip(
         sky_trans_r0: scale of the sky transmission function in lambda/D.
         occulter_s0_lod: scale of the occulter transmission in lambda/D, which
             is what gives the package an inner working angle.
-        occulter_floor: residual on-axis transmission, which must be positive
-            so that a tabulated offset at zero separation does not give a
-            throughput of exactly zero.
+        occulter_floor: residual on-axis transmission; zero writes an
+            exactly zero image at zero separation.
         min_offset_lod: smallest source offset to tabulate.
         max_offset_lod: largest source offset to tabulate.
         offset_step_lod: spacing of the offset grid.
@@ -213,18 +210,14 @@ def write_synthetic_yip(
         A :class:`SyntheticYIP` describing what was written.
 
     Raises:
-        ValueError: if ``kind`` is unknown or ``min_offset_lod`` is not
-            positive.
+        ValueError: if ``kind`` is unknown, ``min_offset_lod`` is not
+            positive, or ``occulter_floor`` is negative.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     center = npix / 2
-    if occulter_floor <= 0:
-        raise ValueError(
-            "occulter_floor must be positive; a zero-separation offset would "
-            "otherwise give zero throughput and a non-finite log-contrast "
-            "interpolant, which fails construction inside scipy"
-        )
+    if occulter_floor < 0:
+        raise ValueError("occulter_floor must be non-negative")
 
     stop = max_offset_lod + 0.5 * offset_step_lod
     steps = np.arange(min_offset_lod, stop, offset_step_lod)

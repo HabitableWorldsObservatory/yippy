@@ -310,3 +310,29 @@ def test_interpolation_does_not_change_cache_identity(performance_interpolation)
         other.interp_order = order
         assert other._auto_perf_identity() == identity
         assert other._perf_filename() == filename
+
+
+@pytest.mark.parametrize("psf_trunc_ratio", [None, 0.3])
+def test_zero_on_axis_psf_builds_finite_curves(tmp_path, psf_trunc_ratio):
+    """An exactly zero off-axis image gets the finite contrast sentinel.
+
+    An ideal occulter can transmit nothing for a source on the optical axis.
+    Before the sentinel, that offset produced an infinite raw contrast and the
+    interpolator constructors in scipy rejected the table.
+    """
+    from synthetic_yip import write_synthetic_yip
+
+    yip = write_synthetic_yip(tmp_path / "zero_floor", occulter_floor=0.0)
+    coro = Coronagraph(yip.path, psf_trunc_ratio=psf_trunc_ratio)
+    data = coro.compute_all_performance_curves(save_to_fits=False)
+
+    zero = np.argmin(data["separations"])
+    assert data["separations"][zero] == 0.0
+    assert data["raw_contrast"][zero] == 1e20
+    assert np.all(np.isfinite(data["raw_contrast"]))
+    assert float(coro.throughput(0.0 * lod)) == pytest.approx(0.0, abs=1e-12)
+    far = 5.0 * lod
+    np.testing.assert_allclose(
+        float(coro.throughput(far)), yip.expected_throughput(5.0), rtol=0.05
+    )
+    assert np.isfinite(float(coro.raw_contrast(far)))

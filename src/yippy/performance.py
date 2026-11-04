@@ -362,7 +362,10 @@ def compute_raw_contrast_curve(
             nominal_center=(pos.py, pos.px),
             star_psf=star_psf,
         )
-        contrast_val = star_flux / planet_flux if planet_flux > 0 else np.inf
+        # A zero off-axis PSF (e.g. a source on the optical axis behind an
+        # ideal mask) has undefined contrast; use the same finite sentinel as
+        # out-of-image points so the interpolators stay well-defined.
+        contrast_val = star_flux / planet_flux if planet_flux > 0 else 1e20
         separations.append(pos.separation)
         contrasts.append(float(contrast_val))
 
