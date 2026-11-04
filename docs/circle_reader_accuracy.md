@@ -16,7 +16,7 @@ decision because downstream cached products depend on that choice.
 
 ## Select the spatial reader
 
-```python
+```python notest
 import equinox as eqx
 from yippy.performance import azimuthal_mean_profile
 

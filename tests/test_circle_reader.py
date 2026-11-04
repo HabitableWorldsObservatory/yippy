@@ -17,7 +17,12 @@ _selectable_circle_mean = eqx.filter_jit(azimuthal_mean_profile)
 
 
 def test_keys_bit_identical():
-    """Pin float64 CPU bits captured before adding the quintic reader."""
+    """Pin float64 CPU values captured before adding the quintic reader.
+
+    The stored bits come from macOS; Linux differs by one unit in the last
+    place, so the stored values allow a few ULPs while the default and the
+    explicit Keys path must agree exactly on one machine.
+    """
     y, x = np.indices((16, 19))
     image = ((7 * x + 11 * y) % 23) / 32.0
     radii = np.array([0, 0.3, 2.25, 6.5, 9, 11.25, 14, 20])
@@ -41,8 +46,8 @@ def test_keys_bit_identical():
                 image, jnp.array([6.25, 9.5]), radii, interpolation="keys"
             )
         )
-    np.testing.assert_array_equal(default.view(np.uint64), expected)
-    np.testing.assert_array_equal(explicit.view(np.uint64), expected)
+    np.testing.assert_array_max_ulp(default, expected.view(np.float64), maxulp=4)
+    np.testing.assert_array_equal(explicit.view(np.uint64), default.view(np.uint64))
 
 
 @pytest.mark.parametrize("center", [(63.5, 63.5), (59.25, 67.75)])
