@@ -93,6 +93,10 @@ exclude = ["docs"]
 [tool.ruff.lint]
 select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 
+[tool.ruff.lint.isort]
+# _version.py is generated during installation and absent in the hygiene job.
+known-first-party = ["yippy"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
