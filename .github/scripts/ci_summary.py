@@ -22,6 +22,9 @@ def main():
     parser.add_argument("--allow-skips", action="store_true")
     args = parser.parse_args()
 
+    if not os.path.exists(args.junit):
+        print(f"{args.junit} not found: the test step did not run")
+        return 1
     root = ET.parse(args.junit).getroot()
     cases = []
     skipped = []
@@ -29,7 +32,9 @@ def main():
         name = f"{case.get('classname', '')}::{case.get('name', '')}"
         seconds = float(case.get("time", 0.0))
         cases.append((seconds, name))
-        if case.find("skipped") is not None:
+        # Pytest records expected failures as skipped; pytest enforces strict xfails.
+        skip = case.find("skipped")
+        if skip is not None and skip.get("type") != "pytest.xfail":
             skipped.append(name)
     total = sum(s for s, _ in cases)
     cases.sort(reverse=True)
