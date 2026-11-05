@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.11.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.6...v2.11.0) (2026-11-05)
+
+
+### Features
+
+* **performance:** interpolate performance curves between YIP offsets with PCHIP by default ([107f0cc](https://github.com/HabitableWorldsObservatory/yippy/commit/107f0cc45b0f40bf16b0e844b6aabe771b21a2e8))
+* **performance:** measure the truncation core on a 10x subpixel grid ([0081ad5](https://github.com/HabitableWorldsObservatory/yippy/commit/0081ad505682aa5f10a5ca4fe54cf9dc3df79f91))
+* **performance:** warn when a PSF is sampled coarser than Nyquist ([07f096c](https://github.com/HabitableWorldsObservatory/yippy/commit/07f096cc1f1a08c9a9debe37f1a0e4c077519826))
+* **yippy:** add an opt-in quintic spatial circle reader ([75e3d47](https://github.com/HabitableWorldsObservatory/yippy/commit/75e3d47f92925328e6be8ec3d88df2dff5666eeb))
+
+
+### Bug Fixes
+
+* **api:** export performance functions and support fixed centers ([3ab075b](https://github.com/HabitableWorldsObservatory/yippy/commit/3ab075b5ce564327a0ce6e2c12bd2b7641f3fbbd))
+* **coronagraph:** center separation_map on the optical axis ([be8f470](https://github.com/HabitableWorldsObservatory/yippy/commit/be8f4704b0f065b6e7e4682dd72ea4f354a7e405))
+* **coronagraph:** write the PSF datacube cache atomically and rebuild a truncated cache instead of failing on every load ([7bba536](https://github.com/HabitableWorldsObservatory/yippy/commit/7bba536a1d859f2f1e66e588787692102a965ad1))
+* **datasets:** find the YIP folder among the unpacked files even when the unzip folder holds clutter such as a Finder .DS_Store ([b675625](https://github.com/HabitableWorldsObservatory/yippy/commit/b6756250ab5c8455228a98f5739003483b5c2acb))
+* **eqx_coronagraph:** sample two circles per diameter in core intensity ([33b032f](https://github.com/HabitableWorldsObservatory/yippy/commit/33b032f8f94ba91a76032d1ffa7ac09a5898d19e))
+* **eqx:** mask stellar diameters outside tabulated bounds ([bc38ee9](https://github.com/HabitableWorldsObservatory/yippy/commit/bc38ee96915a707cdd495521a641e0bc2de66e5f))
+* **eqx:** retain array separation shapes in intensity profiles ([65fdfbb](https://github.com/HabitableWorldsObservatory/yippy/commit/65fdfbbe36f998a1354fbb20b3a1e4e77b3c59a6))
+* **performance:** cache the truncation core and keep it off the edge ([5f4dbfc](https://github.com/HabitableWorldsObservatory/yippy/commit/5f4dbfc6af29029d2e22557468ca4c0a02a3c602))
+* **performance:** core mean intensity from the stellar map on circles ([a3f2a0d](https://github.com/HabitableWorldsObservatory/yippy/commit/a3f2a0d153d7af1745937dedabf30f20866a38c4))
+* **performance:** give zero-flux offsets the finite contrast sentinel ([b11e5c5](https://github.com/HabitableWorldsObservatory/yippy/commit/b11e5c580bc57afa1f74c89365f7b728f0654b86))
+* **performance:** integrate global cores with fractional weights ([45648ad](https://github.com/HabitableWorldsObservatory/yippy/commit/45648ade0443e88b253d1a397acd83ab17b66ec5))
+* **performance:** measure circular-aperture throughput on the band-limited subpixel grid ([a49d89c](https://github.com/HabitableWorldsObservatory/yippy/commit/a49d89cce779e35f4f6cc7f65a96a56ebae1ddb6))
+* **performance:** measure the core mean intensity profile about the optical axis ([9e676cb](https://github.com/HabitableWorldsObservatory/yippy/commit/9e676cbff92a12bf7351521c50c77c7602c45f2f))
+* **performance:** preserve peak restriction at fractional edges ([27f0c65](https://github.com/HabitableWorldsObservatory/yippy/commit/27f0c650276703b7d1e363ef7f6ac9e523a705bf))
+* **performance:** sample valid angular arcs at image corners ([77ce3f3](https://github.com/HabitableWorldsObservatory/yippy/commit/77ce3f3b20bb98a1d78236c020cee9dd8eabc0d2))
+* **performance:** tabulate the core area every 0.25 lambda/D ([ac74867](https://github.com/HabitableWorldsObservatory/yippy/commit/ac74867c7cd61a74345d61282ef027ff9e1e9f3a))
+* **performance:** tabulate the core curves at the YIP offsets by default ([3fc8081](https://github.com/HabitableWorldsObservatory/yippy/commit/3fc8081571b0ad66ae33f63f7ca0bc4db80a9a36))
+* **performance:** take core throughput from the subpixel core ([be231de](https://github.com/HabitableWorldsObservatory/yippy/commit/be231dee9054c18e42b713ecc2eecf22623213b4))
+* **performance:** weight aperture edges and constrain source peaks ([160b7f3](https://github.com/HabitableWorldsObservatory/yippy/commit/160b7f3810bf2efed6d554abc4a0c8d93838d305))
+* **yippy:** declare tested dependency floors ([4856eda](https://github.com/HabitableWorldsObservatory/yippy/commit/4856eda1a7ccf0058cb7af68ddd8a67ade17cef8))
+* **yippy:** preserve cache precision and repair strict CI checks ([2d5b35b](https://github.com/HabitableWorldsObservatory/yippy/commit/2d5b35b45959f21e3fd20c68946c4ecfc9551ac5))
+* **yippy:** stabilize import sorting before version generation ([a95faf1](https://github.com/HabitableWorldsObservatory/yippy/commit/a95faf11c257959a57e817af43e8ee32413332ea))
+
 ## [2.10.6](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.5...v2.10.6) (2026-09-15)
 
 
