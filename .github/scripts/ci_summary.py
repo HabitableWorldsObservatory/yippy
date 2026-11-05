@@ -3,8 +3,10 @@
 Usage: python ci_summary.py junit.xml [--title TITLE] [--budget-seconds N]
 
 Appends markdown to $GITHUB_STEP_SUMMARY (stdout when unset). Exits non-zero when the
-summed test time exceeds the budget, or when any test was skipped (a skip hides a
-missing dependency).
+suite's wall time exceeds the budget, or when any test was skipped (a skip hides a
+missing dependency). The wall time is the junit testsuite time, which pytest measures
+over the whole session (collection included) and which stays correct under
+pytest-xdist; the summed per-test time is reported alongside it.
 """
 
 import argparse
@@ -26,6 +28,8 @@ def main():
         print(f"{args.junit} not found: the test step did not run")
         return 1
     root = ET.parse(args.junit).getroot()
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    wall = sum(float(suite.get("time", 0.0)) for suite in suites)
     cases = []
     skipped = []
     for case in root.iter("testcase"):
@@ -43,8 +47,9 @@ def main():
         f"### {args.title}",
         "",
         f"- tests: {len(cases)}, skipped: {len(skipped)}",
-        f"- summed test time: {total:.1f} s"
+        f"- wall time: {wall:.1f} s"
         + (f" (budget {args.budget_seconds:.0f} s)" if args.budget_seconds else ""),
+        f"- summed test time: {total:.1f} s",
         "",
         "| slowest tests | seconds |",
         "|---|---|",
@@ -64,8 +69,8 @@ def main():
         print(text)
 
     failed = False
-    if args.budget_seconds and total > args.budget_seconds:
-        print(f"suite time {total:.1f} s exceeds budget {args.budget_seconds:.0f} s")
+    if args.budget_seconds and wall > args.budget_seconds:
+        print(f"wall time {wall:.1f} s exceeds budget {args.budget_seconds:.0f} s")
         failed = True
     if skipped and not args.allow_skips:
         print(f"{len(skipped)} tests were skipped")
