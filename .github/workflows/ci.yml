@@ -72,7 +72,7 @@ jobs:
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           # One resolve, so pinned siblings satisfy the package floors.
-          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt ruff==0.15.18 deptry ty==0.0.96
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt ruff==0.17.3 deptry ty==0.0.96
 
       - name: Lint and formatting
         run: |

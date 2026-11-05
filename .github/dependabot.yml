@@ -26,5 +26,8 @@ updates:
     groups:
       hooks:
         patterns: ["*"]
+    ignore:
+      # ruff moves with the ruff pin in .github/workflows; bump both together by hand.
+      - dependency-name: "*ruff-pre-commit*"
     commit-message:
       prefix: "ci"
