@@ -4,13 +4,12 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/yippy/"><img src="https://img.shields.io/pypi/v/yippy.svg?style=flat-square" alt="PyPI"/></a>
+  <a href="https://pypi.org/project/yippy/"><img src="https://img.shields.io/pypi/v/yippy.svg?style=flat-square&logo=pypi" alt="PyPI"/></a>
   <a href="https://yippy.readthedocs.io"><img src="https://readthedocs.org/projects/yippy/badge/?version=latest&style=flat-square" alt="Documentation Status"/></a>
-  <a href="https://github.com/HabitableWorldsObservatory/yippy/blob/main/LICENSE"><img src="https://img.shields.io/github/license/HabitableWorldsObservatory/yippy?style=flat-square" alt="License"/></a>
-  <a href="https://pypi.org/project/yippy/"><img src="https://img.shields.io/pypi/pyversions/yippy?style=flat-square" alt="Python"/></a>
-  <a href="https://doi.org/10.5281/zenodo.20172435"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20172435-blue?style=flat-square" alt="DOI"></a>
-  <a href="https://github.com/HabitableWorldsObservatory/yippy/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HabitableWorldsObservatory/yippy/ci.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
-  <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=flat-square&logo=pre-commit" alt="pre-commit"/></a>
+  <a href="https://github.com/HabitableWorldsObservatory/yippy/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HabitableWorldsObservatory/yippy/ci.yml?branch=main&style=flat-square&logo=github&label=tests" alt="Tests"/></a>
+  <a href="https://github.com/HabitableWorldsObservatory/yippy/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License"/></a>
+  <a href="https://github.com/HabitableWorldsObservatory/yippy/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg?style=flat-square&logo=python" alt="Python 3.12+"/></a>
+  <a href="https://doi.org/10.5281/zenodo.20172435"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20172435-blue?style=flat-square" alt="DOI"/></a>
 </p>
 
 ---
