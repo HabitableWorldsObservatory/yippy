@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.12.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.11.0...v2.12.0) (2026-11-06)
+
+
+### Features
+
+* optional sinchole backend for versioned off-axis PSF deliveries ([471826b](https://github.com/HabitableWorldsObservatory/yippy/commit/471826b8d6065f8b4a8fc80e2e1c8f3fab44e688))
+* **sinc:** add yippy-sinc validate and plan, starter dataset entry ([4d0063c](https://github.com/HabitableWorldsObservatory/yippy/commit/4d0063ce5a4922eb74999c4ee6fd8bb52bca068a))
+
+
+### Bug Fixes
+
+* **datasets:** raise a clear error while the starter sinc delivery is unpublished ([61ac7fd](https://github.com/HabitableWorldsObservatory/yippy/commit/61ac7fd97fa361f1553dd233bd73493b209c1dc0))
+* exclude checks outside a narrower caller domain instead of rejecting them ([72af04b](https://github.com/HabitableWorldsObservatory/yippy/commit/72af04be9a29b111d59f90345c7728bca3257787))
+* reject invalid evidence and conflicting premises before any blend fallback ([5d4f108](https://github.com/HabitableWorldsObservatory/yippy/commit/5d4f108a712d7ba491a14b35b75cbeb1ce0ce5ea))
+* validate deliveries before routing and enforce sinc fallback rules ([9d4da84](https://github.com/HabitableWorldsObservatory/yippy/commit/9d4da842b9f0b55e76ee7a25fbb4a0c9459659ee))
+
 ## [2.11.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.10.6...v2.11.0) (2026-11-05)
 
 
