@@ -43,7 +43,9 @@ class DeliveryBackend(eqx.Module):
     def __init__(self, delivery, reader, requested, fallback_reasons=0):
         """Bind one selected native plane and its photon-unit conversion."""
         self.reader = reader
-        full = delivery.manifest["layout"] == "full_rectangle"
+        full = delivery.manifest["layout"] == "full_rectangle" and (
+            reader is None or requested == "auto"
+        )
         self.blend_nodes = jnp.asarray(delivery.nodes) if full else None
         self.blend_offsets = jnp.asarray(delivery.offsets) if full else None
         origin, spacing = (

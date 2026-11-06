@@ -366,7 +366,16 @@ packages retain their numerical and cache behavior. `auto` records its
 construction decision in the frozen `interpolation_info` record. It can use
 blend for supported sampling refusals on full signed grids. Quadrant deliveries
 require validated reflection evidence and midpoint detector geometry; they have
-no blend fallback. Explicit `blend` rejects these deliveries.
+no blend fallback. Explicit `blend` rejects these deliveries. A bounded policy
+never constructs a blend backend, including for unmarked legacy packages.
+
+Versioned FITS pixel scales require explicit lambda/D, lod, arcsec, mas, deg or
+rad units. All declarations, referenced hashes and independent-image indices
+are validated before precision, memory or optional-extra fallback decisions.
+Absent physical admission claims produce `METADATA_MISSING`; geometry and
+output-unit omissions remain data errors. A failed non-null campaign sampling
+minimum requires a revised manifest removing that claim. The adapter evaluates
+that campaign test with the core's separate binary64 nm-frame arithmetic.
 
 Images contain incident photon fractions per pixel. Integral samples receive
 only their declared photon conversion; mean densities additionally receive the
@@ -392,4 +401,6 @@ fractions per pixel. The default memory budget is computed from the actual
 native cube size using sinchole's admission and 1024-output estimates, one-query
 chunks and 256-pixel tiles. It excludes compiler workspace and caller-owned
 arrays; larger batches need an explicit budget. Cube caches preserve per-query
-status and backend selections in an integrity-checked sidecar.
+status and backend selections in an integrity-checked sidecar. Every opt-in
+cache identity retains the requested domain, policy and canonical options,
+including when construction binds blend.

@@ -45,6 +45,7 @@ class InterpolationInfo:
     receipt_id: str = ""
     receipt: Any = None
     manifest_json: str = ""
+    options_json: str = ""
 
 
 class ReadLedger(eqx.Module):

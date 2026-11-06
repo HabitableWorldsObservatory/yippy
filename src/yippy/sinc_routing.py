@@ -2,17 +2,19 @@
 
 import importlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 import jax
 
 from .delivery_backend import _FALLBACK_MASK, DeliveryBackend
 from .interpolation import InterpolationInfo, SincOptions
-from .sinc_delivery import admit_delivery, detect_delivery, load_delivery
-
-
-class _DeliveryBudgetExceeded(ValueError):
-    """The selected native allocation plan exceeds a caller ceiling."""
+from .sinc_delivery import (
+    admit_delivery,
+    campaign_sampling_failed,
+    delivery_memory,
+    detect_delivery,
+    load_delivery,
+)
 
 
 class SincExtraMissing(ImportError):
@@ -45,6 +47,17 @@ def route_interpolation(path, requested, options, downsample_shape):
         )
     if manifest is None and requested == "blend":
         return None, None, InterpolationInfo(requested, "blend")
+    canonical_options = _options_identity(options)
+    # Complete all file, declaration and integrity checks before any route gate.
+    delivery = None
+    if manifest is not None:
+        if downsample_shape is not None:
+            raise ValueError("Downsampling versioned sinc deliveries is not supported")
+        delivery = load_delivery(path, manifest, options)
+        if campaign_sampling_failed(delivery):
+            raise ValueError(
+                "Failed campaign sampling claim must be removed by a revised manifest"
+            )
     sc = None
     missing = False
     if requested != "blend":
@@ -66,6 +79,10 @@ def route_interpolation(path, requested, options, downsample_shape):
                 "sinc requires a versioned sinc-delivery.json; "
                 "unmarked legacy packages are unsupported"
             )
+        if options.policy is not None and options.policy.mode == "bounded":
+            raise ValueError(
+                "Bounded policies require sinc; legacy blend has no error bound"
+            )
         return (
             None,
             None,
@@ -73,62 +90,59 @@ def route_interpolation(path, requested, options, downsample_shape):
                 requested,
                 "blend",
                 ("EXTRA_MISSING" if missing else "LAYOUT_UNSUPPORTED",),
+                options_json=canonical_options,
             ),
         )
-    if downsample_shape is not None:
-        raise ValueError("Downsampling versioned sinc deliveries is not supported")
-
-    def preflight(resident, shape):
-        if options.memory is None:
-            return
-        from sinchole.reader import estimate_memory
-
-        estimates = estimate_memory(resident, shape, sc.Tiling(), 1, admission=True)
-        for key in ("resident", "output", "scratch", "total"):
-            if estimates[key] > getattr(options.memory, f"max_{key}_bytes"):
-                raise _DeliveryBudgetExceeded(f"{key} estimate exceeds supplied budget")
-
-    resource_refusal = None
-    try:
-        delivery = load_delivery(
-            path,
-            manifest,
-            options,
-            preflight=preflight if sc is not None else None,
+    base = dict(
+        manifest_sha256=delivery.manifest_sha256,
+        product_id=delivery.plane["id"],
+        manifest_json=json.dumps(manifest, sort_keys=True),
+        options_json=canonical_options,
+    )
+    if sc is not None:
+        base.update(
+            sinchole_version=sc.__version__, kernel_profile=sc.KernelProfile().identity
         )
-    except _DeliveryBudgetExceeded as error:
+
+    def blend_result(reasons=(), bits=0):
+        if options.policy is not None and options.policy.mode == "bounded":
+            raise ValueError("Bounded policies require sinc; blend has no error bound")
+        if manifest["layout"] == "quadrant_rectangle":
+            if missing:
+                raise SincExtraMissing(
+                    "Install yippy[sinc]; quadrant deliveries cannot fall back to blend"
+                )
+            raise ValueError("Quadrant deliveries cannot fall back to blend")
+        return (
+            delivery,
+            DeliveryBackend(delivery, None, requested, bits),
+            InterpolationInfo(requested, "blend", reasons, **base),
+        )
+
+    if requested == "blend" or missing:
+        return blend_result(
+            ("EXTRA_MISSING",) if missing else (), (1 << 21) if missing else 0
+        )
+    if delivery.missing_metadata:
         if (
             requested != "auto"
             or manifest["layout"] == "quadrant_rectangle"
             or (options.policy is not None and options.policy.mode != "sampling")
         ):
-            raise sc.MemoryLimit(str(error)) from error
-        resource_refusal = error
-        delivery = load_delivery(path, manifest, replace(options, memory=None))
-    base = dict(
-        manifest_sha256=delivery.manifest_sha256,
-        product_id=delivery.plane["id"],
-        manifest_json=json.dumps(manifest, sort_keys=True),
-    )
-    if requested == "blend" or missing:
-        if manifest["layout"] == "quadrant_rectangle":
-            raise SincExtraMissing(
-                "Install yippy[sinc]; quadrant deliveries cannot fall back to blend"
+            raise sc.AdmissionRefused(
+                sc.Admission(None, sc.Receipt(), int(sc.Reason.METADATA_MISSING))
             )
-        reasons = ("EXTRA_MISSING",) if missing else ()
-        backend = DeliveryBackend(
-            delivery, None, requested, (1 << 21) if missing else 0
-        )
-        return delivery, backend, InterpolationInfo(requested, "blend", reasons, **base)
-    if resource_refusal is not None:
-        base.update(
-            sinchole_version=sc.__version__, kernel_profile=sc.KernelProfile().identity
-        )
-        return (
-            delivery,
-            DeliveryBackend(delivery, None, requested, int(sc.Reason.MEMORY_LIMIT)),
-            InterpolationInfo(requested, "blend", ("MEMORY_LIMIT",), **base),
-        )
+        return blend_result(("METADATA_MISSING",), int(sc.Reason.METADATA_MISSING))
+    try:
+        delivery_memory(delivery, sc, options.memory)
+    except sc.MemoryLimit:
+        if (
+            requested != "auto"
+            or manifest["layout"] == "quadrant_rectangle"
+            or (options.policy is not None and options.policy.mode != "sampling")
+        ):
+            raise
+        return blend_result(("MEMORY_LIMIT",), int(sc.Reason.MEMORY_LIMIT))
     if not jax.config.x64_enabled:
         if (
             requested != "auto"
@@ -138,23 +152,11 @@ def route_interpolation(path, requested, options, downsample_shape):
             raise sc.PrecisionUnavailable(
                 "Enable jax_enable_x64 before sinc construction"
             )
-        base.update(
-            sinchole_version=sc.__version__, kernel_profile=sc.KernelProfile().identity
-        )
-        return (
-            delivery,
-            DeliveryBackend(
-                delivery, None, requested, int(sc.Reason.PRECISION_UNAVAILABLE)
-            ),
-            InterpolationInfo(requested, "blend", ("PRECISION_UNAVAILABLE",), **base),
+        return blend_result(
+            ("PRECISION_UNAVAILABLE",), int(sc.Reason.PRECISION_UNAVAILABLE)
         )
     admission, domain, memory = admit_delivery(delivery, options, sc)
-    base.update(
-        sinchole_version=sc.__version__,
-        kernel_profile=sc.KernelProfile().identity,
-        receipt_id=admission.receipt.identity,
-        receipt=admission.receipt,
-    )
+    base.update(receipt_id=admission.receipt.identity, receipt=admission.receipt)
     if not admission.admitted:
         if (
             requested != "auto"
@@ -163,13 +165,8 @@ def route_interpolation(path, requested, options, downsample_shape):
             or admission.reason_bits & ~_FALLBACK_MASK
         ):
             admission.require()
-        backend = DeliveryBackend(delivery, None, requested, admission.reason_bits)
-        return (
-            delivery,
-            backend,
-            InterpolationInfo(
-                requested, "blend", sc.reason_names(admission.reason_bits), **base
-            ),
+        return blend_result(
+            sc.reason_names(admission.reason_bits), admission.reason_bits
         )
     policy = options.policy or sc.ReadPolicy()
     if policy.mode == "bounded":
@@ -186,7 +183,11 @@ def route_interpolation(path, requested, options, downsample_shape):
 
 def cache_interpolation_identity(info, backend):
     """Bind routing, declarations, policy and dynamic reader receipt to caches."""
-    identity = {key: value for key, value in asdict(info).items() if key != "receipt"}
+    identity = {
+        key: value
+        for key, value in asdict(info).items()
+        if key not in ("receipt", "manifest_json")
+    }
     if isinstance(backend, DeliveryBackend) and backend.reader is not None:
         reader = backend.reader
         identity["policy"] = (reader.policy.mode, float(reader.policy.max_abs_error))
@@ -199,3 +200,30 @@ def cache_interpolation_identity(info, backend):
         identity["profile"] = reader.profile.identity
         identity["dynamic_receipt_id"] = reader.grid.receipt_id
     return identity
+
+
+def _options_identity(options):
+    """Canonicalize every requested option even when admission cannot run."""
+    domain = options.domain
+    policy = options.policy
+    identity = {
+        "product_id": options.product_id,
+        "policy": ("sampling", None)
+        if policy is None or policy.mode == "sampling"
+        else (policy.mode, float(policy.max_abs_error)),
+        "domain": None
+        if domain is None
+        else (
+            domain.kind,
+            domain.boundary,
+            domain.limits_xy_lod.tolist(),
+            domain.radii_lod.tolist(),
+        ),
+        "memory": None
+        if options.memory is None
+        else tuple(
+            int(getattr(options.memory, "max_" + key + "_bytes"))
+            for key in ("resident", "output", "scratch", "total")
+        ),
+    }
+    return json.dumps(identity, sort_keys=True)

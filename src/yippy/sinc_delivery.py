@@ -7,6 +7,7 @@ The training CSV supplies authoritative integer nodes, never fitted offsets.
 import csv
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
@@ -15,6 +16,7 @@ import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
+from hwoutils.constants import rad2arcsec
 from lod_unit import lod
 
 from .header import HeaderData
@@ -55,23 +57,19 @@ class Delivery:
     tolerance_lod: np.ndarray
     coordinate_residual_lod: np.ndarray
     conversion: float
+    independent_images: dict
+    missing_metadata: tuple[str, ...]
 
     def read_images(self, records):
         """Read independent images from exact file/index pairs in record order."""
         images = []
         for record in records:
-            path = self.root / record["psf_path"]
-            _check_hash(path, record.get("psf_sha256"), required=True)
-            with fits.open(path, memmap=True) as hdus:
-                cube = hdus[0].data
-                index = record["image_index"]
-                if (
-                    cube.ndim != 3
-                    or type(index) is not int
-                    or not 0 <= index < len(cube)
-                ):
-                    raise ValueError("Independent image_index must identify a cube row")
-                images.append(_native(cube[index]))
+            key = (record["psf_path"], record["psf_sha256"], record["image_index"])
+            if key not in self.independent_images:
+                raise ValueError(
+                    "Independent image_index must identify a validated cube row"
+                )
+            images.append(self.independent_images[key])
         return np.stack(images)
 
 
@@ -108,7 +106,7 @@ def _agree(actual, expected, label, tolerance):
 
 def _header_checks(header, manifest, plane, tolerance_lod):
     angular_arcsec = (float(manifest["lambda0_m"]) / float(manifest["diameter_m"])) * (
-        180 * 3600 / np.pi
+        rad2arcsec
     )
     for key, expected in (
         ("LAMBDA", manifest["lambda0_m"]),
@@ -126,11 +124,20 @@ def _header_checks(header, manifest, plane, tolerance_lod):
     pitch = np.asarray(manifest["pixel_scale_lod_xy"], dtype=np.float64)
     if pitch.shape != (2,) or not np.all(pitch > 0) or pitch[0] != pitch[1]:
         raise ValueError("Only square positive aligned detector pixels are supported")
+    if "PIXSCALE" not in header:
+        raise ValueError("Missing FITS PIXSCALE with explicit angular unit")
     comment = header.comments["PIXSCALE"].lower()
     actual_pitch = float(header["PIXSCALE"])
-    if "arcsec" in comment or "mas" in comment:
-        unit = HeaderData.extract_unit(comment, u.arcsec, "PIXSCALE")
-        actual_pitch = (actual_pitch * unit).to_value(u.arcsec) / angular_arcsec
+    if re.search(r"\b(?:lambda0?|lam)\s*/\s*d\b|\blod\b", comment):
+        pass
+    else:
+        match = re.search(r"\b(arcsec|mas|deg|rad)\b", comment)
+        if match is None:
+            raise ValueError("Unknown or missing PIXSCALE angular unit")
+        factor = {"arcsec": 1.0, "mas": 0.001, "deg": 3600.0, "rad": rad2arcsec}[
+            match[1]
+        ]
+        actual_pitch = (actual_pitch * factor) / angular_arcsec
     _agree(actual_pitch, pitch, "PIXSCALE", tolerance_lod)
     _agree(
         np.asarray(manifest["pixel_scale_arcsec_xy"]) / angular_arcsec,
@@ -151,19 +158,28 @@ def _header_checks(header, manifest, plane, tolerance_lod):
         raise ValueError("Incompatible midpoint detector frame")
 
 
-def load_delivery(root, manifest, options, *, preflight=None):
+def load_delivery(root, manifest, options):
     """Validate selected metadata, hashes, coordinates and native FITS arrays.
 
     Args:
         root: Delivery directory.
         manifest: Recognized versioned manifest.
         options: SincOptions selecting exactly one monochromatic plane.
-        preflight: Optional allocation check called before reading the cube.
 
     Returns:
         A Delivery ready for sinchole construction, with no legacy transforms.
     """
     root = Path(root)
+    for key in (
+        "detector_shape_yx",
+        "detector_center_xy",
+        "pixel_scale_lod_xy",
+        "pixel_scale_arcsec_xy",
+        "sample_kind",
+        "normalization",
+    ):
+        if manifest.get(key) is None:
+            raise ValueError("Missing required geometry or output units: " + key)
     planes = manifest["planes"]
     ids = [p["id"] for p in planes]
     if not ids or len(set(ids)) != len(ids):
@@ -176,6 +192,8 @@ def load_delivery(root, manifest, options, *, preflight=None):
     if selected not in ids:
         raise ValueError(f"Unknown product_id: {selected}")
     plane = planes[ids.index(selected)]
+    if plane.get("photon_conversion") is None:
+        raise ValueError("Missing required photon_conversion")
     if plane["kind"] != "monochromatic":
         raise ValueError("Only one selected monochromatic product is supported")
     for key, value in (
@@ -209,17 +227,38 @@ def load_delivery(root, manifest, options, *, preflight=None):
     for p in planes:
         if (
             p["shortest_contributing_m"] != p["wavelength_m"]
-            or not (0 < p["sampling_min_wavelength_m"] <= p["wavelength_m"])
+            or (
+                p.get("sampling_min_wavelength_m") is not None
+                and not (0 < p["sampling_min_wavelength_m"] <= p["wavelength_m"])
+            )
             or not (p["band_edges_m"][0] <= p["wavelength_m"] <= p["band_edges_m"][1])
         ):
             raise ValueError("Conflicting monochromatic wavelength metadata")
-    campaign = spectral["campaign_sampling_min_m"]
+    campaign = spectral.get("campaign_sampling_min_m")
     if campaign is not None and not (
-        0 < campaign <= min(p["sampling_min_wavelength_m"] for p in planes)
+        0
+        < campaign
+        <= min(p.get("sampling_min_wavelength_m") or p["wavelength_m"] for p in planes)
     ):
         raise ValueError("Conflicting campaign sampling minimum")
     if spectral.get("band_ready") and campaign is None:
         raise ValueError("Band-ready campaign requires a sampling minimum")
+    _validate_declarations(manifest)
+    _validate_domain(manifest.get("served"), options.domain)
+    if (
+        manifest["layout"] == "full_rectangle"
+        and manifest.get("reflection") is not None
+    ):
+        raise ValueError("Full rectangle requires reflection=null")
+    for product in planes:
+        for field in ("psf", "offsets"):
+            _check_hash(
+                root / product[field + "_path"],
+                product.get(field + "_sha256"),
+                required=True,
+            )
+    for name, digest in manifest.get("extensions", {}).get("file_sha256", {}).items():
+        _check_hash(root / name, digest, required=True)
     psf_path, offsets_path = root / plane["psf_path"], root / plane["offsets_path"]
     header = fits.getheader(psf_path)
     if header["NAXIS"] != 3 or header["BITPIX"] not in (-32, -64):
@@ -232,8 +271,6 @@ def load_delivery(root, manifest, options, *, preflight=None):
         offsets_header.get("NAXIS2"),
     ) != (2, 2, count):
         raise ValueError("Offsets require [source,2] matching PSF cube")
-    _check_hash(psf_path, plane.get("psf_sha256"), required=True)
-    _check_hash(offsets_path, plane.get("offsets_sha256"), required=True)
     hashes = manifest.get("extensions", {}).get("file_sha256", {})
     training_path = manifest["training_coordinates_path"]
     _check_hash(root / training_path, hashes.get(training_path))
@@ -272,6 +309,10 @@ def load_delivery(root, manifest, options, *, preflight=None):
         np.any(origin != 0) or np.any(lower != 0)
     ):
         raise ValueError("Quadrant lattice must be anchored at zero with both axes")
+    if not np.all((spacing >= 1e-6) & (spacing <= 1e6)) or not np.all(
+        (origin == 0) | ((np.abs(origin) >= 1e-6) & (np.abs(origin) <= 1e6))
+    ):
+        raise ValueError("Source lattice outside supported numeric range")
     offsets = _native(fits.getdata(offsets_path))
     if offsets.dtype not in (np.dtype("float32"), np.dtype("float64")):
         raise ValueError("Offsets require float32 or float64")
@@ -292,6 +333,11 @@ def load_delivery(root, manifest, options, *, preflight=None):
     for actual in (csv_offsets, offsets.astype(np.float64)):
         _agree(actual, expected, "authoritative training coordinates", tolerance)
         _agree(actual, canonical, "canonical lattice", tolerance)
+    if not np.all(
+        (canonical_origin == 0)
+        | ((np.abs(canonical_origin) >= 1e-6) & (np.abs(canonical_origin) <= 1e6))
+    ):
+        raise ValueError("Canonical lattice outside supported numeric range")
     residual = np.max(np.abs(offsets - canonical), axis=0)
     _header_checks(header, manifest, plane, tolerance)
     measure = manifest["sample_kind"]
@@ -304,11 +350,6 @@ def load_delivery(root, manifest, options, *, preflight=None):
         raise ValueError("Incident photon normalization requires photon_conversion=1")
     if measure == "mean":
         conversion *= float(np.prod(manifest["pixel_scale_lod_xy"]))
-    resident = count * header["NAXIS1"] * header["NAXIS2"] * (-header["BITPIX"] // 8)
-    if preflight is not None:
-        preflight(resident, tuple(manifest["detector_shape_yx"]))
-    elif options.memory is not None and resident > options.memory.max_resident_bytes:
-        raise ValueError(f"resident estimate {resident} bytes exceeds budget")
     nodes = _native(fits.getdata(psf_path))
     if nodes.dtype != np.dtype(manifest["storage_dtype"]):
         raise ValueError("Conflicting storage_dtype")
@@ -334,6 +375,7 @@ def load_delivery(root, manifest, options, *, preflight=None):
                         record.get(field + "_sha256"),
                         required=True,
                     )
+    independent = _independent_images(root, manifest, indices, tuple(nodes.shape[1:]))
     return Delivery(
         root,
         manifest,
@@ -355,13 +397,13 @@ def load_delivery(root, manifest, options, *, preflight=None):
         tolerance,
         residual,
         conversion,
+        independent,
+        _missing_metadata(manifest, plane),
     )
 
 
 def admit_delivery(delivery, options, sc):
     """Map validated delivery declarations to the installed sinchole API."""
-    from sinchole.reader import estimate_memory
-
     d, p = delivery.manifest, delivery.plane
     f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
     pixels = sc.PixelGrid(
@@ -374,10 +416,6 @@ def admit_delivery(delivery, options, sc):
     norm = d["normalization"]
     if not norm.get("source_independent", False):
         premises[4] = dict(premises[4], value=False)
-    if any(r.get("evidence") == 2 for r in premises):
-        raise ValueError(
-            "Externally established premises require verified external evidence"
-        )
     products = sc.Products(
         sc.Frame(
             f64(float(d["lambda0_m"]) * 1e9),
@@ -437,24 +475,7 @@ def admit_delivery(delivery, options, sc):
         f64(served["radii_lod"] if served["kind"] == "annulus" else [0.0, 0.0]),
     )
     if options.domain is not None:
-        override = options.domain
-        if override.kind != domain.kind or override.boundary != domain.boundary:
-            raise ValueError(
-                "Domain override must restrict the declared geometry and boundary"
-            )
-        if domain.kind == "box":
-            subset = bool(
-                jnp.all(override.limits_xy_lod[0] >= domain.limits_xy_lod[0])
-                & jnp.all(override.limits_xy_lod[1] <= domain.limits_xy_lod[1])
-            )
-        else:
-            subset = bool(
-                (override.radii_lod[0] >= domain.radii_lod[0])
-                & (override.radii_lod[1] <= domain.radii_lod[1])
-            )
-        if not subset:
-            raise ValueError("Domain override cannot expand served permission")
-        domain = override
+        domain = options.domain
     reflection = d.get("reflection")
     mirror = None
     if d["layout"] == "quadrant_rectangle":
@@ -483,7 +504,7 @@ def admit_delivery(delivery, options, sc):
             or reflection.get("optical_state_id") != d["optical_state"].get("state_id")
         ):
             raise sc.AdmissionRefused(
-                "Incomplete or failed quadrant symmetry declaration"
+                sc.Admission(None, sc.Receipt(), int(sc.Reason.SYMMETRY_UNSUPPORTED))
             )
         reflection = sc.Reflection(
             reflection["kind"],
@@ -509,7 +530,9 @@ def admit_delivery(delivery, options, sc):
         )
         records = [r for r in d.get("mirror_checks", []) if r["plane_id"] == p["id"]]
         if not records or not all(r.get("independent_propagation") for r in records):
-            raise sc.AdmissionRefused("Missing independent quadrant mirror checks")
+            raise sc.AdmissionRefused(
+                sc.Admission(None, sc.Receipt(), int(sc.Reason.SYMMETRY_CHECK_MISSING))
+            )
         coords = np.array([r["source_lod_xy"] for r in records], np.float64)
         signed_indices = []
         for record, coord in zip(records, coords, strict=True):
@@ -565,25 +588,9 @@ def admit_delivery(delivery, options, sc):
             "independent_images",
             p["id"],
         )
-    tiling = sc.Tiling()
     memory = options.memory
     if memory is None:
-        admission_estimate = estimate_memory(
-            delivery.nodes.nbytes, pixels.shape_yx, tiling, 1, admission=True
-        )
-        batch_estimate = estimate_memory(
-            delivery.nodes.nbytes, pixels.shape_yx, tiling, 1024
-        )
-        ceilings = {
-            k: max(admission_estimate[k], batch_estimate[k])
-            for k in ("resident", "output", "scratch", "total")
-        }
-        # The adapter adds one int32 backend selection to each output.
-        ceilings["output"] += 1024 * 4
-        ceilings["total"] += 1024 * 4
-        memory = sc.MemoryBudget(
-            *(int(ceilings[k]) for k in ("resident", "output", "scratch", "total"))
-        )
+        memory = delivery_memory(delivery, sc)
     admission = sc.admit_grid(
         delivery.nodes[None],
         delivery.offsets,
@@ -595,5 +602,225 @@ def admit_delivery(delivery, options, sc):
         checks=checks,
         mirror_checks=mirror,
         memory=memory,
+        offset_original_dtype=delivery.offsets.dtype,
+        provenance=(("manifest", json.dumps(d, sort_keys=True)),),
     )
     return admission, domain, memory
+
+
+def _validate_declarations(d):
+    """Reject malformed physical declarations before optional admission gates."""
+    norm = d["normalization"]
+    if not isinstance(norm, dict) or norm.get("kind") not in (
+        "incident_photon",
+        "unocculted_peak",
+    ):
+        raise ValueError("Unknown or missing normalization reference")
+    for key in ("lambda0_m", "diameter_m"):
+        value = float(d[key])
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("Invalid physical geometry: " + key)
+    support = d.get("support_extent_D")
+    if support is not None:
+        support = np.asarray(support, np.float64)
+        if support.shape != (2,) or not np.all(np.isfinite(support) & (support > 0)):
+            raise ValueError("Support extents require two finite positive values")
+    for entry in (d.get("premises") or {}).values():
+        if not isinstance(entry, dict):
+            raise ValueError("Premises require keyed evidence records")
+        if entry.get("evidence") == 2:
+            raise ValueError(
+                "Externally established premises require verified external evidence"
+            )
+    reflection = d.get("reflection")
+    if (
+        d["layout"] == "quadrant_rectangle"
+        and reflection is not None
+        and reflection.get("kind") != "two_axis_pixel_flip_v1"
+    ):
+        raise ValueError("Unsupported quadrant reflection kind")
+
+
+def _missing_metadata(d, p):
+    """List absent physical claims without substituting geometry or units."""
+    missing = [
+        key
+        for key in (
+            "coordinate_model",
+            "diameter_convention",
+            "optical_state",
+            "support_extent_D",
+            "support_evidence",
+            "served",
+        )
+        if d.get(key) is None or d.get(key) == ""
+    ]
+    for key in _PREMISES:
+        entry = (d.get("premises") or {}).get(key) or {}
+        if any(
+            field not in entry or entry[field] is None
+            for field in ("value", "evidence", "source_id")
+        ):
+            missing.append("premises." + key)
+    if p.get("sampling_min_wavelength_m") is None:
+        missing.append("sampling_min_wavelength_m")
+    if "campaign_sampling_min_m" not in d["spectral_sampling"]:
+        missing.append("campaign_sampling_min_m")
+    return tuple(missing)
+
+
+def _validate_domain(served, override):
+    """Validate permission declarations and restrictions without core objects."""
+
+    def values(kind, boundary, limits, radii):
+        if boundary not in ("closed", "lower_closed_upper_open"):
+            raise ValueError("Unsupported domain boundary")
+        data = np.asarray(limits if kind == "box" else radii, np.float64)
+        if kind not in ("box", "annulus") or data.shape != (
+            (2, 2) if kind == "box" else (2,)
+        ):
+            raise ValueError("Unsupported served domain geometry")
+        normal = (data == 0) | (np.abs(data) >= np.finfo(np.float64).tiny)
+        if not np.all(np.isfinite(data) & normal) or np.any(np.abs(data) > 1e6):
+            raise ValueError("Domain outside supported numeric range")
+        if kind == "box":
+            ordered = data[0] <= data[1] if boundary == "closed" else data[0] < data[1]
+            if not np.all(ordered):
+                raise ValueError("Box limits must be ordered and nonempty")
+        elif not (
+            0 <= data[0] < data[1]
+            and data[1] >= 1e-6
+            and (data[0] == 0 or data[0] >= 1e-6)
+        ):
+            raise ValueError(
+                "Annulus requires ordered radii in supported numeric range"
+            )
+        return data
+
+    if served is None:
+        if override is not None:
+            values(
+                override.kind,
+                override.boundary,
+                override.limits_xy_lod,
+                override.radii_lod,
+            )
+        return
+    kind, boundary = served["kind"], served["boundary"]
+    declared = values(
+        kind,
+        boundary,
+        np.array(served["bounds_lod"]).T if kind == "box" else None,
+        served.get("radii_lod"),
+    )
+    if override is not None:
+        if override.kind != kind or override.boundary != boundary:
+            raise ValueError(
+                "Domain override must restrict declared geometry and boundary"
+            )
+        restricted = values(kind, boundary, override.limits_xy_lod, override.radii_lod)
+        subset = (
+            (
+                np.all(restricted[0] >= declared[0])
+                and np.all(restricted[1] <= declared[1])
+            )
+            if kind == "box"
+            else (restricted[0] >= declared[0] and restricted[1] <= declared[1])
+        )
+        if not subset:
+            raise ValueError("Domain override cannot expand served permission")
+
+
+def _independent_images(root, manifest, indices, shape):
+    """Hash/open each independent file once, validating exact authoritative rows."""
+    records = [*manifest.get("checks", []), *manifest.get("mirror_checks", [])]
+    grouped = {}
+    ids = {p["id"] for p in manifest["planes"]}
+    for record in records:
+        if record["plane_id"] not in ids:
+            raise ValueError("Independent image references unknown plane_id")
+        coord = np.asarray(record["source_lod_xy"], np.float64)
+        if coord.shape != (2,) or not np.all(np.isfinite(coord)):
+            raise ValueError("Independent coordinates require finite xy")
+        if "base_index" in record:
+            index = record["base_index"]
+            if type(index) is not int or not 0 <= index < len(indices):
+                raise ValueError("Mirror base_index must identify a training row")
+        grouped.setdefault(record["psf_path"], []).append(record)
+    images = {}
+    for name, entries in grouped.items():
+        hashes = {record.get("psf_sha256") for record in entries}
+        if len(hashes) != 1:
+            raise ValueError("Conflicting independent image hashes")
+        digest = next(iter(hashes))
+        _check_hash(root / name, digest, required=True)
+        with fits.open(root / name, memmap=True) as hdus:
+            cube = hdus[0].data
+            if cube.ndim != 3 or cube.shape[1:] != shape or cube.dtype.kind != "f":
+                raise ValueError("Independent images require matching floating cube")
+            for record in entries:
+                index = record["image_index"]
+                if type(index) is not int or not 0 <= index < len(cube):
+                    raise ValueError("Independent image_index must identify a cube row")
+                image = _native(cube[index])
+                if not np.all(np.isfinite(image) & (image >= 0)):
+                    raise ValueError("Invalid independent intensity data")
+                images[(name, digest, index)] = image
+    for record in manifest.get("checks", []):
+        if (
+            not record.get("independent_propagation")
+            or record.get("reference_units") != "incident_fraction_per_pixel"
+        ):
+            raise ValueError(
+                "Checks require independent images and explicit reference_units"
+            )
+    return images
+
+
+def campaign_sampling_failed(delivery):
+    """Evaluate the explicit campaign test with the core's separate binary64 steps."""
+    d = delivery.manifest
+    minimum = d["spectral_sampling"].get("campaign_sampling_min_m")
+    if minimum is None or d.get("support_extent_D") is None:
+        return False
+    # Match the core's nm frame and operation order, including rounded conversions.
+    sigma = float(d["lambda0_m"] * 1e9) / float(minimum * 1e9)
+    for extent, pitch in zip(
+        d["support_extent_D"], d["source_spacing_lod"], strict=True
+    ):
+        bandwidth = sigma * float(extent)
+        rho = (2.0 * bandwidth) * float(pitch)
+        if not rho < 1.0 or not rho <= 0.76:
+            return True
+    return False
+
+
+def delivery_memory(delivery, sc, supplied=None):
+    """Isolate the private core allocation-model coupling for admission and reads."""
+    from sinchole.reader import estimate_memory
+
+    estimates = [
+        estimate_memory(
+            delivery.nodes.nbytes,
+            delivery.nodes.shape[1:],
+            sc.Tiling(),
+            1,
+            admission=True,
+        )
+    ]
+    if supplied is not None:
+        for key in ("resident", "output", "scratch", "total"):
+            if estimates[0][key] > getattr(supplied, "max_" + key + "_bytes"):
+                raise sc.MemoryLimit(key + " estimate exceeds supplied budget")
+        return supplied
+    estimates.append(
+        estimate_memory(
+            delivery.nodes.nbytes, delivery.nodes.shape[1:], sc.Tiling(), 1024
+        )
+    )
+    ceilings = {key: max(item[key] for item in estimates) for key in estimates[0]}
+    ceilings["output"] += 1024 * 4
+    ceilings["total"] += 1024 * 4
+    return sc.MemoryBudget(
+        *(int(ceilings[key]) for key in ("resident", "output", "scratch", "total"))
+    )
