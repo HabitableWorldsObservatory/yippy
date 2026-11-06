@@ -30,6 +30,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Astronomy",
 ]
 
+[project.scripts]
+yippy-sinc = "yippy.sinc_tools:main"
+
 [project.urls]
 Homepage = "https://github.com/HabitableWorldsObservatory/yippy"
 Issues = "https://github.com/HabitableWorldsObservatory/yippy/issues"

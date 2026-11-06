@@ -25,6 +25,7 @@ Public API:
 - :func:`list_yips`: list YIPs matching metadata filters.
 - :func:`yip_exists`: check whether a YIP is in the catalog.
 - :func:`yip_info`: retrieve a YIP's metadata.
+- :func:`fetch_sinc_starter`: download and unpack the starter sinc delivery.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pooch
-from pooch import Unzip
+from pooch import Untar, Unzip
 
 # By name, not relative import: scripts/build_zenodo_archives.py loads this
 # module standalone via importlib and has no parent package.
@@ -127,8 +128,54 @@ _PIKACHU = _make_pikachu(pooch.os_cache("yippy"))
 
 
 # ---------------------------------------------------------------------------
+# Starter sinc delivery
+#
+# One small public delivery (a physical-optics propagation of the public
+# LUVOIR-A APLC design) that exercises the sinc-delivery-0.1 format. It is a
+# separate tarball, not a YIP, so it is outside CATALOG.
+# ---------------------------------------------------------------------------
+SINC_STARTER_NAME: str = "sinc-starter"
+SINC_STARTER_ARCHIVE: str = f"{SINC_STARTER_NAME}.tar.gz"
+# PLACEHOLDER: replace the release tag with the tag that carries the asset.
+SINC_STARTER_URL: str = (
+    "https://github.com/HabitableWorldsObservatory/yippy/releases/download/"
+    f"PLACEHOLDER-sinc-starter-release-tag/{SINC_STARTER_ARCHIVE}"
+)
+SINC_STARTER_SHA256: str = (
+    "sha256:84c5c34cee908f89c1e6024afdc8661b735e43e1b0240c1fdd0888542b59c5af"
+)
+
+
+def _make_sinc_pikachu(cache_dir_path: str | Path) -> pooch.Pooch:
+    """Build a pooch instance for the starter sinc delivery."""
+    return pooch.create(
+        path=cache_dir_path,
+        base_url=SINC_STARTER_URL.rsplit("/", 1)[0] + "/",
+        registry={SINC_STARTER_ARCHIVE: SINC_STARTER_SHA256},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def fetch_sinc_starter(cache_path: str | Path | None = None) -> str:
+    """Download the starter sinc delivery (if not cached), unpack, return its path.
+
+    The delivery holds 837 positive-quadrant samples, 16 interior checks and
+    20 mirror checks on a 128 by 128 pixel frame, about 57 MB. It has no
+    stellar or sky products, so check it with ``yippy-sinc validate``.
+
+    Args:
+        cache_path: Cache directory for this call. Defaults to :func:`cache_dir`.
+
+    Returns:
+        The path of the unpacked delivery directory.
+    """
+    pikachu = _make_sinc_pikachu(cache_path if cache_path is not None else cache_dir())
+    paths = pikachu.fetch(SINC_STARTER_ARCHIVE, processor=Untar())
+    return str(_yip_dir([Path(p) for p in paths], SINC_STARTER_NAME))
+
+
 def cache_dir() -> Path:
     """Return the directory where yippy caches YIP archives by default.
 
