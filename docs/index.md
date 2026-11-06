@@ -40,6 +40,7 @@ contrast_floor.md
 azimuthal_averaging.md
 circle_reader_accuracy.md
 benchmarking.md
+sinc-delivery.md
 ```
 
 ```{toctree}
