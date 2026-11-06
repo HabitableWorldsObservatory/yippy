@@ -369,8 +369,11 @@ require validated reflection evidence and midpoint detector geometry; they have
 no blend fallback. Explicit `blend` rejects these deliveries. A bounded policy
 never constructs a blend backend, including for unmarked legacy packages.
 
-Versioned FITS pixel scales require explicit lambda/D, lod, arcsec, mas, deg or
-rad units. All declarations, referenced hashes and independent-image indices
+For `sinc-delivery-0.1`, FITS `PIXSCALE` with an empty or absent comment uses
+the schema unit, lambda0/D per pixel, and is compared numerically with the
+manifest. Explicit lambda/D or lod units also use that frame; recognized arcsec,
+mas, deg or rad units are converted before comparison. Nonempty unrecognized
+comments raise. All declarations, referenced hashes and independent-image indices
 are validated before precision, memory or optional-extra fallback decisions.
 Absent physical admission claims produce `METADATA_MISSING`; geometry and
 output-unit omissions remain data errors. A failed non-null campaign sampling

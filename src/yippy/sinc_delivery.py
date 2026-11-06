@@ -99,6 +99,14 @@ def _native(array):
     return np.array(array, dtype=array.dtype.newbyteorder("="), copy=True)
 
 
+def _valid_intensity(array):
+    """Check signs by bits so negative subnormals cannot flush to accepted zero."""
+    integer = np.int32 if array.dtype.itemsize == 4 else np.int64
+    bits = array.view(integer)
+    negative = (bits < 0) & ((bits & np.iinfo(integer).max) != 0)
+    return np.all(np.isfinite(array) & ~negative)
+
+
 def _agree(actual, expected, label, tolerance):
     if not np.all(np.isfinite(actual)) or np.any(np.abs(actual - expected) > tolerance):
         raise ValueError(f"Conflicting {label} in delivery metadata or FITS header")
@@ -125,15 +133,15 @@ def _header_checks(header, manifest, plane, tolerance_lod):
     if pitch.shape != (2,) or not np.all(pitch > 0) or pitch[0] != pitch[1]:
         raise ValueError("Only square positive aligned detector pixels are supported")
     if "PIXSCALE" not in header:
-        raise ValueError("Missing FITS PIXSCALE with explicit angular unit")
-    comment = header.comments["PIXSCALE"].lower()
+        raise ValueError("Missing FITS PIXSCALE")
+    comment = header.comments["PIXSCALE"].strip().lower()
     actual_pitch = float(header["PIXSCALE"])
-    if re.search(r"\b(?:lambda0?|lam)\s*/\s*d\b|\blod\b", comment):
+    if not comment or re.search(r"\b(?:lambda0?|lam)\s*/\s*d\b|\blod\b", comment):
         pass
     else:
         match = re.search(r"\b(arcsec|mas|deg|rad)\b", comment)
         if match is None:
-            raise ValueError("Unknown or missing PIXSCALE angular unit")
+            raise ValueError("Unknown PIXSCALE angular unit")
         factor = {"arcsec": 1.0, "mas": 0.001, "deg": 3600.0, "rad": rad2arcsec}[
             match[1]
         ]
@@ -182,7 +190,11 @@ def load_delivery(root, manifest, options):
             raise ValueError("Missing required geometry or output units: " + key)
     planes = manifest["planes"]
     ids = [p["id"] for p in planes]
-    if not ids or len(set(ids)) != len(ids):
+    if (
+        not ids
+        or any(not isinstance(value, str) or not value for value in ids)
+        or len(set(ids)) != len(ids)
+    ):
         raise ValueError("Delivery plane IDs must be nonempty and unique")
     selected = options.product_id
     if selected is None:
@@ -226,14 +238,17 @@ def load_delivery(root, manifest, options):
         raise ValueError("Conflicting campaign shortest contributor")
     for p in planes:
         if (
-            p["shortest_contributing_m"] != p["wavelength_m"]
+            p["kind"] != "monochromatic"
+            or not np.isfinite(float(p["wavelength_m"]) * 1e9)
+            or p["wavelength_m"] <= 0
+            or p["shortest_contributing_m"] != p["wavelength_m"]
             or (
                 p.get("sampling_min_wavelength_m") is not None
                 and not (0 < p["sampling_min_wavelength_m"] <= p["wavelength_m"])
             )
-            or not (p["band_edges_m"][0] <= p["wavelength_m"] <= p["band_edges_m"][1])
+            or p["band_edges_m"] != [p["wavelength_m"]] * 2
         ):
-            raise ValueError("Conflicting monochromatic wavelength metadata")
+            raise ValueError("METADATA_CONFLICT: monochromatic wavelength metadata")
     campaign = spectral.get("campaign_sampling_min_m")
     if campaign is not None and not (
         0
@@ -350,12 +365,14 @@ def load_delivery(root, manifest, options):
         raise ValueError("Incident photon normalization requires photon_conversion=1")
     if measure == "mean":
         conversion *= float(np.prod(manifest["pixel_scale_lod_xy"]))
+    if not np.isfinite(conversion) or conversion <= 0:
+        raise ValueError("Invalid pixel-area photon conversion")
     nodes = _native(fits.getdata(psf_path))
     if nodes.dtype != np.dtype(manifest["storage_dtype"]):
         raise ValueError("Conflicting storage_dtype")
     for start in range(0, nodes.size, 65536):
         block = nodes.reshape(-1)[start : start + 65536]
-        if not np.all(np.isfinite(block) & (block >= 0)):
+        if not _valid_intensity(block):
             raise ValueError("Invalid negative or nonfinite intensity data")
     for record in (
         manifest.get("reflection"),
@@ -376,6 +393,11 @@ def load_delivery(root, manifest, options):
                         required=True,
                     )
     independent = _independent_images(root, manifest, indices, tuple(nodes.shape[1:]))
+    _validate_check_positions(manifest, canonical_origin, spacing, size, options.domain)
+    for record in manifest.get("checks", []):
+        reference = record.get("local_peak_reference")
+        if reference is not None and not (0 < reference / conversion < np.inf):
+            raise ValueError("DATA_INVALID: unrepresentable local_peak_reference")
     return Delivery(
         root,
         manifest,
@@ -628,6 +650,8 @@ def _validate_declarations(d):
     for entry in (d.get("premises") or {}).values():
         if not isinstance(entry, dict):
             raise ValueError("Premises require keyed evidence records")
+        if entry.get("value") is False:
+            raise ValueError("METADATA_CONFLICT: explicitly false physical premise")
         if entry.get("evidence") == 2:
             raise ValueError(
                 "Externally established premises require verified external evidence"
@@ -763,10 +787,15 @@ def _independent_images(root, manifest, indices, shape):
                 if type(index) is not int or not 0 <= index < len(cube):
                     raise ValueError("Independent image_index must identify a cube row")
                 image = _native(cube[index])
-                if not np.all(np.isfinite(image) & (image >= 0)):
+                if not _valid_intensity(image):
                     raise ValueError("Invalid independent intensity data")
                 images[(name, digest, index)] = image
     for record in manifest.get("checks", []):
+        reference = record.get("local_peak_reference")
+        if reference is not None and not (0 < reference < np.inf):
+            raise ValueError(
+                "DATA_INVALID: local_peak_reference must be positive and finite"
+            )
         if (
             not record.get("independent_propagation")
             or record.get("reference_units") != "incident_fraction_per_pixel"
@@ -775,6 +804,49 @@ def _independent_images(root, manifest, indices, shape):
                 "Checks require independent images and explicit reference_units"
             )
     return images
+
+
+def _validate_check_positions(manifest, origin, spacing, size, override):
+    """Reject empirical checks that the core would refuse as DATA_INVALID."""
+    served = manifest.get("served")
+    for record in manifest.get("checks", []):
+        query = np.asarray(record["source_lod_xy"], np.float64)
+        query = np.where(np.abs(query) < np.finfo(np.float64).tiny, 0.0, query)
+        if served is not None or override is not None:
+            kind = override.kind if override is not None else served["kind"]
+            boundary = override.boundary if override is not None else served["boundary"]
+            if kind == "box":
+                bounds = (
+                    np.asarray(override.limits_xy_lod)
+                    if override is not None
+                    else np.asarray(served["bounds_lod"]).T
+                )
+                lower, upper = query >= bounds[0], query <= bounds[1]
+                if boundary != "closed":
+                    upper = query < bounds[1]
+            else:
+                radii = (
+                    np.asarray(override.radii_lod)
+                    if override is not None
+                    else np.asarray(served["radii_lod"])
+                )
+                radius2 = np.sum(query * query)
+                lower, upper = radius2 >= radii[0] ** 2, radius2 <= radii[1] ** 2
+                if boundary != "closed":
+                    upper = radius2 < radii[1] ** 2
+            if not (np.all(lower) and np.all(upper)):
+                raise ValueError(
+                    "DATA_INVALID: independent check outside served domain"
+                )
+        # Same exact-quotient floor as the core, after the rounded subtraction.
+        difference = query - origin
+        remainder = np.fmod(difference, spacing)
+        floor = np.rint((difference - remainder) / spacing) - (
+            (remainder != 0) & (difference < 0)
+        )
+        lower = 16 - size if manifest["layout"] == "quadrant_rectangle" else 15
+        if not np.all(np.isfinite(floor) & (floor >= lower) & (floor <= size - 17)):
+            raise ValueError("DATA_INVALID: independent check outside stencil coverage")
 
 
 def campaign_sampling_failed(delivery):

@@ -587,7 +587,9 @@ def test_bounded_legacy_refuses(tmp_path, monkeypatch, extra_missing):
         )
 
 
-@pytest.mark.parametrize("unit", ["deg", "rad", "arcsec", "mas", "lambda/D", "lod"])
+@pytest.mark.parametrize(
+    "unit", ["deg", "rad", "arcsec", "mas", "lambda/D", "lod", "", "absent"]
+)
 def test_header_explicit_angular_units(tmp_path, unit):
     """Equivalent angular header pitches agree after explicit conversion."""
     m = write_delivery(tmp_path, full=True)
@@ -599,17 +601,23 @@ def test_header_explicit_angular_units(tmp_path, unit):
         "mas": m["pixel_scale_arcsec_xy"][0] * 1000,
         "lambda/D": 0.25,
         "lod": 0.25,
+        "": 0.25,
+        "absent": 0.25,
     }
     with fits.open(tmp_path / "nodes.fits", mode="update") as hdus:
-        hdus[0].header["PIXSCALE"] = (values[unit], unit + "/pixel")
+        del hdus[0].header["PIXSCALE"]
+        if unit == "absent":
+            hdus[0].header["PIXSCALE"] = values[unit]
+        else:
+            hdus[0].header["PIXSCALE"] = (values[unit], unit + "/pixel" if unit else "")
     m["planes"][0]["psf_sha256"] = file_sha256(tmp_path / "nodes.fits")
     save_manifest(tmp_path, m)
     assert load_delivery(tmp_path, m, SincOptions()).header.pixscale.value == 0.25
 
 
-@pytest.mark.parametrize("unit", ["deg/pixel", "furlong/pixel", ""])
+@pytest.mark.parametrize("unit", ["deg/pixel", "furlongs"])
 def test_header_invalid_angular_units(tmp_path, unit):
-    """Conflicting degrees and unknown or absent units are data errors."""
+    """Fails if conflicting degrees or unknown nonempty units are accepted."""
     m = write_delivery(tmp_path, full=True)
     with fits.open(tmp_path / "nodes.fits", mode="update") as hdus:
         hdus[0].header["PIXSCALE"] = (0.25, unit)
@@ -740,7 +748,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
     with jax.enable_x64():
         domains = [
             sc.Domain("box", "closed", jnp.array([[-r, -r], [r, r]]), jnp.zeros(2))
-            for r in (0.04, 0.02)
+            for r in (0.09, 0.08)
         ]
         requests = [SincOptions(domain=d) for d in domains]
         requests.extend(
@@ -895,18 +903,86 @@ def test_original_offset_precision(tmp_path):
         assert backend.create_psf_with_info(0.07, -0.04).accepted
 
 
-@pytest.mark.parametrize("gate", ["normal", "precision", "memory", "extra"])
-@pytest.mark.parametrize("defect", ["normalization", "support", "external_evidence"])
+@pytest.mark.parametrize(
+    "gate", ["normal", "blend", "precision", "memory", "extra", "metadata", "sampling"]
+)
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "normalization",
+        "support",
+        "external_evidence",
+        "peak_zero",
+        "peak_negative",
+        "peak_inf",
+        "peak_nan",
+        "entrance_tilt_model",
+        "fixed_linear_optics",
+        "fixed_detector_registration",
+        "fixed_pixel_response",
+        "source_independent_normalization",
+        "source_independent_spectral_weights",
+        "false_with_missing_support",
+        "wavelength_inf",
+        "wavelength_overflow",
+        "negative_subnormal",
+        "empty_product_id",
+        "band_edges",
+        "check_domain",
+        "check_stencil",
+    ],
+)
 def test_admission_declaration_errors(tmp_path, monkeypatch, gate, defect):
-    """Malformed declarations cannot become a usable blend operator at a gate."""
+    """Fails if a fallback masks hard invalid evidence or a physical conflict."""
     sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     if defect == "normalization":
         m["normalization"]["kind"] = "unknown_reference"
     elif defect == "support":
         m["support_extent_D"] = [1.0]
-    else:
+    elif defect == "external_evidence":
         m["premises"]["fixed_linear_optics"]["evidence"] = 2
+    elif defect.startswith("peak_"):
+        m["checks"][0]["local_peak_reference"] = {
+            "peak_zero": 0.0,
+            "peak_negative": -1.0,
+            "peak_inf": np.inf,
+            "peak_nan": np.nan,
+        }[defect]
+    elif defect == "false_with_missing_support":
+        m["premises"]["source_independent_spectral_weights"]["value"] = False
+        del m["support_evidence"]
+    elif defect in ("wavelength_inf", "wavelength_overflow"):
+        wavelength = np.inf if defect == "wavelength_inf" else 1e308
+        m["planes"][0]["wavelength_m"] = wavelength
+        m["planes"][0]["shortest_contributing_m"] = wavelength
+        m["planes"][0]["band_edges_m"] = [wavelength, wavelength]
+        m["spectral_sampling"]["shortest_contributing_m"] = wavelength
+        if defect == "wavelength_overflow":
+            with fits.open(tmp_path / "nodes.fits", mode="update") as hdus:
+                hdus[0].header["MINLAM"] = (wavelength, "m")
+                hdus[0].header["MAXLAM"] = (wavelength, "m")
+            m["planes"][0]["psf_sha256"] = file_sha256(tmp_path / "nodes.fits")
+    elif defect == "negative_subnormal":
+        with fits.open(tmp_path / "nodes.fits", mode="update") as hdus:
+            hdus[0].data.view(">u4")[0, 0, 0] = 0x80000001
+        m["planes"][0]["psf_sha256"] = file_sha256(tmp_path / "nodes.fits")
+    elif defect == "empty_product_id":
+        m["planes"][0]["id"] = ""
+        m["checks"][0]["plane_id"] = ""
+    elif defect == "band_edges":
+        m["planes"][0]["band_edges_m"] = [400e-9, 600e-9]
+    elif defect == "check_domain":
+        m["checks"][0]["source_lod_xy"] = [0.2, 0.0]
+    elif defect == "check_stencil":
+        m["checks"][0]["source_lod_xy"] = [0.5, 0.0]
+        m["served"]["bounds_lod"] = [[-0.6, 0.6], [-0.6, 0.6]]
+    else:
+        m["premises"][defect]["value"] = False
+    if gate == "metadata":
+        del m["coordinate_model"]
+    elif gate == "sampling" and defect != "support":
+        m["support_extent_D"] = [2.0, 2.0]
     save_manifest(tmp_path, m)
     original = importlib.import_module
 
@@ -921,4 +997,57 @@ def test_admission_declaration_errors(tmp_path, monkeypatch, gate, defect):
         SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1)) if gate == "memory" else None
     )
     with jax.enable_x64(gate != "precision"), pytest.raises(ValueError):
-        route_interpolation(tmp_path, "auto", options, None)
+        route_interpolation(
+            tmp_path, "blend" if gate == "blend" else "auto", options, None
+        )
+
+
+@pytest.mark.medium
+@pytest.mark.parametrize("peak", ["absent", None, 0.001])
+def test_peak_reference_controls(tmp_path, monkeypatch, peak):
+    """Fails if unknown or positive peak evidence prevents admission or fallback.
+
+    Cold independent-check admission and finite reads cover all seven routes.
+    """
+    sc = pytest.importorskip("sinchole")
+    m = write_delivery(tmp_path, full=True)
+    if peak == "absent":
+        del m["checks"][0]["local_peak_reference"]
+    else:
+        m["checks"][0]["local_peak_reference"] = peak
+    original = importlib.import_module
+
+    def unavailable(name, *args, **kwargs):
+        if name == "sinchole":
+            raise ModuleNotFoundError("no sinchole", name="sinchole")
+        return original(name, *args, **kwargs)
+
+    for gate in (
+        "normal",
+        "blend",
+        "precision",
+        "memory",
+        "extra",
+        "metadata",
+        "sampling",
+    ):
+        metadata = copy.deepcopy(m)
+        if gate == "metadata":
+            del metadata["coordinate_model"]
+        elif gate == "sampling":
+            metadata["support_extent_D"] = [2.0, 2.0]
+        save_manifest(tmp_path, metadata)
+        options = (
+            SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1))
+            if gate == "memory"
+            else None
+        )
+        with monkeypatch.context() as patch, jax.enable_x64(gate != "precision"):
+            if gate == "extra":
+                patch.setattr(importlib, "import_module", unavailable)
+            _, backend, info = route_interpolation(
+                tmp_path, "blend" if gate == "blend" else "auto", options, None
+            )
+            assert info.effective == ("sinc" if gate == "normal" else "blend")
+            result = backend.create_psf_with_info(0.0, 0.0)
+            assert result.accepted and np.isfinite(result.intensity).all()
