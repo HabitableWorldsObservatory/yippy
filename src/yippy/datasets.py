@@ -136,7 +136,10 @@ _PIKACHU = _make_pikachu(pooch.os_cache("yippy"))
 # ---------------------------------------------------------------------------
 SINC_STARTER_NAME: str = "sinc-starter"
 SINC_STARTER_ARCHIVE: str = f"{SINC_STARTER_NAME}.tar.gz"
-# PLACEHOLDER: replace the release tag with the tag that carries the asset.
+# The release asset is not published yet. Publishing it means replacing the
+# placeholder tag below with the tag that carries the asset and setting
+# SINC_STARTER_PUBLISHED to True.
+SINC_STARTER_PUBLISHED: bool = False
 SINC_STARTER_URL: str = (
     "https://github.com/HabitableWorldsObservatory/yippy/releases/download/"
     f"PLACEHOLDER-sinc-starter-release-tag/{SINC_STARTER_ARCHIVE}"
@@ -170,8 +173,19 @@ def fetch_sinc_starter(cache_path: str | Path | None = None) -> str:
 
     Returns:
         The path of the unpacked delivery directory.
+
+    Raises:
+        RuntimeError: The delivery is not published yet and no copy of the
+            archive is in the cache directory.
     """
-    pikachu = _make_sinc_pikachu(cache_path if cache_path is not None else cache_dir())
+    root = Path(cache_path) if cache_path is not None else cache_dir()
+    if not SINC_STARTER_PUBLISHED and not (root / SINC_STARTER_ARCHIVE).is_file():
+        raise RuntimeError(
+            "The starter sinc delivery is not published yet, so it cannot be "
+            f"downloaded. To use a copy you already have, place "
+            f"{SINC_STARTER_ARCHIVE} in {root}."
+        )
+    pikachu = _make_sinc_pikachu(root)
     paths = pikachu.fetch(SINC_STARTER_ARCHIVE, processor=Untar())
     return str(_yip_dir([Path(p) for p in paths], SINC_STARTER_NAME))
 

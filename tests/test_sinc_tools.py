@@ -6,6 +6,7 @@ import json
 import math
 import re
 import shutil
+import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -305,3 +306,28 @@ def test_starter_dataset_registry_is_well_formed():
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", registry[datasets.SINC_STARTER_ARCHIVE])
     assert datasets.SINC_STARTER_URL.startswith("https://")
     assert datasets.SINC_STARTER_URL.endswith(datasets.SINC_STARTER_ARCHIVE)
+
+
+def test_unpublished_starter_raises_a_clear_error(tmp_path):
+    """Without a published asset or a cached copy, the fetch says why."""
+    if datasets.SINC_STARTER_PUBLISHED:
+        pytest.skip("The starter delivery is published")
+    with pytest.raises(RuntimeError, match="not published yet"):
+        datasets.fetch_sinc_starter(tmp_path)
+
+
+def test_unpublished_starter_uses_a_cached_copy(tmp_path, monkeypatch):
+    """A cached archive with the pinned hash is unpacked without a download."""
+    source = tmp_path / "src" / datasets.SINC_STARTER_NAME
+    source.mkdir(parents=True)
+    (source / "manifest.json").write_text("{}")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    archive = cache / datasets.SINC_STARTER_ARCHIVE
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source, arcname=datasets.SINC_STARTER_NAME)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(datasets, "SINC_STARTER_SHA256", f"sha256:{digest}")
+    path = Path(datasets.fetch_sinc_starter(cache))
+    assert path.name == datasets.SINC_STARTER_NAME
+    assert (path / "manifest.json").is_file()

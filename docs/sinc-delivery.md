@@ -35,7 +35,8 @@ _, backend, info = route_interpolation(path, "sinc", None, None)
 psf = backend.create_psf(3.9425, 5.415)
 ```
 
-The dataset URL is a placeholder until the release asset is published. The starter
+The starter is not published yet, so `fetch_sinc_starter` raises a clear error
+unless the archive is already in the cache directory. It
 holds no stellar or sky products, so `Coronagraph(path, interpolation="sinc")` does not
 load it yet and the read goes through the router as shown. A full delivery that
 includes the stellar products loads through `Coronagraph` directly. The quickest check
