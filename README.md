@@ -341,3 +341,55 @@ uses JAX's `shard_map` to distribute the computation across multiple CPU devices
 To use multiple CPU devices, call `hwoutils.set_host_device_count(N)` or set
 `XLA_FLAGS=--xla_force_host_platform_device_count=N` **before** importing JAX.
 On GPU/TPU backends, yippy automatically uses `vmap`+`jit` instead of `shard_map`.
+
+### Optional sampled-intensity reader
+
+Install `yippy[sinc]` to read directories containing a `sinc-delivery.json`
+manifest with schema `sinc-delivery-0.1`. Enable JAX x64 before construction.
+The `sinchole` dependency must be available separately until its first release.
+
+```python notest
+import jax
+from yippy import Coronagraph, EqxCoronagraph, SincOptions
+
+jax.config.update("jax_enable_x64", True)
+coro = Coronagraph(
+    "delivery", interpolation="sinc", sinc_options=SincOptions(product_id="mono-000")
+)
+image = coro.create_psf(4.0, 5.5)
+result = coro.create_psf_with_info(4.0, 5.5)
+view = EqxCoronagraph(yippy_coro=coro)
+```
+
+`blend` remains the default and does not import sinchole. Unmarked legacy
+packages retain their numerical and cache behavior. `auto` records its
+construction decision in the frozen `interpolation_info` record. It can use
+blend for supported sampling refusals on full signed grids. Quadrant deliveries
+require validated reflection evidence and midpoint detector geometry; they have
+no blend fallback. Explicit `blend` rejects these deliveries.
+
+Images contain incident photon fractions per pixel. Integral samples receive
+only their declared photon conversion; mean densities additionally receive the
+pixel area. Sinc output retains signed excursions. With-info reads expose status,
+reason bits, converted error diagnostics and a `selected_backend` value of 0
+(blend) or 1 (sinc). Sampling admission permits unknown error; bounded policies
+refuse. Eager strict reads raise on refusal, while compiled reads return NaNs.
+
+The adapter selects one monochromatic product and reads stellar and sky data
+from the manifest's separate legacy package. The instance keeps the stellar
+`header`, plus distinct `offaxis_header` and `sky_header` records. In the Equinox
+view, `pixel_scale_lod` is the off-axis pitch; `stellar_pixel_scale_lod` and
+`sky_pixel_scale_lod` describe the other maps. Its `source_psfs`, `stellar_map`
+and `background_transmission` methods resample using their respective pitches.
+Their wavelength argument preserves fixed-product table compatibility and does
+not select another product. Target pitches and coordinates use the respective
+product's reference frame. Wrappers with a single shared pitch must delegate
+these methods explicitly to preserve distinct stellar and sky frames.
+
+`SincOptions` accepts sinchole domain, memory and policy objects. Domain overrides
+can only restrict the declared served geometry. Policy error budgets use photon
+fractions per pixel. The default memory budget is computed from the actual
+native cube size using sinchole's admission and 1024-output estimates, one-query
+chunks and 256-pixel tiles. It excludes compiler workspace and caller-owned
+arrays; larger batches need an explicit budget. Cube caches preserve per-query
+status and backend selections in an integrity-checked sidecar.

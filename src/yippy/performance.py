@@ -337,6 +337,27 @@ def compute_raw_contrast_curve(
         ``(separations, contrasts)`` - sorted 1-D arrays.
     """
     star_psf = coro.stellar_intens(stellar_diam)
+    star_frame = None
+    if getattr(coro, "_sinc_delivery", None) is not None:
+        star_cy, star_cx = stellar_axis_index(coro)
+        stellar_angle = float(coro.stellar_header.lambda0.to_value("m")) / float(
+            coro.stellar_header.diameter.to_value("m")
+        )
+        planet_angle = float(coro.offaxis_header.lambda0.to_value("m")) / float(
+            coro.offaxis_header.diameter.to_value("m")
+        )
+        pitch_ratio = (
+            coro.pixel_scale_arcsec.value
+            * planet_angle
+            / (coro.stellar_pixel_scale_arcsec.value * stellar_angle)
+        )
+        star_frame = (
+            star_cy,
+            star_cx,
+            coro.offax.center_y.value,
+            coro.offax.center_x.value,
+            pitch_ratio,
+        )
     separations, contrasts = [], []
     radius_pix = aperture_radius_lod / coro.pixel_scale_arcsec.value
 
@@ -362,6 +383,7 @@ def compute_raw_contrast_curve(
             + 1,
             nominal_center=(pos.py, pos.px),
             star_psf=star_psf,
+            star_frame=star_frame,
         )
         # A zero off-axis PSF (e.g. a source on the optical axis behind an
         # ideal mask) has undefined contrast; use the same finite sentinel as
@@ -738,6 +760,7 @@ def _measure_circular_aperture(
     half_width_pix,
     star_psf=None,
     nominal_center=None,
+    star_frame=None,
 ):
     """Host measurement boundary using float64 to resolve faint stellar leakage."""
     with jax.enable_x64():
@@ -748,6 +771,7 @@ def _measure_circular_aperture(
             oversample=oversample,
             half_width_pix=half_width_pix,
             nominal_center=nominal_center,
+            star_frame=star_frame,
             star_psf=None
             if star_psf is None
             else jnp.asarray(star_psf, dtype=jnp.float64),
@@ -765,6 +789,7 @@ def circular_aperture(
     star_psf=None,
     nominal_center=None,
     fixed_center=None,
+    star_frame=None,
 ):
     """Flux and exact area of a circle on the PSF's trigonometric interpolant.
 
@@ -781,7 +806,9 @@ def circular_aperture(
     The window must contain the circle plus a margin for locating the peak;
     it is clipped to the image as in :func:`core_subpixel_window`. When
     ``star_psf`` is supplied, its interpolant is measured at the same global
-    coordinates through the same weights as the planet.
+    coordinates through the same weights as the planet. An optional
+    ``star_frame=(star_cy,star_cx,off_cy,off_cx,pitch_ratio)`` maps detector
+    coordinates to a distinct stellar frame and converts pixel areas.
     Sampling at 0.5 lambda/D per pixel or finer is required for an unaliased
     reconstruction; finite-image periodic boundaries can still affect edges.
     This kernel uses the active JAX precision and supports ``jit`` and
@@ -825,13 +852,56 @@ def circular_aperture(
     star_flux = 0.0
     if star_psf is not None:
         spectrum = jnp.fft.fft2(star_psf)
-        basis_y = _band_limited_samples(
-            spectrum, start_y, fine.shape[0] // oversample, oversample
-        )
-        basis_x = _band_limited_samples(
-            spectrum.T, start_x, fine.shape[1] // oversample, oversample
-        )
-        star_fine = jnp.real(basis_y @ spectrum @ basis_x.T)
+        if star_frame is None:
+            basis_y = _band_limited_samples(
+                spectrum, start_y, fine.shape[0] // oversample, oversample
+            )
+            basis_x = _band_limited_samples(
+                spectrum.T, start_x, fine.shape[1] // oversample, oversample
+            )
+            area_ratio = 1.0
+        else:
+            star_cy, star_cx, off_cy, off_cx, pitch_ratio = star_frame
+            row_coords = (
+                star_cy
+                + (
+                    start_y
+                    + (jnp.arange(fine.shape[0]) + 0.5) / oversample
+                    - 0.5
+                    - off_cy
+                )
+                * pitch_ratio
+            )
+            col_coords = (
+                star_cx
+                + (
+                    start_x
+                    + (jnp.arange(fine.shape[1]) + 0.5) / oversample
+                    - 0.5
+                    - off_cx
+                )
+                * pitch_ratio
+            )
+            basis_y = (
+                jnp.exp(
+                    2j
+                    * jnp.pi
+                    * row_coords[:, None]
+                    * jnp.fft.fftfreq(star_psf.shape[0])
+                )
+                / star_psf.shape[0]
+            )
+            basis_x = (
+                jnp.exp(
+                    2j
+                    * jnp.pi
+                    * col_coords[:, None]
+                    * jnp.fft.fftfreq(star_psf.shape[1])
+                )
+                / star_psf.shape[1]
+            )
+            area_ratio = pitch_ratio**2
+        star_fine = jnp.real(basis_y @ spectrum @ basis_x.T) * area_ratio
         star_flux = jnp.sum(circle * star_fine) / oversample**2
     return flux, area, star_flux
 
@@ -1199,7 +1269,9 @@ def compute_occ_trans_curve(
         ``(separations_lod, occ_trans)`` - 1-D arrays.
     """
     sky_trans_data = coro.sky_trans()
-    return compute_radial_average(sky_trans_data, coro.pixel_scale_arcsec.value)
+    pitch = getattr(coro, "sky_header", None)
+    pitch = coro.pixel_scale_arcsec.value if pitch is None else pitch.pixscale.value
+    return compute_radial_average(sky_trans_data, pitch)
 
 
 def stellar_axis_index(coro: Coronagraph) -> tuple[float, float]:
@@ -1504,7 +1576,10 @@ def compute_core_mean_intensity_curve(
 
     shape = coro.stellar_intens.psfs.shape[-2:]
     radii = profile_radii(shape, stellar_axis_index(coro))
-    separations = radii * coro.pixel_scale_arcsec.value
+    separations = (
+        radii
+        * getattr(coro, "stellar_pixel_scale_arcsec", coro.pixel_scale_arcsec).value
+    )
     intensities = {
         diam: core_mean_intensity_profile(coro, diam, interpolation=interpolation)
         for diam in stellar_diam_values

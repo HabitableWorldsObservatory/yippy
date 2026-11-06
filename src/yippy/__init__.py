@@ -8,6 +8,7 @@ __all__ = [
     "PROFILE_STEP_PIX",
     "Coronagraph",
     "EqxCoronagraph",
+    "SincOptions",
     "__version__",
     "azimuthal_mean_profile",
     "cache_dir",
@@ -41,6 +42,7 @@ from ._version import __version__
 from .coronagraph import Coronagraph
 from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
 from .eqx_coronagraph import EqxCoronagraph
+from .interpolation import SincOptions
 from .logger import logger
 from .performance import (
     CORE_OVERSAMPLE,

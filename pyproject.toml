@@ -47,6 +47,7 @@ content-type = "text/markdown"
 path = "README.md"
 
 [project.optional-dependencies]
+sinc = ["sinchole>=0.1.0"]
 docs = [
   "sphinx>=7.2.6",
   "myst-nb>=1.0.0",

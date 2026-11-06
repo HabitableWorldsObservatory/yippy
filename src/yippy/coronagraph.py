@@ -17,6 +17,7 @@ from ._precision import dtype_tag, float_dtype
 from ._version import __version__
 from .export import export_ayo_csv
 from .header import HeaderData
+from .interpolation import SincOptions, blend_read
 from .logger import logger
 from .offjax import OffJAX
 from .performance import (
@@ -113,6 +114,9 @@ class Coronagraph:
         use_inscribed_diameter: bool = False,
         psf_trunc_ratio: float | None = None,
         interp_order: int | None = None,
+        *,
+        interpolation: str = "blend",
+        sinc_options: SincOptions | None = None,
     ):
         """Initialize the Coronagraph object.
 
@@ -173,6 +177,13 @@ class Coronagraph:
                 the converged one computed here.
                 When None, a fixed circular aperture is used instead.
                 Typical AYO value is 0.3. Default is None.
+            interpolation (str):
+                Off-axis backend: blend (default), auto, or strict sinc. Legacy
+                blend loading and caches are unchanged. Versioned quadrant
+                deliveries require sinc; they have no blend representation.
+            sinc_options (SincOptions | None):
+                Selected fixed product, permission restriction, allocation
+                ceilings and read policy. Error budgets use photons per pixel.
             interp_order (int | None):
                 None (default) uses shape-preserving PCHIP between performance
                 curve nodes, with linear end-segment extrapolation. An integer
@@ -184,6 +195,18 @@ class Coronagraph:
         ###################
         yip_path = Path(yip_path)
         self.yip_path = yip_path
+        from .sinc_routing import route_interpolation
+
+        delivery, backend, self.interpolation_info = route_interpolation(
+            yip_path, interpolation, sinc_options, downsample_shape
+        )
+        self._sinc_options = sinc_options or SincOptions()
+        self._sinc_delivery = delivery
+        package_path = (
+            yip_path
+            if delivery is None
+            else yip_path / delivery.manifest["legacy_package_path"]
+        )
 
         # Capture the source generation before reading any data, so cache
         # entries written later by this object are labeled with the files it
@@ -208,7 +231,9 @@ class Coronagraph:
         self.psf_trunc_ratio = psf_trunc_ratio
 
         # Get header and calculate the lambda/D value
-        stellar_intens_header = pyfits.getheader(Path(yip_path, stellar_intens_file), 0)
+        stellar_intens_header = pyfits.getheader(
+            Path(package_path, stellar_intens_file), 0
+        )
 
         # Get pixel scale with units
         self.header = HeaderData.from_fits_header(stellar_intens_header)
@@ -239,19 +264,32 @@ class Coronagraph:
         # Stellar intensity of the star being observed as function of stellar
         # angular diameter (unitless)
         self.stellar_intens = StellarIntens(
-            yip_path, stellar_intens_file, stellar_diam_file
+            package_path, stellar_intens_file, stellar_diam_file
         )
 
         # Offaxis PSF of the planet as function of separation from the star
-        self.offax = OffJAX(
-            yip_path,
-            offax_data_file,
-            offax_offsets_file,
-            self.pixel_scale_arcsec,
-            x_symmetric,
-            y_symmetric,
-            downsample_shape=downsample_shape,
+        self.offax = (
+            backend
+            if backend is not None
+            else OffJAX(
+                yip_path,
+                offax_data_file,
+                offax_offsets_file,
+                self.pixel_scale_arcsec,
+                x_symmetric,
+                y_symmetric,
+                downsample_shape=downsample_shape,
+            )
         )
+
+        if delivery is not None:
+            self.stellar_header = self.header
+            self.stellar_pixel_scale_arcsec = self.header.pixscale
+            self.offaxis_header = delivery.header
+            self.pixel_scale_arcsec = self.offax.pixel_scale_arcsec
+            self.sky_header = HeaderData.from_fits_header(
+                pyfits.getheader(package_path / sky_trans_file)
+            )
 
         # Update pixel_scale_arcsec if downsampling was applied
         if downsample_shape is not None:
@@ -269,7 +307,7 @@ class Coronagraph:
             )
 
         # Get the sky_trans mask
-        self.sky_trans = SkyTrans(yip_path, sky_trans_file)
+        self.sky_trans = SkyTrans(package_path, sky_trans_file)
 
         # PSF datacube here is a 4D array of PSFs at each pixel (x psf offset,
         # y psf offset, x, y). Given the computational cost of generating this
@@ -288,6 +326,40 @@ class Coronagraph:
         self._load_or_compute_performance()
 
         logger.info(f"Created {yip_path.stem}")
+
+    def create_psf(self, x_lod, y_lod):
+        """Return the off-axis photon fraction per pixel at one source position."""
+        if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
+            return self.create_psf_with_info(x_lod, y_lod).intensity
+        return self.offax.create_psf(x_lod, y_lod)
+
+    def create_psfs(self, x, y):
+        """Return off-axis photon fractions for equal-length coordinate vectors."""
+        if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
+            return self.create_psfs_with_info(x, y).intensity
+        return self.offax.create_psfs(x, y)
+
+    def create_psf_with_info(self, x_lod, y_lod):
+        """Return an image and backend diagnostics in photon fractions per pixel."""
+        if hasattr(self.offax, "create_psf_with_info"):
+            return self.offax.create_psf_with_info(x_lod, y_lod)
+        finite = jnp.isfinite(x_lod) & jnp.isfinite(y_lod)
+        image = self.offax.create_psf(
+            jnp.where(finite, x_lod, 0.0), jnp.where(finite, y_lod, 0.0)
+        )
+        info = self.interpolation_info
+        reasons = (
+            (1 << 21)
+            if "EXTRA_MISSING" in info.reasons
+            else ((1 << 0) if "LAYOUT_UNSUPPORTED" in info.reasons else 0)
+        )
+        return blend_read(image, finite, reasons, fallback=info.requested == "auto")
+
+    def create_psfs_with_info(self, x, y):
+        """Return batch images with per-query status and backend selections."""
+        if hasattr(self.offax, "create_psfs_with_info"):
+            return self.offax.create_psfs_with_info(x, y)
+        return jax.vmap(self.create_psf_with_info)(x, y)
 
     def _load_or_compute_performance(self):
         """Build performance interpolators from a valid cache entry or afresh.
@@ -340,6 +412,8 @@ class Coronagraph:
             batch_size (int):
                 Number of PSFs to generate in each batch. Default is 128.
         """
+        if self._sinc_delivery is not None:
+            return self._create_delivery_datacube(batch_size)
         backend = jax.default_backend().lower()
         if backend in ("gpu", "tpu"):
             return self._create_psf_datacube_gpu(batch_size=batch_size)
@@ -430,6 +504,90 @@ class Coronagraph:
         self.has_psf_datacube = True
         self.psf_datacube = psfs
 
+    def _create_delivery_datacube(self, batch_size):
+        """Cache midpoint-grid reads with integrity-bound status selections."""
+        import json
+
+        from .sinc_delivery import file_sha256
+
+        path = self._datacube_cache_path
+        status_path = path.with_suffix(".status.npz")
+        integrity_path = path.with_suffix(".status.sha256")
+        expected = cache_identity_digest(self._datacube_identity())
+        cached = _load_cached_datacube(path)
+        if (
+            cached is not None
+            and status_path.exists()
+            and integrity_path.exists()
+            and integrity_path.read_text() == file_sha256(status_path)
+        ):
+            try:
+                with np.load(status_path) as data:
+                    valid = (
+                        int(data["schema"]) == 1
+                        and str(data["identity"]) == expected
+                        and str(data["cube_sha256"]) == file_sha256(path)
+                    )
+                    if valid:
+                        self.psf_datacube = jnp.asarray(cached)
+                        self.psf_datacube_info = {
+                            key: data[key]
+                            for key in (
+                                "selected_backend",
+                                "status",
+                                "reason_bits",
+                                "accepted",
+                            )
+                        }
+                        self.has_psf_datacube = True
+                        return
+            except (ValueError, EOFError, OSError, KeyError):
+                pass
+        center = np.array(self._sinc_delivery.manifest["detector_center_xy"])
+        columns, rows = np.arange(self.npixels), np.arange(self.npixels)
+        if self.use_quarter_psf_datacube:
+            columns, rows = columns[columns >= center[0]], rows[rows >= center[1]]
+        xx, yy = np.meshgrid(
+            (columns - center[0]) * self.offax.pitch_lod,
+            (rows - center[1]) * self.offax.pitch_lod,
+            indexing="xy",
+        )
+        x, y = xx.ravel(), yy.ravel()
+        images = []
+        diagnostics = {
+            key: [] for key in ("selected_backend", "status", "reason_bits", "accepted")
+        }
+        for start in range(0, len(x), batch_size):
+            result = self.create_psfs_with_info(
+                x[start : start + batch_size], y[start : start + batch_size]
+            )
+            images.append(np.asarray(result.intensity))
+            for key in diagnostics:
+                diagnostics[key].append(np.asarray(getattr(result, key)))
+        cube = np.concatenate(images).reshape((*xx.shape, *self.psf_shape))
+        diagnostics = {
+            key: np.concatenate(value).reshape(xx.shape)
+            for key, value in diagnostics.items()
+        }
+        _save_datacube(path, cube)
+        tmp = status_path.with_name(f"{status_path.name}.{os.getpid()}.tmp")
+        try:
+            with tmp.open("wb") as stream:
+                np.savez(
+                    stream,
+                    schema=1,
+                    identity=expected,
+                    cube_sha256=file_sha256(path),
+                    query_grid=json.dumps({"x": x.tolist(), "y": y.tolist()}),
+                    **diagnostics,
+                )
+            os.replace(tmp, status_path)
+            integrity_path.write_text(file_sha256(status_path))
+        finally:
+            tmp.unlink(missing_ok=True)
+        self.psf_datacube, self.psf_datacube_info = jnp.asarray(cube), diagnostics
+        self.has_psf_datacube = True
+
     def _create_psf_datacube_gpu(self, batch_size=128):
         """Generate PSF datacube on GPU/TPU, transferring each batch to host.
 
@@ -446,6 +604,8 @@ class Coronagraph:
                 Number of PSFs to generate per batch. Default is 128.
         """
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
+        if self._sinc_delivery is not None:
+            return self._create_delivery_datacube(batch_size)
         datacube_path = self._datacube_cache_path
         cached = _load_cached_datacube(datacube_path)
         if cached is not None:
@@ -554,7 +714,12 @@ class Coronagraph:
         not descend into ``yippy_cache`` itself (``glob`` is non-recursive).
         """
         stat_bits = []
-        for fits_path in sorted(self.yip_path.glob("*.fits")):
+        source_path = self.yip_path
+        if getattr(self, "_sinc_delivery", None) is not None:
+            source_path = (
+                self.yip_path / self._sinc_delivery.manifest["legacy_package_path"]
+            )
+        for fits_path in sorted(source_path.glob("*.fits")):
             st = fits_path.stat()
             stat_bits.append(f"{fits_path.name}:{st.st_size}:{st.st_mtime_ns}")
         return hashlib.sha1("|".join(stat_bits).encode()).hexdigest()[:8]
@@ -567,7 +732,7 @@ class Coronagraph:
             source_roles: Keys of ``self._source_files`` whose selected file
                 names the artifact depends on.
         """
-        return {
+        identity = {
             "artifact": artifact,
             "schema": _CACHE_SCHEMA_VERSION,
             "sampling": _SAMPLING_CACHE_VERSION,
@@ -576,6 +741,12 @@ class Coronagraph:
             "npixels": int(self.npixels),
             "dtype": dtype_tag(),
         }
+        info = getattr(self, "interpolation_info", None)
+        if info is not None and (info.manifest_sha256 or info.requested != "blend"):
+            from .sinc_routing import cache_interpolation_identity
+
+            identity["interpolation"] = cache_interpolation_identity(info, self.offax)
+        return identity
 
     def _datacube_identity(self) -> dict:
         """Complete identity of the PSF datacube this object would store.
@@ -1119,7 +1290,10 @@ class Coronagraph:
             numpy.ndarray: (npix, npix) array of separations.
         """
         npix = self.npixels
-        cy, cx = stellar_axis_index(self)
+        if self._sinc_delivery is None:
+            cy, cx = stellar_axis_index(self)
+        else:
+            cy, cx = self.offax.center_y.value, self.offax.center_x.value
         y, x = np.mgrid[:npix, :npix]
         r_pix = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
         return r_pix * self.pixel_scale_arcsec.value
@@ -1141,7 +1315,12 @@ class Coronagraph:
         Returns:
             numpy.ndarray: (npix, npix) core mean intensity values.
         """
-        r = self.separation_map()
+        if self._sinc_delivery is None:
+            r = self.separation_map()
+        else:
+            cy, cx = stellar_axis_index(self)
+            yy, xx = np.indices(self.stellar_intens.psfs.shape[-2:])
+            r = np.hypot(xx - cx, yy - cy) * self.stellar_pixel_scale_arcsec.value
         return np.asarray(
             self.core_mean_intensity(r.ravel(), stellar_diam, interpolation)
         ).reshape(r.shape)

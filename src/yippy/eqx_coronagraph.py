@@ -38,6 +38,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.transforms import resample_flux
 from jaxtyping import Array
 
 from ._precision import float_dtype
@@ -90,8 +91,13 @@ class EqxCoronagraph(eqx.Module):
     contrast_floor: float | None
 
     # -- Off-axis PSF synthesis (auto-static: callables) ------------------
-    create_psf: callable
-    create_psfs: callable
+    _legacy_create_psf: callable
+    _legacy_create_psfs: callable
+    _offaxis_backend: eqx.Module | None
+    stellar_pixel_scale_lod: float
+    sky_pixel_scale_lod: float
+    stellar_frame: tuple[float, float]
+    sky_frame: tuple[float, float]
 
     # -- Stellar intensity interpolation (dynamic: eqx.Module) -----------
     _stellar_ln_interp: interpax.CubicSpline
@@ -188,8 +194,51 @@ class EqxCoronagraph(eqx.Module):
                 **kwargs,
             )
 
+        if yippy_coro is not None:
+            requested = kwargs.get("interpolation")
+            if (
+                requested is not None
+                and requested != yippy_coro.interpolation_info.requested
+            ):
+                raise ValueError("Conflicting interpolation for existing Coronagraph")
+            supplied = kwargs.get("sinc_options")
+            if supplied is not None:
+                inherited = yippy_coro._sinc_options
+                if supplied.product_id != inherited.product_id or any(
+                    eqx.tree_equal(getattr(supplied, key), getattr(inherited, key))
+                    is not True
+                    for key in ("domain", "memory", "policy")
+                ):
+                    raise ValueError(
+                        "Conflicting sinc_options for existing Coronagraph"
+                    )
+
         # -- Scalar metadata ---------------------------------------------
         self.pixel_scale_lod = float(yippy_coro.pixel_scale_arcsec.value)
+        self.stellar_pixel_scale_lod = float(
+            getattr(
+                yippy_coro, "stellar_pixel_scale_arcsec", yippy_coro.pixel_scale_arcsec
+            ).value
+        )
+        sky_header = getattr(yippy_coro, "sky_header", None)
+        self.sky_pixel_scale_lod = (
+            self.pixel_scale_lod
+            if sky_header is None
+            else float(sky_header.pixscale.value)
+        )
+
+        def frame_metadata(header):
+            return (
+                float(header.lambda0.to_value("nm"))
+                if header.lambda0 is not None
+                else float("nan"),
+                float(header.diameter.to_value("m"))
+                if header.diameter is not None
+                else float("nan"),
+            )
+
+        self.stellar_frame = frame_metadata(yippy_coro.header)
+        self.sky_frame = frame_metadata(sky_header or yippy_coro.header)
         self.psf_shape = tuple(map(int, yippy_coro.psf_shape))
         self.center_x = float(yippy_coro.offax.center_x.value)
         self.center_y = float(yippy_coro.offax.center_y.value)
@@ -201,8 +250,15 @@ class EqxCoronagraph(eqx.Module):
         )
 
         # -- PSF creation callables --------------------------------------
-        self.create_psf = yippy_coro.offax.create_psf
-        self.create_psfs = yippy_coro.offax.create_psfs
+        self._offaxis_backend = (
+            yippy_coro.offax if yippy_coro._sinc_delivery is not None else None
+        )
+        self._legacy_create_psf = (
+            yippy_coro.offax.create_psf if self._offaxis_backend is None else None
+        )
+        self._legacy_create_psfs = (
+            yippy_coro.offax.create_psfs if self._offaxis_backend is None else None
+        )
 
         # -- Stellar intensity interpolation -----------------------------
         # FITS-sourced arrays are big-endian (>f8); jnp cannot ingest those, so
@@ -260,6 +316,92 @@ class EqxCoronagraph(eqx.Module):
             self.psf_datacube = None
 
     # -- Public methods (all JIT-traceable) -------------------------------
+
+    def create_psf(self, x_lod, y_lod):
+        """Return one off-axis PSF, delegating dynamic delivery arrays."""
+        if self._offaxis_backend is not None:
+            return self._offaxis_backend.create_psf(x_lod, y_lod)
+        return self._legacy_create_psf(x_lod, y_lod)
+
+    def create_psfs(self, x, y):
+        """Return off-axis PSFs at equal-length coordinate vectors."""
+        if self._offaxis_backend is not None:
+            return self._offaxis_backend.create_psfs(x, y)
+        return self._legacy_create_psfs(x, y)
+
+    def create_psf_with_info(self, x_lod, y_lod):
+        """Return fixed-product diagnostics for a versioned delivery."""
+        if self._offaxis_backend is None:
+            raise ValueError(
+                "with-info on EqxCoronagraph requires a versioned delivery"
+            )
+        return self._offaxis_backend.create_psf_with_info(x_lod, y_lod)
+
+    def create_psfs_with_info(self, x, y):
+        """Return fixed-product batch diagnostics for a versioned delivery."""
+        if self._offaxis_backend is None:
+            raise ValueError(
+                "with-info on EqxCoronagraph requires a versioned delivery"
+            )
+        return self._offaxis_backend.create_psfs_with_info(x, y)
+
+    def source_psfs(self, wavelength_nm, x_lod, y_lod, *, pixel_scale_lod, shape):
+        """Resample the fixed off-axis product in its reference lambda/D frame.
+
+        Args:
+            wavelength_nm: Accepted for fixed-product table compatibility;
+                it does not select or rescale another spectral product.
+            x_lod: Source x coordinates in the off-axis reference frame.
+            y_lod: Source y coordinates in the off-axis reference frame.
+            pixel_scale_lod: Requested detector pitch in that same frame.
+            shape: Requested detector shape (row, column).
+
+        Returns:
+            Photon fraction per target pixel for each source.
+        """
+        return jax.vmap(
+            lambda image: resample_flux(
+                image, self.pixel_scale_lod, pixel_scale_lod, shape, 0.0
+            )
+        )(self.create_psfs(x_lod, y_lod))
+
+    def stellar_map(self, wavelength_nm, stellar_diam_lod, *, pixel_scale_lod, shape):
+        """Resample stellar photon fractions using the stellar reference pitch.
+
+        Args:
+            wavelength_nm: Accepted for fixed-product table compatibility.
+            stellar_diam_lod: Diameter in the stellar reference frame.
+            pixel_scale_lod: Target pitch in the stellar reference frame.
+            shape: Requested detector shape (row, column).
+
+        Returns:
+            Stellar photon fractions per target pixel.
+        """
+        return resample_flux(
+            self.stellar_intens(stellar_diam_lod),
+            self.stellar_pixel_scale_lod,
+            pixel_scale_lod,
+            shape,
+            0.0,
+        )
+
+    def background_transmission(self, wavelength_nm, *, pixel_scale_lod, shape):
+        """Resample the dimensionless sky mask with its own reference pitch.
+
+        Args:
+            wavelength_nm: Accepted for fixed-product table compatibility.
+            pixel_scale_lod: Target pitch in the sky reference frame.
+            shape: Requested detector shape (row, column).
+
+        Returns:
+            Dimensionless transmission per target pixel.
+        """
+        return (
+            resample_flux(
+                self.sky_trans, self.sky_pixel_scale_lod, pixel_scale_lod, shape, 0.0
+            )
+            * (self.sky_pixel_scale_lod / pixel_scale_lod) ** 2
+        )
 
     def stellar_intens(self, stellar_diam_lod: float) -> Array:
         """Interpolate the stellar intensity map for a given stellar diameter.
@@ -444,7 +586,10 @@ class EqxCoronagraph(eqx.Module):
         """Azimuthal mean of the interpolated stellar map at one diameter."""
         stellar_map = self.stellar_intens(stellar_diam_lod)
         radii = self._profile_radii_pix
-        r_pix = jnp.asarray(separation_lod, dtype=radii.dtype) / self.pixel_scale_lod
+        r_pix = (
+            jnp.asarray(separation_lod, dtype=radii.dtype)
+            / self.stellar_pixel_scale_lod
+        )
         if self._interp_order is not None and self._interp_order <= 1:
             # Linear interpolation (extrapolating past the last radius) needs
             # only the two profile circles that bracket the separation.
@@ -461,12 +606,14 @@ class EqxCoronagraph(eqx.Module):
         profile = azimuthal_mean_profile(
             stellar_map, self._stellar_axis, radii, interpolation=interpolation
         )
-        nodes = radii * self.pixel_scale_lod
+        nodes = radii * self.stellar_pixel_scale_lod
         if self._interp_order is None:
             interp = _JaxPchipWithLinearTails(nodes, profile)
         else:
             interp = interpax.CubicSpline(nodes, profile)
-        return interp((r_pix * self.pixel_scale_lod).ravel()).reshape(r_pix.shape)
+        return interp((r_pix * self.stellar_pixel_scale_lod).ravel()).reshape(
+            r_pix.shape
+        )
 
 
 # -- Helpers ------------------------------------------------------------------
