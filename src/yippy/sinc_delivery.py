@@ -393,7 +393,7 @@ def load_delivery(root, manifest, options):
                         required=True,
                     )
     independent = _independent_images(root, manifest, indices, tuple(nodes.shape[1:]))
-    _validate_check_positions(manifest, canonical_origin, spacing, size, options.domain)
+    _validate_check_positions(manifest, canonical_origin, spacing, size)
     for record in manifest.get("checks", []):
         reference = record.get("local_peak_reference")
         if reference is not None and not (0 < reference / conversion < np.inf):
@@ -583,6 +583,12 @@ def admit_delivery(delivery, options, sc):
             jnp.array([False]),
         )
     records = [r for r in d.get("checks", []) if r["plane_id"] == p["id"]]
+    # Checks outside a caller's narrower domain cannot be read; exclude them
+    # from the empirical comparison and keep their identifiers in provenance.
+    excluded = [
+        r["id"] for r in records if not bool(domain.contains(f64(r["source_lod_xy"])))
+    ]
+    records = [r for r in records if r["id"] not in excluded]
     checks = None
     if records:
         if not all(
@@ -625,7 +631,10 @@ def admit_delivery(delivery, options, sc):
         mirror_checks=mirror,
         memory=memory,
         offset_original_dtype=delivery.offsets.dtype,
-        provenance=(("manifest", json.dumps(d, sort_keys=True)),),
+        provenance=(
+            ("manifest", json.dumps(d, sort_keys=True)),
+            ("excluded_checks", json.dumps(excluded)),
+        ),
     )
     return admission, domain, memory
 
@@ -806,30 +815,27 @@ def _independent_images(root, manifest, indices, shape):
     return images
 
 
-def _validate_check_positions(manifest, origin, spacing, size, override):
-    """Reject empirical checks that the core would refuse as DATA_INVALID."""
+def _validate_check_positions(manifest, origin, spacing, size):
+    """Reject delivered checks outside the delivery's own served region or coverage.
+
+    A caller's narrower domain override does not make a delivered check
+    invalid; such checks are excluded from the empirical comparison at
+    admission and recorded in the receipt provenance instead.
+    """
     served = manifest.get("served")
     for record in manifest.get("checks", []):
         query = np.asarray(record["source_lod_xy"], np.float64)
         query = np.where(np.abs(query) < np.finfo(np.float64).tiny, 0.0, query)
-        if served is not None or override is not None:
-            kind = override.kind if override is not None else served["kind"]
-            boundary = override.boundary if override is not None else served["boundary"]
+        if served is not None:
+            kind = served["kind"]
+            boundary = served["boundary"]
             if kind == "box":
-                bounds = (
-                    np.asarray(override.limits_xy_lod)
-                    if override is not None
-                    else np.asarray(served["bounds_lod"]).T
-                )
+                bounds = np.asarray(served["bounds_lod"]).T
                 lower, upper = query >= bounds[0], query <= bounds[1]
                 if boundary != "closed":
                     upper = query < bounds[1]
             else:
-                radii = (
-                    np.asarray(override.radii_lod)
-                    if override is not None
-                    else np.asarray(served["radii_lod"])
-                )
+                radii = np.asarray(served["radii_lod"])
                 radius2 = np.sum(query * query)
                 lower, upper = radius2 >= radii[0] ** 2, radius2 <= radii[1] ** 2
                 if boundary != "closed":

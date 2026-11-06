@@ -1051,3 +1051,23 @@ def test_peak_reference_controls(tmp_path, monkeypatch, peak):
             assert info.effective == ("sinc" if gate == "normal" else "blend")
             result = backend.create_psf_with_info(0.0, 0.0)
             assert result.accepted and np.isfinite(result.intensity).all()
+
+
+def test_override_domain_excludes_unreadable_checks(tmp_path):
+    """A narrower caller domain excludes, rather than rejects, delivered checks."""
+    sc = pytest.importorskip("sinchole")
+    m = write_delivery(tmp_path, full=True)
+    save_manifest(tmp_path, m)
+    check_ids = [r["id"] for r in m["checks"]]
+    with jax.enable_x64():
+        narrow = sc.Domain(
+            "box", "closed", jnp.array([[-0.05, -0.05], [0.05, 0.05]]), jnp.zeros(2)
+        )
+        _, backend, info = route_interpolation(
+            tmp_path, "sinc", SincOptions(domain=narrow), None
+        )
+        provenance = dict(info.receipt.provenance)
+        excluded = json.loads(provenance["excluded_checks"])
+        assert excluded and set(excluded) <= set(check_ids)
+        result = backend.create_psf_with_info(0.0, 0.0)
+        assert bool(result.accepted)
