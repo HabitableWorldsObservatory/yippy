@@ -404,6 +404,16 @@ def _cube(coro):
     return np.asarray(coro.psf_datacube)
 
 
+@pytest.mark.parametrize(("kind", "warned"), [("1d", True), ("2dq", False)])
+def test_datacube_warning_names_1d_sampling_only(tmp_path, caplog, kind, warned):
+    """Fails if a 1D datacube stops reporting that its PSFs are not rotated."""
+    path = _yip(tmp_path, f"warn_{kind}", kind=kind, npix=16, max_offset_lod=2.0)
+    coro = Coronagraph(path)
+    with caplog.at_level("WARNING", logger="yippy"):
+        coro.create_psf_datacube()
+    assert any("not rotated" in r.getMessage() for r in caplog.records) is warned
+
+
 def _assert_same_cube(warm, cold):
     """Two independently synthesized cubes agree to synthesis roundoff.
 

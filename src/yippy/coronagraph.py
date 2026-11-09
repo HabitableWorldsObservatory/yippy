@@ -414,6 +414,13 @@ class Coronagraph:
         """
         if self._sinc_delivery is not None:
             return self._create_delivery_datacube(batch_size)
+        if self.offax.type == "1d":
+            logger.warning(
+                "Building a PSF datacube from a 1D YIP: off-axis PSFs are "
+                "translated to each source position, not rotated to its "
+                "position angle, so azimuthal PSF structure keeps its +x "
+                "orientation. Use a 2D YIP for spatially resolved scenes."
+            )
         backend = jax.default_backend().lower()
         if backend in ("gpu", "tpu"):
             return self._create_psf_datacube_gpu(batch_size=batch_size)
