@@ -293,7 +293,9 @@ class OffAx:
 
         Notes:
             - If `self.type` is "1d", the (x, y) position is converted to a
-              radial separation and angle for interpolation.
+              radial separation for interpolation; the PSF is mirrored for
+              x < 0 or y < 0 and translated, never rotated to the position
+              angle.
             - If `self.type` is "2dq", the (x, y) position is mirrored to the
               first quadrant, and the PSF is flipped accordingly after
               interpolation.

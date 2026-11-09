@@ -55,6 +55,10 @@ YIP names end with a sampling-regime suffix:
 
 - `_1d` -- radially-symmetric sampling. The PSF cube is indexed by radial
   separation; lighter weight, suitable for back-of-envelope yield work.
+  Off-axis PSFs are translated to the requested position, not rotated to
+  its position angle, so azimuthal structure in the tabulated PSFs keeps
+  its +x orientation. Not recommended for spatially-resolved image
+  simulation.
 - `_2d` -- full 2D off-axis grid. Captures azimuthal variation; required
   whenever PSF asymmetries matter (e.g. for spatially-resolved benchmarks).
 
