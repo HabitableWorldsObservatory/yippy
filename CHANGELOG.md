@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.12.1](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.12.0...v2.12.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **coronagraph:** warn when a PSF datacube is built from a 1D YIP ([0fae8d6](https://github.com/HabitableWorldsObservatory/yippy/commit/0fae8d61818fe2675c2fb83a7aae32af8522eb14))
+
 ## [2.12.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.11.0...v2.12.0) (2026-11-06)
 
 
