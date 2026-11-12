@@ -18,7 +18,7 @@ dependencies = [
   "equinox>=0.13.2",
   "interpax>=0.3.12",
   "jaxtyping>=0.3.3",
-  "pooch>=1.8.0",
+  "pooch>=1.9.0",
 ]
 license = { file = "LICENSE" }
 dynamic = ['readme', 'version']
