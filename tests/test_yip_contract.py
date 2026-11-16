@@ -287,6 +287,19 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d, monkeypatch):
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == ("per_unit_area", "transmission")
         assert image.reconstruction == "linear"
+        assert image.outside == "reflect"
+    # Stellar halos continue past the field; off-axis PSFs vanish outside it.
+    for image in (
+        coro.stellar_intens(0.1 * lod),
+        view.stellar_intens(jnp.array([0.0, 0.1])),
+        view.stellar_map(500, 0.1, pixel_scale_lod=0.25, shape=grid.shape),
+    ):
+        assert image.outside == "reflect"
+    for image in (
+        coro.create_psf(1.0, 0.0),
+        view.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
+    ):
+        assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     for image in (
         view.source_psfs(

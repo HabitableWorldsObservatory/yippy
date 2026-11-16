@@ -113,6 +113,8 @@ class StellarIntens:
             "per_pixel",
             "stellar_flux_fraction",
             reconstruction="band_limited",
+            # The residual halo continues past the tabulated field.
+            outside="reflect",
         )
 
     def _evaluate_array(self, stellar_diam, lam=None, D=None):

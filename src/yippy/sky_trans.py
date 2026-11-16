@@ -47,4 +47,6 @@ class SkyTrans:
             "per_unit_area",
             "transmission",
             reconstruction="linear",
+            # Transmission continues past the tabulated field.
+            outside="reflect",
         )

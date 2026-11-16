@@ -417,6 +417,8 @@ class EqxCoronagraph(eqx.Module):
             "per_pixel",
             "stellar_flux_fraction",
             reconstruction="band_limited",
+            # The residual halo continues past the tabulated field.
+            outside="reflect",
         )
 
     def throughput(self, separation_lod: float) -> Array:
