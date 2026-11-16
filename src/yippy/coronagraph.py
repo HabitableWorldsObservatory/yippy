@@ -6,10 +6,10 @@ import warnings
 from pathlib import Path
 
 import astropy.io.fits as pyfits
-import astropy.units as u
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Image
 from lod_unit import lod
 from tqdm import tqdm
 
@@ -33,7 +33,6 @@ from .performance import (
     compute_throughput_curve,
     core_mean_intensity_profile,
     plot_performance_curve,
-    stellar_axis_index,
 )
 from .performance import (
     compute_all_performance_curves as _compute_all_perf,
@@ -42,9 +41,9 @@ from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
 from .util import cache_identity_digest, read_performance_cache_key
 
-# Invalidate artifacts generated before conservative PSF rebinning. Unlike a
-# release version this also protects development checkouts using the same tag.
-_SAMPLING_CACHE_VERSION = 1
+# Invalidate artifacts using corner counts as pixel-center indices, including
+# datacube layouts and nominal peak locations in performance tables.
+_SAMPLING_CACHE_VERSION = 2
 
 # Namespace of automatically managed cache entries. Schema 2 keys every entry
 # by a digest of its complete calculation identity; entries from earlier
@@ -111,7 +110,6 @@ class Coronagraph:
         downsample_shape: tuple[int, int] | None = None,
         aperture_radius_lod: float = 0.7,
         contrast_floor: float | None = None,
-        use_inscribed_diameter: bool = False,
         psf_trunc_ratio: float | None = None,
         interp_order: int | None = None,
         *,
@@ -164,10 +162,6 @@ class Coronagraph:
                 Minimum contrast value for engineering stability floor.
                 If provided, raw contrast values are floored at this value.
                 Typical AYO value is 1e-10. Default is None (no floor).
-            use_inscribed_diameter (bool):
-                Whether to use the inscribed diameter for lam/D calculations.
-                When True, input separations are scaled by D/D_INSC to
-                convert from inscribed to circumscribed units. Default False.
             psf_trunc_ratio (float | None):
                 PSF truncation ratio for throughput and core area computation.
                 When set, pixels above ``ratio * peak`` define the aperture,
@@ -240,27 +234,6 @@ class Coronagraph:
         self.pixel_scale_arcsec = self.header.pixscale
         self.frac_obscured = self.header.obscured
 
-        # Optionally use inscribed diameter for lam/D calculations (AYO compatibility)
-        # When enabled, input separations are scaled by D/D_INSC before querying
-        self.use_inscribed_diameter = use_inscribed_diameter
-        self._diameter_ratio = 1.0  # Default: no scaling
-        if use_inscribed_diameter:
-            if (
-                self.header.diameter_inscribed is not None
-                and self.header.diameter is not None
-            ):
-                self._diameter_ratio = float(
-                    self.header.diameter / self.header.diameter_inscribed
-                )
-                logger.info(
-                    f"Using inscribed diameter: separations scaled by "
-                    f"{self._diameter_ratio:.4f}"
-                )
-            else:
-                logger.warning(
-                    "use_inscribed_diameter=True but D_INSC not found in header"
-                )
-
         # Stellar intensity of the star being observed as function of stellar
         # angular diameter (unitless)
         self.stellar_intens = StellarIntens(
@@ -279,8 +252,11 @@ class Coronagraph:
                 x_symmetric,
                 y_symmetric,
                 downsample_shape=downsample_shape,
+                grid=self.header.pixel_grid(),
             )
         )
+
+        self.grid = self.offax.grid
 
         if delivery is not None:
             self.stellar_header = self.header
@@ -309,8 +285,8 @@ class Coronagraph:
         # Get the sky_trans mask
         self.sky_trans = SkyTrans(package_path, sky_trans_file)
 
-        # PSF datacube here is a 4D array of PSFs at each pixel (x psf offset,
-        # y psf offset, x, y). Given the computational cost of generating this
+        # PSF datacube axes are (source_y, source_x, y, x).
+        # Given the computational cost of generating this
         # datacube, it is only generated when needed.
         self.has_psf_datacube = False
         self.use_quarter_psf_datacube = use_quarter_psf_datacube
@@ -330,13 +306,25 @@ class Coronagraph:
     def create_psf(self, x_lod, y_lod):
         """Return the off-axis photon fraction per pixel at one source position."""
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
-            return self.create_psf_with_info(x_lod, y_lod).intensity
+            return Image(
+                self.create_psf_with_info(x_lod, y_lod).intensity,
+                self.grid,
+                (),
+                "per_pixel",
+                "stellar_flux_fraction",
+            )
         return self.offax.create_psf(x_lod, y_lod)
 
     def create_psfs(self, x, y):
         """Return off-axis photon fractions for equal-length coordinate vectors."""
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
-            return self.create_psfs_with_info(x, y).intensity
+            return Image(
+                self.create_psfs_with_info(x, y).intensity,
+                self.grid,
+                ("source",),
+                "per_pixel",
+                "stellar_flux_fraction",
+            )
         return self.offax.create_psfs(x, y)
 
     def create_psf_with_info(self, x_lod, y_lod):
@@ -353,7 +341,9 @@ class Coronagraph:
             if "EXTRA_MISSING" in info.reasons
             else ((1 << 0) if "LAYOUT_UNSUPPORTED" in info.reasons else 0)
         )
-        return blend_read(image, finite, reasons, fallback=info.requested == "auto")
+        return blend_read(
+            image.data, finite, reasons, fallback=info.requested == "auto"
+        )
 
     def create_psfs_with_info(self, x, y):
         """Return batch images with per-query status and backend selections."""
@@ -400,11 +390,33 @@ class Coronagraph:
             _validated_cache=hit,
         )
 
+    def _datacube_offsets(self):
+        """Source (x, y) offsets on the native grid, optionally its positive quarter.
+
+        Even geometric grids have disjoint quadrants; odd grids share axes.
+        Reflection storage requires the optical axis at the geometric midpoint.
+        """
+        grid = self.grid
+        columns, rows = np.arange(grid.shape[1]), np.arange(grid.shape[0])
+        if self.use_quarter_psf_datacube:
+            if (grid.center_x, grid.center_y) != (
+                (grid.shape[1] - 1) / 2,
+                (grid.shape[0] - 1) / 2,
+            ):
+                raise ValueError("quarter datacubes require a geometric grid center")
+            columns = columns[columns >= grid.center_x]
+            rows = rows[rows >= grid.center_y]
+        return np.meshgrid(
+            (columns - grid.center_x) * grid.step,
+            (rows - grid.center_y) * grid.step,
+            indexing="xy",
+        )
+
     def create_psf_datacube(self, batch_size=128):
         """Load the PSF datacube from a file or generate it if it doesn't exist.
 
-        The PSF datacube is a 4D array of PSFs at each pixel (x psf offset,
-        y psf offset, x, y). Given the computational cost of generating this
+        The PSF datacube has axes (source_y, source_x, y, x).
+        Given the computational cost of generating this
         datacube, it is only generated when needed and saved to a numpy binary
         file in the yip_path directory.
 
@@ -431,28 +443,9 @@ class Coronagraph:
             logger.info(f"Loading PSF datacube from {datacube_path}.")
             psfs = jnp.asarray(cached)
         else:
-            # Create data cube of spatially dependent PSFs.
-            psfs_shape = (*self.psf_shape, *self.psf_shape)
+            x_lod, y_lod = self._datacube_offsets()
+            psfs_shape = (*x_lod.shape, *self.psf_shape)
             psfs = np.zeros(psfs_shape, dtype=float_dtype())
-            if not self.use_quarter_psf_datacube:
-                pixel_lod = (
-                    (np.arange(self.npixels) - ((self.npixels - 1) // 2))
-                    * u.pixel
-                    * self.pixel_scale_arcsec
-                ).value
-            else:
-                center_idx = (self.npixels - 1) // 2
-                pixel_lod = (
-                    (np.arange(center_idx, self.npixels) - center_idx)
-                    * u.pixel
-                    * self.pixel_scale_arcsec
-                ).value
-            n_src = len(pixel_lod)
-            psfs_shape = (n_src, n_src, *self.psf_shape)
-            psfs = np.zeros(psfs_shape, dtype=float_dtype())
-
-            # Get the pixel coordinates for the PSF evaluations
-            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod, indexing="xy")
             points = np.column_stack((x_lod.flatten(), y_lod.flatten()))
             n_points = points.shape[0]
 
@@ -471,7 +464,7 @@ class Coronagraph:
                     # Store the batch in the data cube
                     psfs.reshape((-1, self.npixels, self.npixels))[
                         i : i + batch_size
-                    ] = batch_psfs
+                    ] = batch_psfs.data
                     pb.update(batch_points.shape[0])
             _save_datacube(datacube_path, psfs)
             logger.info(f"PSF datacube saved to {datacube_path}.")
@@ -550,15 +543,7 @@ class Coronagraph:
                         return
             except (ValueError, EOFError, OSError, KeyError):
                 pass
-        center = np.array(self._sinc_delivery.manifest["detector_center_xy"])
-        columns, rows = np.arange(self.npixels), np.arange(self.npixels)
-        if self.use_quarter_psf_datacube:
-            columns, rows = columns[columns >= center[0]], rows[rows >= center[1]]
-        xx, yy = np.meshgrid(
-            (columns - center[0]) * self.offax.pitch_lod,
-            (rows - center[1]) * self.offax.pitch_lod,
-            indexing="xy",
-        )
+        xx, yy = self._datacube_offsets()
         x, y = xx.ravel(), yy.ravel()
         images = []
         diagnostics = {
@@ -619,24 +604,8 @@ class Coronagraph:
             logger.info(f"Loading PSF datacube from {datacube_path}.")
             psfs = jnp.asarray(cached)
         else:
-            if not self.use_quarter_psf_datacube:
-                pixel_lod = (
-                    (np.arange(self.npixels) - ((self.npixels - 1) // 2))
-                    * u.pixel
-                    * self.pixel_scale_arcsec
-                ).value
-            else:
-                center_idx = (self.npixels - 1) // 2
-                pixel_lod = (
-                    (np.arange(center_idx, self.npixels) - center_idx)
-                    * u.pixel
-                    * self.pixel_scale_arcsec
-                ).value
-
-            n_src = len(pixel_lod)
-            psfs_shape = (n_src, n_src, *self.psf_shape)
-
-            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod, indexing="xy")
+            x_lod, y_lod = self._datacube_offsets()
+            psfs_shape = (*x_lod.shape, *self.psf_shape)
             points = np.column_stack((x_lod.flatten(), y_lod.flatten()))
             n_points = points.shape[0]
 
@@ -657,7 +626,7 @@ class Coronagraph:
                     batch_x = jnp.array(points[i : i + batch_size, 0])
                     batch_y = jnp.array(points[i : i + batch_size, 1])
                     batch_psfs = self.offax.create_psfs(batch_x, batch_y)
-                    flat_view[i : i + batch_size] = np.asarray(batch_psfs)
+                    flat_view[i : i + batch_size] = np.asarray(batch_psfs.data)
                     pb.update(batch_x.shape[0])
 
             _save_datacube(datacube_path, psfs)
@@ -765,6 +734,11 @@ class Coronagraph:
         identity = self._cache_identity_base(
             "psf_datacube", ("offax_psf", "offax_offsets")
         )
+        identity["layout"] = 2
+        identity["grid"] = {
+            "center_xy": (self.grid.center_x, self.grid.center_y),
+            "basis": self.grid.basis,
+        }
         identity["storage"] = "quarter" if self.use_quarter_psf_datacube else "full"
         if not self.use_quarter_psf_datacube:
             identity["x_symmetric"] = bool(self.x_symmetric)
@@ -813,7 +787,7 @@ class Coronagraph:
         mode), the aperture mode and threshold, the effective oversampling,
         the stellar diameter of the contrast calculation, and in truncation
         mode the core's subpixel factor, grid step and window. Settings
-        applied after loading (contrast floor, inscribed-diameter scaling,
+        applied after loading (contrast floor,
         interpolation order) and quantities recomputed on every construction
         (circular-mode core area, occulter transmission, core mean intensity)
         are not part of it.
@@ -1079,9 +1053,6 @@ class Coronagraph:
 
         sep_array = np.atleast_1d(separation_val)
 
-        if self._diameter_ratio != 1.0:
-            sep_array = sep_array * self._diameter_ratio
-
         return sep_array
 
     def _is_scalar_input(self, sep_values, separation):
@@ -1288,7 +1259,7 @@ class Coronagraph:
         """Pixel-grid separations from the optical axis in lam/D.
 
         The axis is the one the core mean intensity profile is measured about
-        (:func:`yippy.performance.stellar_axis_index`): half a pixel before
+        (the shared pixel grid): half a pixel before
         the header's ``XCENTER`` and ``YCENTER``, between the four central
         pixels of an even-sized map. The 2D map projections built on this
         grid therefore agree with their 1D curves.
@@ -1297,10 +1268,7 @@ class Coronagraph:
             numpy.ndarray: (npix, npix) array of separations.
         """
         npix = self.npixels
-        if self._sinc_delivery is None:
-            cy, cx = stellar_axis_index(self)
-        else:
-            cy, cx = self.offax.center_y.value, self.offax.center_x.value
+        cy, cx = self.grid.center_y, self.grid.center_x
         y, x = np.mgrid[:npix, :npix]
         r_pix = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
         return r_pix * self.pixel_scale_arcsec.value
@@ -1325,7 +1293,10 @@ class Coronagraph:
         if self._sinc_delivery is None:
             r = self.separation_map()
         else:
-            cy, cx = stellar_axis_index(self)
+            cy, cx = (
+                self.stellar_intens.grid.center_y,
+                self.stellar_intens.grid.center_x,
+            )
             yy, xx = np.indices(self.stellar_intens.psfs.shape[-2:])
             r = np.hypot(xx - cx, yy - cy) * self.stellar_pixel_scale_arcsec.value
         return np.asarray(

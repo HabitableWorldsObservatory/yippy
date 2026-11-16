@@ -10,7 +10,7 @@ from scipy.special import j1
 from synthetic_yip import write_synthetic_yip
 
 from yippy import Coronagraph, EqxCoronagraph
-from yippy.performance import azimuthal_mean_profile, stellar_axis_index
+from yippy.performance import azimuthal_mean_profile
 
 
 @pytest.fixture(scope="module", params=[(None, False), (1, False), (1, True)])
@@ -52,8 +52,8 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
         keys_before = coro.core_mean_intensity(separation, diameter).copy()
         expected = np.asarray(
             eqx.filter_jit(azimuthal_mean_profile)(
-                coro.stellar_intens(diameter * lod),
-                stellar_axis_index(coro),
+                coro.stellar_intens(diameter * lod).data,
+                (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x),
                 separation / coro.pixel_scale_arcsec.value,
                 interpolation="quintic",
             )

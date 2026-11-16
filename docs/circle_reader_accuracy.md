@@ -93,7 +93,7 @@ measured scan is in [circle_reader_accuracy.csv](circle_reader_accuracy.csv).
 
 ## Coordinate and boundary checks
 
-- `stellar_axis_index` converts corner-based metadata to pixel-center indices
+- `HeaderData.pixel_grid()` converts corner counts to pixel-center coordinates
   by subtracting 0.5: metadata center 64 becomes index 63.5.
 - The reader accepts radii in pixels. The callers convert lambda/D to pixels
   by dividing by the pixel scale; the reader neither rescales intensity nor

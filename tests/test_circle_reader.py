@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from scipy.special import i0, j1
 
-from yippy.performance import azimuthal_mean_profile, stellar_axis_index
+from yippy.performance import azimuthal_mean_profile
 
 # Share compilation across cases to keep this analytic unit file inexpensive.
 _circle_mean = jax.jit(azimuthal_mean_profile)
@@ -63,15 +63,18 @@ def test_quadratic_circle_mean(center):
     expected = expected + radii_lod**2 / 2
     coro = SimpleNamespace(
         stellar_intens=SimpleNamespace(
-            center_y=center[0] + 0.5, center_x=center[1] + 0.5
+            grid=SimpleNamespace(center_y=center[0], center_x=center[1])
         )
     )
-    assert stellar_axis_index(coro) == center
+    assert (
+        coro.stellar_intens.grid.center_y,
+        coro.stellar_intens.grid.center_x,
+    ) == center
     with jax.enable_x64():
         actual = np.asarray(
             _circle_mean(
                 density * pixel_scale**2,
-                stellar_axis_index(coro),
+                (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x),
                 radii_lod / pixel_scale,
             )
         )

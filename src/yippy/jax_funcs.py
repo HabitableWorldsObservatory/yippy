@@ -632,24 +632,12 @@ def synthesize_psf_separable(
             (x1 == x0) & (y1 == y0), jnp.array([1.0, 0.0, 0.0, 0.0]), weights
         )
 
-    # Symmetry logic
-    eff_offsets_x = offsets[:, 0]
-    eff_offsets_y = offsets[:, 1]
-
-    if x_symmetric:
-        eff_offsets_x = jnp.where(x < 0, -offsets[:, 0], offsets[:, 0])
-        neighbors = lax.cond(
-            x < 0, lambda p: jnp.flip(p, axis=2), lambda p: p, neighbors
-        )
-    if y_symmetric:
-        eff_offsets_y = jnp.where(y < 0, -offsets[:, 1], offsets[:, 1])
-        neighbors = lax.cond(
-            y < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, neighbors
-        )
-
-    # Calculate Shift (in pixels)
-    shift_x = (x - eff_offsets_x) / pixel_scale_arcsec
-    shift_y = (y - eff_offsets_y) / pixel_scale_arcsec
+    # Shift in the canonical quadrant; reflect only after interpolation so
+    # fractional Nyquist shifts agree with quarter-datacube reconstruction.
+    query_x = jnp.where(x < 0, -x, x) if x_symmetric else x
+    query_y = jnp.where(y < 0, -y, y) if y_symmetric else y
+    shift_x = (query_x - offsets[:, 0]) / pixel_scale_arcsec
+    shift_y = (query_y - offsets[:, 1]) / pixel_scale_arcsec
 
     # Pad (using consistent n_pad from init)
     # (K, H, W) -> (K, H_pad, W_pad)
@@ -692,6 +680,11 @@ def synthesize_psf_separable(
     # Unpad
     h_orig = flat_psfs.shape[-2]
     psf = res[n_pad : n_pad + h_orig, n_pad : n_pad + h_orig]
+
+    if x_symmetric:
+        psf = lax.cond(x < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, psf)
+    if y_symmetric:
+        psf = lax.cond(y < 0, lambda p: jnp.flip(p, axis=0), lambda p: p, psf)
 
     psf = jnp.maximum(psf, 0.0)
 
@@ -762,27 +755,13 @@ def synthesize_psf_idw(
     weights = 1.0 / (near_dists + 1e-10) ** 2
     weights = weights / jnp.sum(weights)
 
-    # Apply Symmetry Flips to neighbors
-    eff_offsets_x = flat_x_offsets[inds]
-    eff_offsets_y = flat_y_offsets[inds]
-
-    if x_symmetric:
-        # Check against original x
-        neighbors = lax.cond(
-            x < 0, lambda p: jnp.flip(p, axis=2), lambda p: p, neighbors
-        )
-        eff_offsets_x = jnp.where(x < 0, -eff_offsets_x, eff_offsets_x)
-
-    if y_symmetric:
-        # Check against original y
-        neighbors = lax.cond(
-            y < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, neighbors
-        )
-        eff_offsets_y = jnp.where(y < 0, -eff_offsets_y, eff_offsets_y)
-
-    # Calculate Shift (in pixels)
-    shift_x = (x - eff_offsets_x) / pixel_scale_arcsec
-    shift_y = (y - eff_offsets_y) / pixel_scale_arcsec
+    # Interpolate in the canonical quadrant, then reflect the finished image.
+    # Reflecting before a fractional FFT shift can disagree at the Nyquist
+    # boundary; post-interpolation reflection makes quarter storage exact.
+    query_x = jnp.where(x < 0, -x, x) if x_symmetric else x
+    query_y = jnp.where(y < 0, -y, y) if y_symmetric else y
+    shift_x = (query_x - flat_x_offsets[inds]) / pixel_scale_arcsec
+    shift_y = (query_y - flat_y_offsets[inds]) / pixel_scale_arcsec
 
     # Pad and FFT (Standard Shift Logic)
     pad_width = ((0, 0), (n_pad, n_pad), (n_pad, n_pad))
@@ -809,4 +788,8 @@ def synthesize_psf_idw(
     h_orig = flat_psfs.shape[-2]
     psf = res[n_pad : n_pad + h_orig, n_pad : n_pad + h_orig]
 
+    if x_symmetric:
+        psf = lax.cond(x < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, psf)
+    if y_symmetric:
+        psf = lax.cond(y < 0, lambda p: jnp.flip(p, axis=0), lambda p: p, psf)
     return jnp.maximum(psf, 0.0)

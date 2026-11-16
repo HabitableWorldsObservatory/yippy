@@ -5,12 +5,14 @@ import copy
 import astropy.io.fits as fits
 import astropy.units as u
 import numpy as np
+from hwoutils.grids import Frame, PixelGrid
+from lod_unit import lod
 
 from yippy.offax import OffAx
 
 
 def test_rebinning_transforms_optical_center(tmp_path):
-    """The input optical center at index 4 maps to index 1.75 in 2x bins."""
+    """The input optical center at index 3.5 maps to index 1.5 in 2x bins."""
     fits.writeto(tmp_path / "psfs.fits", np.ones((4, 8, 8)))
     fits.writeto(
         tmp_path / "offsets.fits",
@@ -20,13 +22,14 @@ def test_rebinning_transforms_optical_center(tmp_path):
         tmp_path,
         "psfs.fits",
         "offsets.fits",
-        0.1 * u.arcsec / u.pix,
+        0.1 * lod / u.pix,
         True,
         True,
         downsample_shape=(4, 4),
+        grid=PixelGrid.focal(8, 0.1, Frame(500, 6, "circumscribed")),
     )
-    assert offax.center_x.to_value(u.pix) == 1.75
-    assert offax.center_y.to_value(u.pix) == 1.75
+    assert offax.grid.center_x == 1.5
+    assert offax.grid.center_y == 1.5
 
 
 def test_optical_center_axes_are_not_transposed(tmp_path):
@@ -45,12 +48,15 @@ def test_optical_center_axes_are_not_transposed(tmp_path):
         tmp_path,
         "psfs.fits",
         "offsets.fits",
-        0.1 * u.arcsec / u.pix,
+        0.1 * lod / u.pix,
         True,
         True,
+        grid=PixelGrid.regular(
+            (8, 12), 0.1, "lod", frame=Frame(500, 6, "circumscribed")
+        ),
     )
-    assert offax.center_x.to_value(u.pix) == 6.0
-    assert offax.center_y.to_value(u.pix) == 4.0
+    assert offax.grid.center_x == 5.5
+    assert offax.grid.center_y == 3.5
 
 
 def test_performance_cache_distinguishes_rebinned_psfs(coro):

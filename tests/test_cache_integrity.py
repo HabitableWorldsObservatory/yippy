@@ -146,10 +146,15 @@ def test_setter_does_not_persist_contrast_floor(tmp_path):
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
 
 
-def test_setter_does_not_persist_inscribed_diameter_scaling(tmp_path):
+def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
     """The setter stores contrast on the package's separation grid."""
     path = _yip(tmp_path, "warm")
-    seed = Coronagraph(path, use_inscribed_diameter=True)
+    from yippy import lod_inscribed_to_circumscribed
+
+    seed = Coronagraph(path)
+    before = seed._perf_filename()
+    seed.throughput(lod_inscribed_to_circumscribed(5.0, seed.grid.frame, 5.0))
+    assert seed._perf_filename() == before
     seed.set_psf_trunc_ratio(0.3)
     warm = Coronagraph(path, psf_trunc_ratio=0.3)
     cold = Coronagraph(_yip(tmp_path, "cold"), psf_trunc_ratio=0.3)

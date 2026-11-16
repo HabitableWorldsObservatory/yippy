@@ -23,7 +23,7 @@ BETWEEN_KNOTS_LOD = (1.25, 2.25, 3.75, 4.25)
 
 def _sum(coro, x_lod, y_lod=0.0):
     """Total flux of the synthesized PSF at a sky position."""
-    return float(np.asarray(coro.offax(x_lod * lod, y_lod * lod)).sum())
+    return float(np.asarray(coro.offax(x_lod * lod, y_lod * lod).data).sum())
 
 
 def test_interpolated_flux_is_bracketed_by_its_two_neighbours(syn_coro_1d):
@@ -132,7 +132,7 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
 
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
-    """The center the map uses is the center synthesis mirrors about."""
+    """The map and synthesis share an axis, to the 1e-5 pixel float32 fit floor."""
     separation_map = np.asarray(syn_coro_1d.separation_map())
     nearest = np.argwhere(separation_map == separation_map.min())
     map_center = float(np.mean(nearest[:, 1]))
@@ -140,11 +140,13 @@ def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
     columns = []
     for separation in (2.0, 3.0):
         for sign in (+1.0, -1.0):
-            psf = np.asarray(syn_coro_1d.offax(sign * separation * lod, 0.0 * lod))
-            columns.append(np.unravel_index(np.argmax(psf), psf.shape)[1])
+            psf = np.asarray(syn_coro_1d.offax(sign * separation * lod, 0.0 * lod).data)
+            row, col = np.unravel_index(np.argmax(psf), psf.shape)
+            a, b, c = np.log(psf[row, col - 1 : col + 2])
+            columns.append(col + 0.5 * (a - c) / (a - 2 * b + c))
     synthesis_center = float(np.mean(columns))
 
-    assert synthesis_center == pytest.approx(float(map_center)), (
+    assert synthesis_center == pytest.approx(float(map_center), abs=1e-5, rel=0), (
         f"the separation map is centered on column {map_center} while off-axis "
         f"synthesis is centered on {synthesis_center}"
     )
@@ -260,3 +262,74 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     expected = float(coro.core_mean_intensity(np.sqrt(0.5) * pixel_lod))
     np.testing.assert_allclose(central, expected, rtol=1e-10)
     np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
+
+
+@pytest.mark.parametrize("npix,kind", [(8, "2dq"), (9, "2dq"), (8, "1d")])
+def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
+    """Fails if scene deltas and point sources differ by half a native pixel.
+
+    Float32 FFT floor: 2e-6 of peak for batched/single reads and reflected
+    quadrants. The explicit half-pixel mutant must differ by >0.1 of peak,
+    over 50,000 times the allowed error. Odd grids retain integer offsets.
+    """
+    from copy import copy
+
+    from synthetic_yip import write_synthetic_yip
+
+    from yippy import Coronagraph
+
+    package = write_synthetic_yip(
+        tmp_path / "cube",
+        kind=kind,
+        npix=npix,
+        max_offset_lod=1.5,
+        offset_step_lod=0.25,
+        psf_sigma_lod=0.25,
+        occulter_floor=1.0,
+    )
+    full = Coronagraph(package.path, use_quarter_psf_datacube=False)
+    full.create_psf_datacube(batch_size=81)
+    cube = np.asarray(full.psf_datacube)
+    center = (npix - 1) / 2
+    row, col = npix // 2 - 1, npix // 2 + 1
+    x, y = (col - center) * 0.25, (row - center) * 0.25
+    direct = np.asarray(full.offax(x * lod, y * lod).data)
+    scene = np.zeros((npix, npix))
+    scene[row, col] = 1
+    rendered = np.einsum("ij,ijyx->yx", scene, cube)
+    tolerance = direct.max() * 2e-6
+    np.testing.assert_allclose(rendered, direct, rtol=0, atol=tolerance)
+    shifted = np.asarray(full.create_psf(x + 0.125, y + 0.125).data)
+    assert np.max(np.abs(shifted - direct)) > direct.max() * 0.1
+    # Independent integer-offset reader anchor for odd n, half-integer for even.
+    assert x == (col - ((npix - 1) // 2)) * 0.25 if npix % 2 else x == 0.375
+    quarter = copy(full)
+    quarter.use_quarter_psf_datacube = True
+    quarter._create_psf_datacube_gpu(batch_size=81)
+    small = np.asarray(quarter.psf_datacube)
+    assert small.shape[:2] == ((npix + 1) // 2, (npix + 1) // 2)
+    folded = np.empty_like(cube)
+    start = int(np.ceil(center))
+    for j in range(npix):
+        for i in range(npix):
+            jj, ii = (
+                (npix - 1 - j if j < center else j),
+                (npix - 1 - i if i < center else i),
+            )
+            plane = small[jj - start, ii - start]
+            if j < center:
+                plane = plane[::-1, :]
+            if i < center:
+                plane = plane[:, ::-1]
+            folded[j, i] = plane
+    np.testing.assert_allclose(folded, cube, rtol=0, atol=cube.max() * 2e-6)
+    quarter._datacube_cache_path.unlink()
+    quarter.create_psf_datacube(batch_size=81)
+    np.testing.assert_allclose(
+        quarter.psf_datacube, small, rtol=0, atol=small.max() * 2e-6
+    )
+    assert full._datacube_identity()["layout"] == 2
+    # Force the batched builder to generate the full cube rather than load it.
+    full._datacube_cache_path.unlink()
+    full._create_psf_datacube_gpu(batch_size=81)
+    np.testing.assert_allclose(full.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)

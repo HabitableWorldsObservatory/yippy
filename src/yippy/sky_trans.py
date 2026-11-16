@@ -3,6 +3,10 @@
 from pathlib import Path
 
 import astropy.io.fits as pyfits
+import numpy as np
+from hwoutils.grids import Image
+
+from .header import HeaderData
 
 
 class SkyTrans:
@@ -28,6 +32,16 @@ class SkyTrans:
         # Load the sky transmission file
         self.data = pyfits.getdata(Path(yip_dir, sky_trans_file), 0)
 
-    def __call__(self):
-        """Returns the sky transmission map data."""
-        return self.data
+        self.grid = HeaderData.from_fits_header(
+            pyfits.getheader(Path(yip_dir, sky_trans_file), 0)
+        ).pixel_grid(self.data.shape[-2:])
+
+    def __call__(self) -> Image:
+        """Return dimensionless transmission as a density-like sampled field."""
+        return Image(
+            np.asarray(self.data, dtype=float),
+            self.grid,
+            (),
+            "per_unit_area",
+            "transmission",
+        )

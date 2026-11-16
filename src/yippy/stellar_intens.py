@@ -5,9 +5,11 @@ from pathlib import Path
 import astropy.io.fits as pyfits
 import numpy as np
 from astropy.units import Quantity
+from hwoutils.grids import Image
 from lod_unit import lod
 from scipy.interpolate import CubicSpline
 
+from .header import HeaderData
 from .util import convert_to_lod
 
 
@@ -61,16 +63,7 @@ class StellarIntens:
         # Get header information
         header = pyfits.getheader(Path(yip_dir, stellar_intens_file), 0)
 
-        # Get center coordinates from header or use image center
-        if "XCENTER" in header:
-            self.center_x = header["XCENTER"]
-        else:
-            self.center_x = psfs[0].shape[1] / 2
-
-        if "YCENTER" in header:
-            self.center_y = header["YCENTER"]
-        else:
-            self.center_y = psfs[0].shape[0] / 2
+        self.grid = HeaderData.from_fits_header(header).pixel_grid(psfs.shape[-2:])
 
         # Load the stellar angular diameters in units of lambda/D. This is the
         # package's own record of what it contains and is reported unchanged.
@@ -90,7 +83,7 @@ class StellarIntens:
         self.psfs[self.psfs == 0] = np.finfo(np.float32).eps
         self.ln_interp = CubicSpline(interp_diams, np.log(self.psfs))
 
-    def __call__(self, stellar_diam: Quantity, lam=None, D=None):
+    def __call__(self, stellar_diam: Quantity, lam=None, D=None) -> Image:
         """Returns the stellar intensity map at a specified stellar diameter.
 
         Stellar intensity is interpolated based on a specified diameter using the
@@ -107,14 +100,16 @@ class StellarIntens:
                 Diameter of the telescope, required if stellar_diam is in angular units.
 
         Returns:
-            NDArray:
-                An interpolated 2D map of the stellar intensity at the given
-                stellar diameter.
+            Image:
+                Per-pixel fraction of unocculted stellar flux, with diameter
+                axes preceding (y, x).
         """
-        # Set up conversion from angular units to lambda/D
+        data = self._evaluate_array(stellar_diam, lam, D)
+        axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))
+        return Image(data, self.grid, axes, "per_pixel", "stellar_flux_fraction")
+
+    def _evaluate_array(self, stellar_diam, lam=None, D=None):
+        """Host spline values, retaining FITS precision for performance tables."""
         if stellar_diam.unit != lod:
             stellar_diam = convert_to_lod(stellar_diam, lam=lam, D=D)
-
-        # Return the exponentiated result of the interpolation to get the
-        # actual intensity map
         return np.exp(self.ln_interp(stellar_diam))

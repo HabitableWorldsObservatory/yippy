@@ -65,9 +65,11 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(importlib, "import_module", unavailable)
     blend = Coronagraph(synthetic_1d.path)
     auto = Coronagraph(synthetic_1d.path, interpolation="auto")
-    np.testing.assert_array_equal(blend.create_psf(0.3, 0.2), auto.create_psf(0.3, 0.2))
+    np.testing.assert_array_equal(
+        blend.create_psf(0.3, 0.2).data, auto.create_psf(0.3, 0.2).data
+    )
     assert not auto.create_psf_with_info(np.nan, 0.0).accepted
-    assert np.isnan(auto.create_psf(np.nan, 0.0)).all()
+    assert np.isnan(auto.create_psf(np.nan, 0.0).data).all()
     assert auto.interpolation_info.reasons == ("EXTRA_MISSING",)
     assert "interpolation" not in blend._datacube_identity()
     with pytest.raises(SincExtraMissing, match=r"yippy\[sinc\]"):
@@ -130,9 +132,9 @@ def test_full_blend_extra_isolation(tmp_path, monkeypatch):
     _, fallback, info = route_interpolation(tmp_path, "auto", None, None)
     assert info.reasons == ("EXTRA_MISSING",)
     expected = delivery.nodes[16 * 33 + 16] * (2.0 * 0.25**2)
-    np.testing.assert_allclose(blend.create_psf(0.0, 0.0), expected, rtol=2e-7)
+    np.testing.assert_allclose(blend.create_psf(0.0, 0.0).data, expected, rtol=2e-7)
     np.testing.assert_array_equal(
-        fallback.create_psf(0.0, 0.0), blend.create_psf(0.0, 0.0)
+        fallback.create_psf(0.0, 0.0).data, blend.create_psf(0.0, 0.0).data
     )
     assert fallback.create_psf_with_info(0.0, 0.0).selected_backend == 0
 
@@ -192,7 +194,7 @@ def test_reads_units_refusals(admitted):
         -admitted.offax.reader.grid.intensity,
     )
     np.testing.assert_allclose(
-        signed_backend.create_psf(0.07, -0.04), -direct.intensity, atol=1e-18
+        signed_backend.create_psf(0.07, -0.04).data, -direct.intensity, atol=1e-18
     )
     for measure, conversion in (("integral", 2.0), ("mean", 2.0 * 0.25**2)):
         d = admitted._sinc_delivery
@@ -217,31 +219,41 @@ def test_reads_units_refusals(admitted):
         )
         backend = DeliveryBackend(changed, new_reader, "sinc")
         np.testing.assert_allclose(
-            backend.create_psf(0.07, -0.04), direct.intensity * conversion, atol=1e-18
+            backend.create_psf(0.07, -0.04).data,
+            direct.intensity * conversion,
+            atol=1e-18,
         )
     refused = admitted.create_psf_with_info(np.nan, 0.0)
     assert not refused.accepted
     assert int(refused.reason_bits) & int(sc.Reason.NONFINITE_QUERY)
     with pytest.raises(sc.ReadRefused):
         admitted.create_psf(np.nan, 0.0)
-    assert np.isnan(jax.jit(admitted.create_psf)(np.nan, 0.0)).all()
+    assert np.isnan(jax.jit(admitted.create_psf)(np.nan, 0.0).data).all()
     batch = admitted.create_psfs_with_info(
         jnp.array([0.07, np.nan]), jnp.array([-0.04, 0.0])
     )
     np.testing.assert_array_equal(batch.accepted, [True, False])
-    assert admitted.create_psfs(jnp.empty(0), jnp.empty(0)).shape == (0, 4, 4)
+    assert admitted.create_psfs(jnp.empty(0), jnp.empty(0)).data.shape == (0, 4, 4)
 
 
 def test_stellar_frame_and_eqx(admitted):
     """Fails if stellar pitch is overwritten or reader tables hide in closures."""
     view = EqxCoronagraph(yippy_coro=admitted)
-    assert np.ptp(view.stellar_intens(0.0)) > 0
-    from hwoutils.transforms import resample_flux
-
-    expected = resample_flux(view.stellar_intens(0.0), 0.4, 0.3, (4, 4), 0.0)
-    wrong = resample_flux(view.stellar_intens(0.0), 0.25, 0.3, (4, 4), 0.0)
-    np.testing.assert_array_equal(
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.3, shape=(4, 4)), expected
+    assert np.ptp(view.stellar_intens(0.0).data) > 0
+    # Linear interpolation at target pixel centers, times the pixel-area ratio.
+    # The fixture has identical rows. This oracle detects use of off-axis pitch
+    # or a corner count in place of the stellar grid center.
+    row = np.asarray(view.stellar_intens(0.0).data[0])
+    target_columns = (np.arange(4) - 1.5) * (0.3 / 0.4) + 1.5
+    expected = np.tile(np.interp(target_columns, np.arange(4), row), (4, 1))
+    expected *= (0.3 / 0.4) ** 2
+    wrong = np.tile(np.interp(target_columns, np.arange(4), row), (4, 1))
+    wrong *= (0.3 / 0.25) ** 2
+    np.testing.assert_allclose(
+        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.3, shape=(4, 4)).data,
+        expected,
+        rtol=2e-15,
+        atol=0,
     )
     assert not np.allclose(expected, wrong, atol=0.0, rtol=1e-3)
     assert view.stellar_pixel_scale_lod == 0.4
@@ -251,16 +263,18 @@ def test_stellar_frame_and_eqx(admitted):
     assert admitted.header.pixscale.value == 0.4
     np.testing.assert_allclose(admitted.core_intensity_separations[1], 0.1)
     np.testing.assert_allclose(
-        view.stellar_intens(0.0), admitted.stellar_intens(0.0 * lod), rtol=1e-14
-    )
-    np.testing.assert_allclose(
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)),
-        admitted.stellar_intens(0.0 * lod),
+        view.stellar_intens(0.0).data,
+        admitted.stellar_intens(0.0 * lod).data,
         rtol=1e-14,
     )
     np.testing.assert_allclose(
-        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)),
-        admitted.sky_trans(),
+        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
+        admitted.stellar_intens(0.0 * lod).data,
+        rtol=1e-14,
+    )
+    np.testing.assert_allclose(
+        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
+        admitted.sky_trans().data,
         atol=1e-14,
     )
     assert any(
@@ -272,7 +286,7 @@ def test_stellar_frame_and_eqx(admitted):
     @eqx.filter_jit
     def read(module):
         traces.append(None)
-        return module.create_psf(0.07, -0.04)
+        return module.create_psf(0.07, -0.04).data
 
     expected = read(view)
     changed = eqx.tree_at(
@@ -401,19 +415,19 @@ def test_table_consumer(admitted):
         rtol=1e-14,
     )
     np.testing.assert_array_equal(
-        consumer.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)),
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)),
+        consumer.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
+        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
     )
     np.testing.assert_array_equal(
-        consumer.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)),
-        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)),
+        consumer.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
+        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
     )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
-    expected = admitted.create_psfs(x, y)
-    result = consumer.source_psfs(500.0, x, y, pixel_scale_lod=0.25, shape=(4, 4))
+    expected = admitted.create_psfs(x, y).data
+    result = consumer.source_psfs(500.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)).data
     np.testing.assert_allclose(result, expected, atol=1e-18)
     np.testing.assert_array_equal(
-        view.source_psfs(600.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)), result
+        view.source_psfs(600.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)).data, result
     )
 
 
@@ -469,7 +483,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
     )
     for row, y in enumerate((0.125, 0.375)):
         np.testing.assert_allclose(
-            before[row, 0], admitted.create_psf(0.125, y), rtol=1e-14
+            before[row, 0], admitted.create_psf(0.125, y).data, rtol=1e-14
         )
         assert np.isfinite(before[row, 0]).all()
         assert np.isnan(before[row, 1]).all()
@@ -491,18 +505,20 @@ def test_public_delivery(tmp_path):
         coro = Coronagraph(root, interpolation="sinc")
         view = EqxCoronagraph(yippy_coro=coro)
         np.testing.assert_allclose(
-            view.create_psf(4.0, 5.5), coro.create_psf(4.0, 5.5), rtol=1e-14
+            view.create_psf(4.0, 5.5).data, coro.create_psf(4.0, 5.5).data, rtol=1e-14
         )
         np.testing.assert_allclose(
-            view.stellar_intens(0.0), coro.stellar_intens(0.0 * lod), rtol=1e-14
+            view.stellar_intens(0.0).data,
+            coro.stellar_intens(0.0 * lod).data,
+            rtol=1e-14,
         )
         np.testing.assert_allclose(
             view.background_transmission(
                 500.0,
                 pixel_scale_lod=view.sky_pixel_scale_lod,
-                shape=view.sky_trans.shape,
-            ),
-            coro.sky_trans(),
+                shape=view.sky_trans.data.shape,
+            ).data,
+            coro.sky_trans().data,
             atol=1e-14,
         )
         offaxis_frame = (
@@ -519,9 +535,9 @@ def test_public_delivery(tmp_path):
                     500.0,
                     0.0,
                     pixel_scale_lod=view.stellar_pixel_scale_lod,
-                    shape=view.stellar_intens(0.0).shape,
-                ),
-                view.stellar_intens(0.0),
+                    shape=view.stellar_intens(0.0).data.shape,
+                ).data,
+                view.stellar_intens(0.0).data,
                 atol=1e-14,
             )
             x, y = jnp.array([4.0]), jnp.array([5.5])
@@ -532,8 +548,8 @@ def test_public_delivery(tmp_path):
                     y,
                     pixel_scale_lod=view.pixel_scale_lod,
                     shape=view.psf_shape,
-                ),
-                coro.create_psfs(x, y),
+                ).data,
+                coro.create_psfs(x, y).data,
                 rtol=1e-14,
             )
         metadata = json.loads((root / "sinc-delivery.json").read_text())
@@ -554,7 +570,8 @@ def test_public_delivery(tmp_path):
             peak = image[region].max()
             assert peak > 0
             assert (
-                np.max(np.abs(np.asarray(coro.create_psf(*q)) - image)) <= 1e-5 * peak
+                np.max(np.abs(np.asarray(coro.create_psf(*q).data) - image))
+                <= 1e-5 * peak
             )
 
 

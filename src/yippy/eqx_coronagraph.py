@@ -26,7 +26,7 @@ accept an ``EqxCoronagraph`` as input::
     def simulate(coro, x, y):
         psf = coro.create_psf(x, y)
         stellar = coro.stellar_intens(0.01)
-        return psf + stellar
+        return psf.data + stellar.data
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.transforms import resample_flux
+from hwoutils.grids import Image, PixelGrid, resample
 from jaxtyping import Array
 
 from ._precision import float_dtype
@@ -47,7 +47,6 @@ from .performance import (
     _PchipWithLinearTails,
     azimuthal_mean_profile,
     profile_radii,
-    stellar_axis_index,
 )
 
 
@@ -83,8 +82,9 @@ class EqxCoronagraph(eqx.Module):
     # -- Scalar metadata (auto-static in filter_jit) -----------------------
     pixel_scale_lod: float
     psf_shape: tuple[int, int]
-    center_x: float
-    center_y: float
+    grid: PixelGrid
+    stellar_grid: PixelGrid
+    sky_grid: PixelGrid
     IWA: float  # inner working angle in lam/D
     OWA: float  # outer working angle in lam/D
     frac_obscured: float
@@ -127,7 +127,7 @@ class EqxCoronagraph(eqx.Module):
     _interp_order: int | None = eqx.field(static=True)
 
     # -- Static arrays (dynamic) -----------------------------------------
-    sky_trans: Array
+    sky_trans: Image
     psf_datacube: Array | None
 
     # -- Construction -----------------------------------------------------
@@ -142,7 +142,6 @@ class EqxCoronagraph(eqx.Module):
         downsample_shape: tuple[int, int] | None = None,
         aperture_radius_lod: float = 0.7,
         contrast_floor: float | None = None,
-        use_inscribed_diameter: bool = False,
         # Extra Coronagraph kwargs
         x_symmetric: bool = True,
         y_symmetric: bool = True,
@@ -167,8 +166,6 @@ class EqxCoronagraph(eqx.Module):
                 Aperture radius in lam/D for performance curves (forwarded).
             contrast_floor:
                 Minimum contrast value for engineering stability floor (forwarded).
-            use_inscribed_diameter:
-                Whether to use inscribed diameter for lam/D calcs (forwarded).
             x_symmetric:
                 Whether off-axis PSFs are symmetric about the x-axis (forwarded).
             y_symmetric:
@@ -179,6 +176,9 @@ class EqxCoronagraph(eqx.Module):
         Raises:
             ValueError: If neither ``yip_path`` nor ``yippy_coro`` is provided.
         """
+        import inspect
+
+        inspect.signature(Coronagraph).bind_partial(yip_path, **kwargs)
         if yippy_coro is None and yip_path is None:
             raise ValueError("Provide either yip_path or yippy_coro")
 
@@ -190,7 +190,6 @@ class EqxCoronagraph(eqx.Module):
                 contrast_floor=contrast_floor,
                 x_symmetric=x_symmetric,
                 y_symmetric=y_symmetric,
-                use_inscribed_diameter=use_inscribed_diameter,
                 **kwargs,
             )
 
@@ -215,17 +214,9 @@ class EqxCoronagraph(eqx.Module):
 
         # -- Scalar metadata ---------------------------------------------
         self.pixel_scale_lod = float(yippy_coro.pixel_scale_arcsec.value)
-        self.stellar_pixel_scale_lod = float(
-            getattr(
-                yippy_coro, "stellar_pixel_scale_arcsec", yippy_coro.pixel_scale_arcsec
-            ).value
-        )
+        self.stellar_pixel_scale_lod = yippy_coro.stellar_intens.grid.step
+        self.sky_pixel_scale_lod = yippy_coro.sky_trans.grid.step
         sky_header = getattr(yippy_coro, "sky_header", None)
-        self.sky_pixel_scale_lod = (
-            self.pixel_scale_lod
-            if sky_header is None
-            else float(sky_header.pixscale.value)
-        )
 
         def frame_metadata(header):
             return (
@@ -240,8 +231,9 @@ class EqxCoronagraph(eqx.Module):
         self.stellar_frame = frame_metadata(yippy_coro.header)
         self.sky_frame = frame_metadata(sky_header or yippy_coro.header)
         self.psf_shape = tuple(map(int, yippy_coro.psf_shape))
-        self.center_x = float(yippy_coro.offax.center_x.value)
-        self.center_y = float(yippy_coro.offax.center_y.value)
+        self.grid = yippy_coro.grid
+        self.stellar_grid = yippy_coro.stellar_intens.grid
+        self.sky_grid = yippy_coro.sky_trans.grid
         self.IWA = float(yippy_coro.IWA.value)
         self.OWA = float(yippy_coro.OWA.value)
         self.frac_obscured = float(yippy_coro.frac_obscured)
@@ -292,7 +284,7 @@ class EqxCoronagraph(eqx.Module):
             yippy_coro, "_core_intensity_diameter", float(diam_values[0])
         )
         self._diam_knot_range = (float(diam_values.min()), float(diam_values.max()))
-        self._stellar_axis = tuple(float(c) for c in stellar_axis_index(yippy_coro))
+        self._stellar_axis = (self.stellar_grid.center_y, self.stellar_grid.center_x)
         self._profile_radii_pix = jnp.asarray(
             profile_radii(stellar.psfs.shape[-2:], self._stellar_axis),
             dtype=float_dtype(),
@@ -300,7 +292,7 @@ class EqxCoronagraph(eqx.Module):
         self._interp_order = yippy_coro.interp_order
 
         # -- Sky transmission --------------------------------------------
-        self.sky_trans = jnp.asarray(yippy_coro.sky_trans(), dtype=float_dtype())
+        self.sky_trans = yippy_coro.sky_trans()
 
         # -- Optional PSF datacube ---------------------------------------
         if ensure_psf_datacube:
@@ -359,11 +351,8 @@ class EqxCoronagraph(eqx.Module):
         Returns:
             Photon fraction per target pixel for each source.
         """
-        return jax.vmap(
-            lambda image: resample_flux(
-                image, self.pixel_scale_lod, pixel_scale_lod, shape, 0.0
-            )
-        )(self.create_psfs(x_lod, y_lod))
+        target = PixelGrid.regular(shape, pixel_scale_lod, "lod", frame=self.grid.frame)
+        return resample(self.create_psfs(x_lod, y_lod), target)
 
     def stellar_map(self, wavelength_nm, stellar_diam_lod, *, pixel_scale_lod, shape):
         """Resample stellar photon fractions using the stellar reference pitch.
@@ -377,13 +366,10 @@ class EqxCoronagraph(eqx.Module):
         Returns:
             Stellar photon fractions per target pixel.
         """
-        return resample_flux(
-            self.stellar_intens(stellar_diam_lod),
-            self.stellar_pixel_scale_lod,
-            pixel_scale_lod,
-            shape,
-            0.0,
+        target = PixelGrid.regular(
+            shape, pixel_scale_lod, "lod", frame=self.stellar_grid.frame
         )
+        return resample(self.stellar_intens(stellar_diam_lod), target)
 
     def background_transmission(self, wavelength_nm, *, pixel_scale_lod, shape):
         """Resample the dimensionless sky mask with its own reference pitch.
@@ -396,23 +382,25 @@ class EqxCoronagraph(eqx.Module):
         Returns:
             Dimensionless transmission per target pixel.
         """
-        return (
-            resample_flux(
-                self.sky_trans, self.sky_pixel_scale_lod, pixel_scale_lod, shape, 0.0
-            )
-            * (self.sky_pixel_scale_lod / pixel_scale_lod) ** 2
+        target = PixelGrid.regular(
+            shape, pixel_scale_lod, "lod", frame=self.sky_grid.frame
         )
+        return resample(self.sky_trans, target)
 
-    def stellar_intens(self, stellar_diam_lod: float) -> Array:
+    def stellar_intens(self, stellar_diam_lod: float) -> Image:
         """Interpolate the stellar intensity map for a given stellar diameter.
 
         Args:
             stellar_diam_lod: Stellar diameter in lam/D (unitless float).
 
         Returns:
-            2-D JAX array containing the stellar intensity map.
+            Image of per-pixel unocculted stellar flux fractions.
         """
-        return jnp.exp(self._stellar_ln_interp(stellar_diam_lod))
+        data = jnp.exp(self._stellar_ln_interp(stellar_diam_lod))
+        axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))
+        return Image(
+            data, self.stellar_grid, axes, "per_pixel", "stellar_flux_fraction"
+        )
 
     def throughput(self, separation_lod: float) -> Array:
         """Evaluate coronagraph throughput at the given separation.
@@ -584,7 +572,7 @@ class EqxCoronagraph(eqx.Module):
         self, separation_lod, stellar_diam_lod, interpolation="keys"
     ) -> Array:
         """Azimuthal mean of the interpolated stellar map at one diameter."""
-        stellar_map = self.stellar_intens(stellar_diam_lod)
+        stellar_map = self.stellar_intens(stellar_diam_lod).data
         radii = self._profile_radii_pix
         r_pix = (
             jnp.asarray(separation_lod, dtype=radii.dtype)

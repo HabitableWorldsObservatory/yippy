@@ -29,10 +29,10 @@ __all__ = [
     "core_window_half_width_pix",
     "fetch_yip",
     "list_yips",
+    "lod_inscribed_to_circumscribed",
     "logger",
     "plot_performance_curve",
     "profile_radii",
-    "stellar_axis_index",
     "truncation_core",
     "yip_exists",
     "yip_info",
@@ -42,6 +42,7 @@ from ._version import __version__
 from .coronagraph import Coronagraph
 from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
 from .eqx_coronagraph import EqxCoronagraph
+from .header import lod_inscribed_to_circumscribed
 from .interpolation import SincOptions
 from .logger import logger
 from .performance import (
@@ -68,6 +69,5 @@ from .performance import (
     core_window_half_width_pix,
     plot_performance_curve,
     profile_radii,
-    stellar_axis_index,
     truncation_core,
 )

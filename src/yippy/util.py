@@ -9,8 +9,9 @@ import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
 from astropy.units import Quantity
+from hwoutils.grids import Frame
 from hwoutils.transforms import resample_flux
-from lod_unit import lod, lod_eq
+from lod_unit import lod
 
 
 def convert_to_lod(
@@ -19,8 +20,7 @@ def convert_to_lod(
     """Convert the x/y position to lambda/D.
 
     This function has the following assumptions on the x/y values provided:
-        - If units are pixels, they follow the 00LL convention. As in the (0,0)
-          point is the lower left corner of the image.
+        - Pixel coordinates label centers; (0, 0) is the first pixel center.
         - If the x/y values are in lambda/D, angular, or length units the
             (0,0) point is the center of the image, where the star is
             (hopefully) located.
@@ -62,7 +62,13 @@ def convert_to_lod(
             f"Telescope diameter must be provided to convert {x.unit.physical_type}"
             f" to lod."
         )
-        x = x.to(lod, lod_eq(lam, D))
+        x = (
+            x.to_value(u.arcsec)
+            / Frame(lam.to_value(u.nm), D.to_value(u.m), "circumscribed").lod_to_arcsec(
+                lam.to_value(u.nm)
+            )
+            * lod
+        )
     elif x.unit.physical_type == "length":
         # If the distance to the system is not provided, raise an error
         assert dist is not None, (
@@ -70,7 +76,7 @@ def convert_to_lod(
             f" to {lod}."
         )
         x_angular = np.arctan(x.to(u.m).value / dist.to(u.m).value) * u.rad
-        x = x_angular.to(lod, lod_eq(lam, D))
+        x = convert_to_lod(x_angular, lam=lam, D=D)
     else:
         raise ValueError(f"No conversion implemented for {x.unit.physical_type}")
     return x
@@ -82,8 +88,7 @@ def convert_to_pix(
     """Convert the x/y position from lambda/D to pixel units.
 
     This function has the following assumptions on the x/y values provided:
-        - If the desired output is in pixels, the (0,0) point is the lower left
-          corner of the image.
+        - Pixel coordinates label centers; (0, 0) is the first pixel center.
         - If the x/y values are in lambda/D, angular, or length units, the
           (0,0) point is the center of the image, where the star is
           (hopefully) located.
@@ -136,7 +141,7 @@ def convert_to_pix(
         )
 
         # Convert angle to lambda/D
-        x_lod = x.to(u.rad, lod_eq(lam, D))
+        x_lod = convert_to_lod(x, lam=lam, D=D)
         # Now convert lambda/D to pixels
         x_pixels = x_lod / pixel_scale_arcsec + center_pix
 
@@ -155,7 +160,7 @@ def convert_to_pix(
         # Convert length to angle
         x_angle = np.arctan(x.to(u.m).value / dist.to(u.m).value) * u.rad
         # Convert angle to lambda/D
-        x_lod = x_angle.to(lod, lod_eq(lam, D))
+        x_lod = convert_to_lod(x_angle, lam=lam, D=D)
         # Now convert lambda/D to pixels
         x_pixels = x_lod / pixel_scale_arcsec + center_pix
 

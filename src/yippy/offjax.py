@@ -5,6 +5,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 from astropy.units import Quantity
+from hwoutils.grids import Image, PixelGrid
 from jax import device_put, jit, shard_map, vmap
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
@@ -24,10 +25,8 @@ class OffJAX(OffAx):
     Attributes:
         pixel_scale_arcsec (Quantity):
             Pixel scale of the PSF data in lambda/D.
-        center_x (Quantity):
-            Central x position in the PSF data.
-        center_y (Quantity):
-            Central y position in the PSF data.
+        grid (PixelGrid):
+            Pixel-center geometry in the package reference frame.
         flat_psfs (jnp.ndarray):
             Flat array of PSF data with shape (N_psfs, H, W), cast as JAX array.
         offset_to_flat_idx (jnp.ndarray):
@@ -43,6 +42,8 @@ class OffJAX(OffAx):
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
+        *,
+        grid: PixelGrid | None = None,
     ) -> None:
         """Initializes the OffJAX class by casting YIP data to JAX arrays.
 
@@ -59,6 +60,7 @@ class OffJAX(OffAx):
                 Whether the PSFs are symmetric in x.
             y_symmetric:
                 Whether the PSFs are symmetric in y.
+            grid: Native package grid, built from its authoritative header.
             downsample_shape:
                 Optional target shape (ny, nx) to downsample PSFs to.
                 If provided, all PSFs will be resampled to this shape
@@ -72,6 +74,7 @@ class OffJAX(OffAx):
             x_symmetric,
             y_symmetric,
             downsample_shape=downsample_shape,
+            grid=grid,
         )
 
         ##############
@@ -162,11 +165,11 @@ class OffJAX(OffAx):
         # ---------------------------------------------------------
         # BINDING
         # ---------------------------------------------------------
-        self.create_psfs_kernel = vmap(
+        self._create_psfs_kernel = vmap(
             create_psf_kernel, in_axes=(0, 0, None, None, None, None, None, None)
         )
-        self.create_psfs_j = jit(self.create_psfs_kernel)
-        self.create_psf_kernel_single = jit(create_psf_kernel)
+        self._create_psfs_j = jit(self._create_psfs_kernel)
+        self._create_psf_kernel_single = jit(create_psf_kernel)
 
         # ---------------------------------------------------------
         # WRAPPERS
@@ -182,7 +185,7 @@ class OffJAX(OffAx):
             y_handle = self.flat_y_offsets
 
         def create_psfs_wrapper(x, y):
-            return self.create_psfs_j(
+            return self._create_psfs_j(
                 x,
                 y,
                 self.flat_psfs,
@@ -193,10 +196,10 @@ class OffJAX(OffAx):
                 self.ky,
             )
 
-        self.create_psfs = create_psfs_wrapper
+        self._create_psfs = create_psfs_wrapper
 
         def create_psf_wrapper(x, y):
-            return self.create_psf_kernel_single(
+            return self._create_psf_kernel_single(
                 x,
                 y,
                 self.flat_psfs,
@@ -207,7 +210,17 @@ class OffJAX(OffAx):
                 self.ky,
             )
 
-        self.create_psf = create_psf_wrapper
+        self._create_psf = create_psf_wrapper
+
+    def create_psfs(self, x, y) -> Image:
+        """Return per-pixel source flux fractions with leading axis source."""
+        return Image(
+            self._create_psfs(x, y),
+            self.grid,
+            ("source",),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
 
     def create_psfs_parallel(self, x_vals, y_vals):
         """Create off-axis PSFs at multiple positions in parallel using shard_map.
@@ -243,7 +256,7 @@ class OffJAX(OffAx):
             y_handle = self.flat_y_offsets
 
         psfs_padded = shard_map(
-            self.create_psfs_j,
+            self._create_psfs_j,
             mesh=mesh,
             in_specs=(P("i"), P("i"), P(), P(), P(), P(), P(), P()),
             out_specs=P("i"),
@@ -264,4 +277,4 @@ class OffJAX(OffAx):
         else:
             psfs = psfs_padded
 
-        return psfs
+        return Image(psfs, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")

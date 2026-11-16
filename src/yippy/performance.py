@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import astropy.units as u
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -85,14 +86,15 @@ def _iter_xaxis_positions(coro: Coronagraph):
         if x_lod_val < 0:
             continue
         r = abs(x_lod_val)
-        planet_psf = coro.offax.get_psf_by_offset_idx(i, y_idx)
+        planet_image = coro.offax.get_psf_by_offset_idx(i, y_idx)
+        planet_psf = None if planet_image is None else np.asarray(planet_image.data)
         if planet_psf is None:
             continue
         px = convert_to_pix(
-            x_lod_val, coro.offax.center_x, coro.pixel_scale_arcsec
+            x_lod_val, coro.offax.grid.center_x * u.pix, coro.pixel_scale_arcsec
         ).value
         py = convert_to_pix(
-            y_lod_val, coro.offax.center_y, coro.pixel_scale_arcsec
+            y_lod_val, coro.offax.grid.center_y * u.pix, coro.pixel_scale_arcsec
         ).value
         yield _OffAxisPosition(separation=r, psf=planet_psf, px=px, py=py)
 
@@ -336,16 +338,19 @@ def compute_raw_contrast_curve(
     Returns:
         ``(separations, contrasts)`` - sorted 1-D arrays.
     """
-    star_psf = coro.stellar_intens(stellar_diam)
+    star_psf = coro.stellar_intens._evaluate_array(stellar_diam)
     star_frame = None
     if getattr(coro, "_sinc_delivery", None) is not None:
-        star_cy, star_cx = stellar_axis_index(coro)
-        stellar_angle = float(coro.stellar_header.lambda0.to_value("m")) / float(
-            coro.stellar_header.diameter.to_value("m")
+        star_cy, star_cx = (
+            coro.stellar_intens.grid.center_y,
+            coro.stellar_intens.grid.center_x,
         )
-        planet_angle = float(coro.offaxis_header.lambda0.to_value("m")) / float(
-            coro.offaxis_header.diameter.to_value("m")
+        stellar_frame = coro.stellar_intens.grid.frame
+        planet_frame = coro.grid.frame
+        stellar_angle = stellar_frame.lod_to_arcsec(
+            stellar_frame.reference_wavelength_nm
         )
+        planet_angle = planet_frame.lod_to_arcsec(planet_frame.reference_wavelength_nm)
         pitch_ratio = (
             coro.pixel_scale_arcsec.value
             * planet_angle
@@ -354,8 +359,8 @@ def compute_raw_contrast_curve(
         star_frame = (
             star_cy,
             star_cx,
-            coro.offax.center_y.value,
-            coro.offax.center_x.value,
+            coro.offax.grid.center_y,
+            coro.offax.grid.center_x,
             pitch_ratio,
         )
     separations, contrasts = [], []
@@ -1179,19 +1184,21 @@ def compute_truncation_curves(
             chunk = grid[start : start + _PSF_BATCH]
             # A full batch every call, so the synthesis compiles once.
             padded = jnp.asarray(np.pad(chunk, (0, _PSF_BATCH - len(chunk)), "edge"))
-            psfs = coro.offax.create_psfs(padded, jnp.full_like(padded, y0))
+            psfs = coro.offax.create_psfs(padded, jnp.full_like(padded, y0)).data
             separations.extend(chunk.tolist())
             centers = np.column_stack(
                 [
                     np.full(
                         len(padded),
                         convert_to_pix(
-                            y0 * lod, coro.offax.center_y, coro.pixel_scale_arcsec
+                            y0 * lod,
+                            coro.offax.grid.center_y * u.pix,
+                            coro.pixel_scale_arcsec,
                         ).value,
                     ),
                     convert_to_pix(
                         np.asarray(padded) * lod,
-                        coro.offax.center_x,
+                        coro.offax.grid.center_x * u.pix,
                         coro.pixel_scale_arcsec,
                     ).value,
                 ]
@@ -1268,30 +1275,10 @@ def compute_occ_trans_curve(
     Returns:
         ``(separations_lod, occ_trans)`` - 1-D arrays.
     """
-    sky_trans_data = coro.sky_trans()
-    pitch = getattr(coro, "sky_header", None)
-    pitch = coro.pixel_scale_arcsec.value if pitch is None else pitch.pixscale.value
-    return compute_radial_average(sky_trans_data, pitch)
-
-
-def stellar_axis_index(coro: Coronagraph) -> tuple[float, float]:
-    """Pixel-center index ``(row, column)`` of the optical axis in the stellar maps.
-
-    A package's ``XCENTER`` and ``YCENTER`` (or ``npix / 2`` when they are
-    absent) count pixels from the array's outer corner. With integer indices
-    labeling pixel centers the axis therefore sits half a pixel earlier: a
-    256-pixel map with ``XCENTER = 128`` is point-symmetric about index 127.5,
-    between the four central pixels.
-
-    Args:
-        coro: Coronagraph instance.
-
-    Returns:
-        ``(row, column)`` of the optical axis as 0-based pixel-center indices.
-    """
-    return (
-        coro.stellar_intens.center_y - 0.5,
-        coro.stellar_intens.center_x - 0.5,
+    sky_trans_data = coro.sky_trans.data
+    grid = coro.sky_trans.grid
+    return compute_radial_average(
+        sky_trans_data, grid.step, center=(grid.center_y, grid.center_x)
     )
 
 
@@ -1530,8 +1517,10 @@ def core_mean_intensity_profile(
     Returns:
         1-D array, per pixel, on the radii of :func:`profile_radii`.
     """
-    psf = np.asarray(coro.stellar_intens(stellar_diam), dtype=np.float64)
-    center = stellar_axis_index(coro)
+    psf = np.asarray(
+        coro.stellar_intens._evaluate_array(stellar_diam), dtype=np.float64
+    )
+    center = (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x)
     radii = profile_radii(psf.shape, center)
     return np.asarray(
         azimuthal_mean_profile(
@@ -1557,7 +1546,7 @@ def compute_core_mean_intensity_curve(
     Returns:
         ``(separations_lod, intensities_dict)`` where *intensities_dict*
         maps each stellar diameter to its radial intensity profile: the
-        azimuthal mean, about the optical axis (:func:`stellar_axis_index`),
+        azimuthal mean, about the optical axis (the stellar pixel grid),
         of the fraction of the star's light falling on each pixel, at each
         separation (:func:`core_mean_intensity_profile`). The values are per
         pixel, not per unit solid angle; divide by the squared pixel scale in
@@ -1575,7 +1564,9 @@ def compute_core_mean_intensity_curve(
                 )
 
     shape = coro.stellar_intens.psfs.shape[-2:]
-    radii = profile_radii(shape, stellar_axis_index(coro))
+    radii = profile_radii(
+        shape, (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x)
+    )
     separations = (
         radii
         * getattr(coro, "stellar_pixel_scale_arcsec", coro.pixel_scale_arcsec).value

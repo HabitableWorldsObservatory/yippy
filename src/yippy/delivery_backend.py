@@ -7,6 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Image, PixelGrid
 from lod_unit import lod
 
 from .interpolation import InterpolationRead, ReadLedger, blend_read
@@ -32,7 +33,7 @@ class DeliveryBackend(eqx.Module):
     y_offsets: jax.Array
     conversion: float
     pitch_lod: float
-    center_xy_pix: tuple[float, float]
+    grid: PixelGrid
     psf_shape: tuple[int, int]
     requested: str = eqx.field(static=True)
     fallback_reasons: int = eqx.field(static=True)
@@ -60,9 +61,7 @@ class DeliveryBackend(eqx.Module):
         )
         self.conversion = delivery.conversion
         self.pitch_lod = float(delivery.manifest["pixel_scale_lod_xy"][0])
-        self.center_xy_pix = tuple(
-            float(c) for c in delivery.manifest["detector_center_xy"]
-        )
+        self.grid = delivery.header.pixel_grid()
         self.psf_shape = tuple(delivery.manifest["detector_shape_yx"])
         self.requested = requested
         self.fallback_reasons = fallback_reasons
@@ -75,19 +74,9 @@ class DeliveryBackend(eqx.Module):
         return self.pitch_lod * lod / u.pix
 
     @property
-    def center_x(self):
-        """Zero-based detector column center in pixels."""
-        return self.center_xy_pix[0] * u.pix
-
-    @property
-    def center_y(self):
-        """Zero-based detector row center in pixels."""
-        return self.center_xy_pix[1] * u.pix
-
-    @property
     def max_offset_in_image(self):
         """Largest positive detector pixel-center offset in reference units."""
-        return self.center_xy_pix[0] * self.pitch_lod * lod
+        return self.grid.center_x * self.pitch_lod * lod
 
     def get_psf_by_offset_idx(self, x_idx, y_idx):
         """Return a measured training image for performance diagnostics."""
@@ -97,7 +86,13 @@ class DeliveryBackend(eqx.Module):
             offset = jnp.array([self.x_offsets[x_idx], self.y_offsets[y_idx]])
             index = jnp.argmin(jnp.sum((self.blend_offsets - offset) ** 2, axis=1))
             image = self.blend_nodes[index]
-        return np.asarray(image) * self.conversion
+        return Image(
+            np.asarray(image) * self.conversion,
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
 
     def _blend_image(self, query):
         size = self.psf_shape[-1]
@@ -254,11 +249,23 @@ class DeliveryBackend(eqx.Module):
 
     def create_psf(self, x_lod, y_lod):
         """Return photon fractions, raising eagerly on a refused query."""
-        return self._require(self.create_psf_with_info(x_lod, y_lod))
+        return Image(
+            self._require(self.create_psf_with_info(x_lod, y_lod)),
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
 
     def create_psfs(self, x_lod, y_lod):
         """Return photon fractions for a vector of source coordinates."""
-        return self._require(self.create_psfs_with_info(x_lod, y_lod))
+        return Image(
+            self._require(self.create_psfs_with_info(x_lod, y_lod)),
+            self.grid,
+            ("source",),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
 
     def create_psfs_parallel(self, x_vals, y_vals):
         """Use the same bounded batch route; parallel tuning is not provided."""

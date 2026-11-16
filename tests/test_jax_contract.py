@@ -41,11 +41,11 @@ def test_single_and_batched_synthesis_agree(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.offax.create_psfs(xs, ys))
+    batched = np.asarray(coro.offax.create_psfs(xs, ys).data)
     assert batched.shape[0] == len(POSITIONS), "the batch lost positions"
 
     for index, (x, y) in enumerate(POSITIONS):
-        single = np.asarray(coro.offax(x * lod, y * lod))
+        single = np.asarray(coro.offax(x * lod, y * lod).data)
         assert np.allclose(single, batched[index], atol=1e-6 * single.max()), (
             f"batched synthesis disagrees with the single call at ({x}, {y})"
         )
@@ -57,8 +57,8 @@ def test_the_parallel_path_agrees_with_the_batched_one(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.offax.create_psfs(xs, ys))
-    parallel = np.asarray(coro.offax.create_psfs_parallel(xs, ys))
+    batched = np.asarray(coro.offax.create_psfs(xs, ys).data)
+    parallel = np.asarray(coro.offax.create_psfs_parallel(xs, ys).data)
     assert np.allclose(batched, parallel, atol=1e-6 * batched.max()), (
         "the parallel path returns different PSFs from the batched path"
     )
@@ -184,8 +184,8 @@ def test_the_same_position_gives_identical_psfs_to_roundoff(syn_coro_1d):
     margin for that while any stateful error is far larger.
     """
     coro = syn_coro_1d
-    first = np.asarray(coro.offax(2.0 * lod, 1.0 * lod))
-    second = np.asarray(coro.offax(2.0 * lod, 1.0 * lod))
+    first = np.asarray(coro.offax(2.0 * lod, 1.0 * lod).data)
+    second = np.asarray(coro.offax(2.0 * lod, 1.0 * lod).data)
     assert np.allclose(first, second, rtol=0, atol=1e-6 * first.max()), (
         "repeated synthesis differs beyond floating-point roundoff"
     )

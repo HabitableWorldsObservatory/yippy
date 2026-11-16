@@ -206,9 +206,11 @@ def export_exosims(
         raise ValueError(f"Throughput > 1: max = {np.max(throughput):.3f}")
 
     # Occulter transmission
-    sky_trans_data = coro.sky_trans()
+    sky_trans_data = coro.sky_trans.data
     sep_occ_trans, occ_trans = compute_radial_average(
-        sky_trans_data, coro.pixel_scale_arcsec.value
+        sky_trans_data,
+        coro.sky_trans.grid.step,
+        center=(coro.sky_trans.grid.center_y, coro.sky_trans.grid.center_x),
     )
 
     # Core mean intensity
@@ -243,11 +245,10 @@ def export_exosims(
 
     to_arcsec = units.lower() == "arcsec"
     if to_arcsec:
-        angunit = ((coro.header.lambda0) / (coro.header.diameter)).to(
-            u.arcsec, equivalencies=u.dimensionless_angles()
-        )
-        IWA_output = (IWA * angunit).to(u.arcsec).value
-        OWA_output = (OWA * angunit).to(u.arcsec).value
+        frame = coro.grid.frame
+        angunit = frame.lod_to_arcsec(coro.header.lambda0.to_value(u.nm))
+        IWA_output = float(IWA.to_value(lod) * angunit)
+        OWA_output = float(OWA.to_value(lod) * angunit)
     else:
         IWA_output = IWA.to_value(lod)
         OWA_output = OWA.to_value(lod)

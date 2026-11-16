@@ -8,6 +8,7 @@ The intensity integrates to one over the infinite image; do not normalize the
 finite crop, which would fold the missing Airy wings into the core.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import astropy.units as u
@@ -15,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.grids import Frame, Image, PixelGrid
 from lod_unit import lod
 from scipy.integrate import quad
 from scipy.optimize import brentq
@@ -45,16 +47,28 @@ def airy_psf(pixel_lod, shift_pix=0.0, size=256):
 def image_coro(psf, pixel_lod, star=None):
     """Expose one image through the same data interface as a loaded package."""
     center_y, center_x = np.array(psf.shape) // 2
+    grid = PixelGrid.regular(
+        psf.shape,
+        pixel_lod,
+        "lod",
+        center=(center_x, center_y),
+        frame=Frame(500, 6, "circumscribed"),
+    )
+    stellar_reader = lambda diam: Image(  # noqa: E731
+        psf if star is None else star, grid, (), "per_pixel", "stellar_flux_fraction"
+    )
+    stellar_reader._evaluate_array = lambda diam: psf if star is None else star
     return SimpleNamespace(
         pixel_scale_arcsec=pixel_lod * lod / u.pix,
         offax=SimpleNamespace(
             x_offsets=np.array([0.0]) * lod,
             y_offsets=np.array([0.0]) * lod,
-            center_x=center_x * u.pix,
-            center_y=center_y * u.pix,
-            get_psf_by_offset_idx=lambda i, j: psf,
+            grid=grid,
+            get_psf_by_offset_idx=lambda i, j: Image(
+                psf, grid, (), "per_pixel", "stellar_flux_fraction"
+            ),
         ),
-        stellar_intens=lambda diam: psf if star is None else star,
+        stellar_intens=stellar_reader,
     )
 
 
@@ -348,7 +362,7 @@ def test_nominal_search_preserves_fractional_pixel_position():
     """Native offsets use the same unrounded coordinates as synthesized PSFs."""
     coro = image_coro(airy_psf(0.25, 0.3, size=32), 0.25)
     coro.offax.x_offsets = np.array([0.075]) * lod
-    coro.offax.center_y = 16.2 * u.pix
+    coro.offax.grid = replace(coro.offax.grid, center_y=16.2)
     pos = next(_iter_xaxis_positions(coro))
     assert pos.px == pytest.approx(16.3)
     assert pos.py == pytest.approx(16.2)

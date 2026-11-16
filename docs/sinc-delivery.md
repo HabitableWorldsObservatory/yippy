@@ -332,7 +332,7 @@ Every PSF cube carries these keywords. The parser compares each with the manifes
 | `D` | `diameter_m` | In meters. |
 | `N_LAM` | 1 | Monochromatic product. |
 | `PIXSCALE` | `pixel_scale_lod_xy[0]` | In $\lambda_0/D$ per pixel. |
-| `XCENTER`, `YCENTER` | `detector_center_xy` | Zero-based, exactly equal. |
+| `XCENTER`, `YCENTER` | `detector_center_xy` | FITS 00LL corner counts minus 0.5 must equal the manifest pixel-center coordinates. |
 | `NAXIS1`, `NAXIS2` | detector columns, rows | Equal to `detector_shape_yx`. |
 | `BUNIT` | `incident_fraction_per_pixel` or `incident_fraction_per_lod2` | Not read by the parser, but required by the request. |
 

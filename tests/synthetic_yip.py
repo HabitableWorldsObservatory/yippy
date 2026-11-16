@@ -16,7 +16,7 @@ test that compares against them is checking the reader and not restating it:
   the offset, not at it.
 * Pixel and sky coordinates are related by ``column = center_x + x / pixscale``
   and ``row = center_y + y / pixscale``, with the center taken from the
-  ``XCENTER`` and ``YCENTER`` header keywords. x measures columns and y
+  ``XCENTER`` and ``YCENTER`` corner counts minus 0.5. x measures columns and y
   measures rows.
 * An off-axis PSF is a circular Gaussian of standard deviation ``psf_sigma_lod``
   whose total flux is ``psf_flux`` times an occulter transmission
@@ -50,7 +50,7 @@ import numpy as np
 # rounding detail.
 NPIX = 64
 PIXSCALE = 0.25
-CENTER = NPIX / 2
+CENTER = (NPIX - 1) / 2
 PSF_SIGMA_LOD = 0.5
 PSF_FLUX = 1.0
 STELLAR_LEVEL = 1e-10
@@ -159,8 +159,8 @@ def _header(npix, n_plane, pixscale, center, design):
     h["LAMBDA"] = (500.0, "nm, central wavelength")
     h["MINLAM"] = (450.0, "nm")
     h["MAXLAM"] = (550.0, "nm")
-    h["XCENTER"] = (center, "pixels, column of the optical axis")
-    h["YCENTER"] = (center, "pixels, row of the optical axis")
+    h["XCENTER"] = (center + 0.5, "00LL pixel corner count, x optical axis")
+    h["YCENTER"] = (center + 0.5, "00LL pixel corner count, y optical axis")
     h["OBSCURED"] = (0.0, "fraction of the pupil obscured")
     h["JITTER"] = (0.0, "mas")
     h["N_LAM"] = (1, "wavelengths")
@@ -215,7 +215,7 @@ def write_synthetic_yip(
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    center = npix / 2
+    center = (npix - 1) / 2
     if occulter_floor < 0:
         raise ValueError("occulter_floor must be non-negative")
 

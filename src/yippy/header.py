@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import astropy.units as u
 from astropy.io import fits
+from hwoutils.grids import Frame, PixelGrid
 from lod_unit import lod
 
 from .logger import logger
@@ -12,13 +13,11 @@ from .logger import logger
 
 @dataclass(frozen=True)
 class HeaderData:
-    """A dataclass for storing the header data with units attached.
+    """FITS package metadata with units attached.
 
-    I think this will be a useful system, however this has not been tested
-    considerably. This is just a suggestion for a more robust way to keep the
-    FITS header data attached to the coronagraph. Right now, the header data is
-    loaded by Coronagraph from the stellar_intens file. This may make more
-    sense if Offax, StellarIntens, and SkyTrans each load their own header.
+    xcenter and ycenter retain the header's 00LL pixel corner counts.
+    Use pixel_grid() for pixel-center coordinates and the reference frame.
+    D_INSC remains metadata; it does not change the native circumscribed frame.
     """
 
     simple: bool
@@ -42,6 +41,27 @@ class HeaderData:
     n_star: int | None = None
     zernike: str | None = None
     wfe: u.Quantity | None = None
+
+    def pixel_grid(self, shape=None) -> PixelGrid:
+        """Native grid; FITS 00LL centers count from the outer pixel corner.
+
+        Missing centers use the geometric midpoint of the supplied (ny, nx)
+        shape, or the header image shape. D is the circumscribed diameter.
+        """
+        shape = (self.naxis2, self.naxis1) if shape is None else tuple(shape)
+        step = self.pixscale.to_value(lod / u.pix)
+        return PixelGrid.from_corner_count(
+            shape,
+            shape[1] / 2 if self.xcenter is None else self.xcenter,
+            shape[0] / 2 if self.ycenter is None else self.ycenter,
+            basis=((step, 0.0), (0.0, step)),
+            unit="lod",
+            frame=Frame(
+                self.lambda0.to_value(u.nm),
+                self.diameter.to_value(u.m),
+                "circumscribed",
+            ),
+        )
 
     @staticmethod
     def extract_unit(comment: str, default_unit: u.Unit, key: str) -> u.Unit:
@@ -212,3 +232,16 @@ class HeaderData:
             zernike=header.get("ZERNIKE", ""),
             wfe=HeaderData.get_header_value(header, "WFE", u.pm),
         )
+
+
+def lod_inscribed_to_circumscribed(separation_lod, frame: Frame, diameter_inscribed_m):
+    """Convert inscribed lambda/D offsets to the supplied circumscribed frame.
+
+    Pass header.diameter_inscribed.to_value("m") for diameter_inscribed_m.
+    The separation may be an array or a traced scalar.
+    """
+    if frame.diameter_convention != "circumscribed":
+        raise ValueError("frame must use the circumscribed diameter")
+    if not 0 < diameter_inscribed_m <= frame.diameter_m:
+        raise ValueError("inscribed diameter must be positive and no larger than D")
+    return separation_lod * (frame.diameter_m / diameter_inscribed_m)

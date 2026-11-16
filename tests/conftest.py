@@ -33,8 +33,10 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
         eqx_coro: An ``EqxCoronagraph`` built under the active x64 setting.
     """
     expected = np.dtype(float_dtype())
-    assert np.dtype(eqx_coro.sky_trans.dtype) == expected, "sky_trans"
-    assert np.dtype(eqx_coro.stellar_intens(0.0).dtype) == expected, "stellar_intens"
+    assert np.dtype(eqx_coro.sky_trans.data.dtype) == expected, "sky_trans"
+    assert np.dtype(eqx_coro.stellar_intens(0.0).data.dtype) == expected, (
+        "stellar_intens"
+    )
     assert np.dtype(eqx_coro.throughput(5.0).dtype) == expected, "throughput"
     if eqx_coro._core_intensity_varies_with_diameter:
         out_2d = eqx_coro.core_mean_intensity(5.0, 1e-3)

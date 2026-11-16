@@ -21,7 +21,6 @@ from lod_unit import lod
 from scipy.interpolate import RectBivariateSpline
 
 from yippy import Coronagraph
-from yippy.performance import stellar_axis_index
 
 # Separations (lambda/D) and stellar diameters (lambda/D) probed on the
 # shipped packages. The diameters fall on, and between, the tabulated ones.
@@ -58,8 +57,12 @@ def ring_mean(image, center, radii_pix, n_theta=2048):
 def relative_errors(coro, diameter_lod, separations_lod):
     """|curve / reference - 1| and the reference, at each separation."""
     pixel_lod = float(coro.pixel_scale_arcsec.value)
-    image = np.asarray(coro.stellar_intens(diameter_lod * lod), dtype=np.float64)
-    reference = ring_mean(image, stellar_axis_index(coro), separations_lod / pixel_lod)
+    image = np.asarray(coro.stellar_intens(diameter_lod * lod).data, dtype=np.float64)
+    reference = ring_mean(
+        image,
+        (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x),
+        separations_lod / pixel_lod,
+    )
     curve = np.asarray(
         coro.core_mean_intensity(separations_lod, diameter_lod * lod), dtype=np.float64
     )

@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
 from hwoutils.constants import rad2arcsec
+from hwoutils.grids import Frame
 from lod_unit import lod
 
 from .header import HeaderData
@@ -113,9 +114,12 @@ def _agree(actual, expected, label, tolerance):
 
 
 def _header_checks(header, manifest, plane, tolerance_lod):
-    angular_arcsec = (float(manifest["lambda0_m"]) / float(manifest["diameter_m"])) * (
-        rad2arcsec
+    frame = Frame(
+        float(manifest["lambda0_m"]) * 1e9,
+        float(manifest["diameter_m"]),
+        "circumscribed",
     )
+    angular_arcsec = frame.lod_to_arcsec(frame.reference_wavelength_nm)
     for key, expected in (
         ("LAMBDA", manifest["lambda0_m"]),
         ("MINLAM", plane["wavelength_m"]),
@@ -157,9 +161,8 @@ def _header_checks(header, manifest, plane, tolerance_lod):
     if shape != (header["NAXIS2"], header["NAXIS1"]) or shape[0] != shape[1]:
         raise ValueError("Conflicting detector shape; square images required")
     center = np.asarray(manifest["detector_center_xy"], dtype=np.float64)
-    _agree(
-        np.array([header["XCENTER"], header["YCENTER"]]), center, "detector center", 0.0
-    )
+    grid = HeaderData.from_fits_header(header).pixel_grid(shape)
+    _agree(np.array([grid.center_x, grid.center_y]), center, "detector center", 0.0)
     if manifest.get("detector_convention") != "pixel_midpoint_v1" or not np.array_equal(
         center, (np.array(shape[::-1]) - 1) / 2
     ):

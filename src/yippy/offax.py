@@ -4,6 +4,7 @@ This has been deprecated. Please use OffJAX instead.
 """
 
 import warnings
+from dataclasses import replace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -12,12 +13,14 @@ import astropy.units as u
 import numpy as np
 from astropy.units import Quantity
 from hwoutils.fft import fft_shift
+from hwoutils.grids import Image, PixelGrid
 from hwoutils.transforms import downsample_psfs
 from lod_unit import lod
 from numpy.typing import NDArray
 
 from yippy.util import convert_to_lod, create_shift_mask
 
+from .header import HeaderData
 from .logger import logger
 
 
@@ -41,10 +44,8 @@ class OffAx:
     Attributes:
         pixel_scale_arcsec (Quantity):
             Pixel scale of the PSF data in lambda/D.
-        center_x (Quantity):
-            Central x position in the PSF data.
-        center_y (Quantity):
-            Central y position in the PSF data.
+        grid (PixelGrid):
+            Pixel-center geometry in the package reference frame.
         psf:
             Instance of the appropriate PSF class (e.g., OneD, TwoD) based on input YIP.
 
@@ -70,6 +71,8 @@ class OffAx:
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
+        *,
+        grid: PixelGrid | None = None,
     ) -> None:
         """Initializes the OffAx class by loading PSF and offset data from YIP.
 
@@ -86,6 +89,7 @@ class OffAx:
                 Whether the PSFs are symmetric in x.
             y_symmetric:
                 Whether the PSFs are symmetric in y.
+            grid: Native package grid, built from its authoritative header.
             downsample_shape:
                 Optional target shape (ny, nx) to downsample PSFs to.
                 If provided, all PSFs will be resampled to this shape
@@ -104,11 +108,13 @@ class OffAx:
         # FITS is big-endian; JAX downsampling requires native-endian arrays.
         psfs = psfs.astype(psfs.dtype.newbyteorder("="), copy=False)
 
-        # Save the center of the pixel array, which is used for converting to
-        # lambda/D when the x/y positions are in pixels. The stack is
-        # (n_psfs, row, column), so x measures columns and y measures rows.
-        self.center_x = psfs.shape[2] / 2 * u.pix
-        self.center_y = psfs.shape[1] / 2 * u.pix
+        self.grid = (
+            grid
+            if grid is not None
+            else HeaderData.from_fits_header(
+                pyfits.getheader(Path(yip_dir, offax_data_file), 0)
+            ).pixel_grid(psfs.shape[-2:])
+        )
 
         # Load the offset list, which is in units of lambda/D
         offsets = pyfits.getdata(Path(yip_dir, offax_offsets_file), 0)
@@ -214,8 +220,16 @@ class OffAx:
             # For example, input index 4 becomes 1.75 after a 2x reduction.
             scale_y = original_shape[0] / psfs.shape[1]
             scale_x = original_shape[1] / psfs.shape[2]
-            self.center_x = (self.center_x + 0.5 * u.pix) / scale_x - 0.5 * u.pix
-            self.center_y = (self.center_y + 0.5 * u.pix) / scale_y - 0.5 * u.pix
+            self.grid = replace(
+                self.grid,
+                shape=tuple(psfs.shape[-2:]),
+                center_x=(self.grid.center_x + 0.5) / scale_x - 0.5,
+                center_y=(self.grid.center_y + 0.5) / scale_y - 0.5,
+                basis=(
+                    (self.grid.step * scale_x, 0.0),
+                    (0.0, self.grid.step * scale_y),
+                ),
+            )
 
             # Update max_offset_in_image after downsampling
             self.max_offset_in_image = (
@@ -250,7 +264,7 @@ class OffAx:
         # Store PSF shape for convenience
         self.psf_shape = self.flat_psfs.shape[1:]
 
-    def get_psf_by_offset_idx(self, x_idx: int, y_idx: int):
+    def get_psf_by_offset_idx(self, x_idx: int, y_idx: int) -> Image | None:
         """Get PSF at the given offset indices.
 
         Args:
@@ -260,16 +274,27 @@ class OffAx:
                 Index into y_offsets array.
 
         Returns:
-            np.ndarray:
-                The PSF at the given offset indices, or None if no PSF exists
-                at that combination.
+            Image or None:
+                Per-pixel unocculted source flux fraction, or None when absent.
         """
         flat_idx = self.offset_to_flat_idx[x_idx, y_idx]
         if flat_idx >= 0:
-            return self.flat_psfs[flat_idx]
+            return Image(
+                self.flat_psfs[flat_idx],
+                self.grid,
+                (),
+                "per_pixel",
+                "stellar_flux_fraction",
+            )
         return None
 
-    def create_psf(self, x: float, y: float):
+    def create_psf(self, x: float, y: float) -> Image:
+        """Return a per-pixel fraction of unocculted source flux at (x, y) lod."""
+        return Image(
+            self._create_psf(x, y), self.grid, (), "per_pixel", "stellar_flux_fraction"
+        )
+
+    def _create_psf(self, x: float, y: float):
         """Create and return the PSF at the specified off-axis position.
 
         The pure-Python implementation is deprecated. Use ``Coronagraph``
@@ -420,7 +445,7 @@ class OffAx:
 
         return psf
 
-    def create_psfs(self, x: NDArray, y: NDArray) -> NDArray:
+    def create_psfs(self, x: NDArray, y: NDArray) -> Image:
         """Create and return the PSFs at the specified off-axis positions.
 
         The pure-Python implementation is deprecated. Use ``Coronagraph``
@@ -433,8 +458,8 @@ class OffAx:
         )
         psfs = np.empty((len(x), *self.flat_psfs.shape[1:]))
         for i in range(len(x)):
-            psfs[i] = self.create_psf(x[i], y[i])
-        return psfs
+            psfs[i] = self._create_psf(x[i], y[i])
+        return Image(psfs, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")
 
     def create_psfs_parallel(
         self,
@@ -444,7 +469,7 @@ class OffAx:
         D=None,
         dist=None,
         workers: int = 4,
-    ) -> np.ndarray:
+    ) -> Image:
         """Compute PSFs for batches of (x, y) arrays using multiprocessing.
 
         The pure-Python implementation is deprecated. Use ``Coronagraph``
@@ -465,22 +490,21 @@ class OffAx:
                 Number of parallel processes to use.
 
         Returns:
-            np.ndarray:
-                A stacked numpy array of the computed PSFs with shape (N,
-                height, width), where N = len(x).
+            Image:
+                Per-pixel flux fractions with axes (source_x, source_y, y, x).
         """
         if isinstance(x, Quantity):
             # Convert the x and y positions to lambda/D if they are in pixels
             if x.unit != lod:
                 x = convert_to_lod(
-                    x, self.center_x, self.pixel_scale_arcsec, lam, D, dist
+                    x, self.grid.center_x * u.pix, self.pixel_scale_arcsec, lam, D, dist
                 )
             else:
                 x = x.value
         if isinstance(y, Quantity):
             if y.unit != lod:
                 y = convert_to_lod(
-                    y, self.center_y, self.pixel_scale_arcsec, lam, D, dist
+                    y, self.grid.center_y * u.pix, self.pixel_scale_arcsec, lam, D, dist
                 )
             else:
                 y = y.value
@@ -499,19 +523,22 @@ class OffAx:
 
         # psf_rows is now a list of arrays, each of shape (len(y), height, width)
         # Stack them along a new axis to form (len(x), len(y), height, width)
-        psf_datacube = np.stack(psf_rows, axis=0)
-        return psf_datacube
+        psf_datacube = np.stack([row.data for row in psf_rows], axis=0)
+        return Image(
+            psf_datacube,
+            self.grid,
+            ("source_x", "source_y"),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
 
-    def __call__(
-        self, x: Quantity, y: Quantity, lam=None, D=None, dist=None
-    ) -> NDArray:
+    def __call__(self, x: Quantity, y: Quantity, lam=None, D=None, dist=None) -> Image:
         """Return the PSF at the given x/y position.
 
         This function (via util.convert_to_lod) has the following assumptions
         on the x/y values provided:
 
-        - If units are pixels, they follow the 00LL convention: (0, 0) is the
-          lower left corner of the image.
+        - Pixel coordinates label centers: (0, 0) is the first pixel center.
         - If the x/y values are in lambda/D, angular, or length units, (0, 0)
           is the center of the image, where the star is located.
 
@@ -530,20 +557,20 @@ class OffAx:
                 Distance to the system
 
         Returns:
-            NDArray:
-                The PSF at the given x/y position
+            Image:
+                Per-pixel unocculted source flux fractions at the given position.
         """
         if isinstance(x, Quantity):
             # Convert the x and y positions to lambda/D if they are in pixels
             if x.unit != lod:
                 x = convert_to_lod(
-                    x, self.center_x, self.pixel_scale_arcsec, lam, D, dist
+                    x, self.grid.center_x * u.pix, self.pixel_scale_arcsec, lam, D, dist
                 )
             x = x.value
         if isinstance(y, Quantity):
             if y.unit != lod:
                 y = convert_to_lod(
-                    y, self.center_y, self.pixel_scale_arcsec, lam, D, dist
+                    y, self.grid.center_y * u.pix, self.pixel_scale_arcsec, lam, D, dist
                 )
             y = y.value
 
