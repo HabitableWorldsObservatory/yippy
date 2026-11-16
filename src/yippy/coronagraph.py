@@ -753,7 +753,7 @@ class Coronagraph:
     def _perf_identity(
         self, rule, leakage_rule, stellar_diameter, separations_lod=None
     ):
-        """Complete identity of a single-axis photometry record (schema 3)."""
+        """Complete identity of a single-axis photometry record (schema 4)."""
         from dataclasses import asdict
 
         identity = self._cache_identity_base(
@@ -762,7 +762,7 @@ class Coronagraph:
         )
         identity.update(
             {
-                "performance_record": 3,
+                "performance_record": 4,
                 "aperture_algorithm": "local_component_native_leakage_v1",
                 "yippy_version": __version__,
                 "table_storage": "float64",

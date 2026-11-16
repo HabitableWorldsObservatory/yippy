@@ -1355,7 +1355,7 @@ def _rule_samples(rule, psf, source_position, oversample=CORE_OVERSAMPLE):
             half_width_pix=half_width,
             nominal_center=nominal,
             fixed_center=None
-            if bool(_nominal_in_image(nominal, grid.shape))
+            if rule.centre == "peak" and bool(_nominal_in_image(nominal, grid.shape))
             else nominal,
             return_samples=True,
         )
@@ -1652,6 +1652,8 @@ def performance_curves(
     native weights; distinct grids use band-limited stellar samples at the
     planet pixel centers, zero outside the stellar footprint. Planet throughput
     retains subpixel band-limited integration for encircled-energy accuracy.
+    Circular's ``centre`` chooses the supplied source position (default) or
+    its refined local peak; every field, including IWA, uses that same rule.
 
     ``stellar_diameter`` records the provenance of the already evaluated map;
     it does not broaden or reevaluate that map. All integration uses the

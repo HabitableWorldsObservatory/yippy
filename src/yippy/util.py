@@ -211,7 +211,7 @@ def save_coro_performance_to_fits(
     from dataclasses import asdict
 
     header = fits.Header()
-    header["PERFVER"] = 3
+    header["PERFVER"] = 4
     header["APERRULE"] = type(record.rule).__name__
     header["RULEJSON"] = json.dumps(asdict(record.rule), sort_keys=True)
     header["LEAKRULE"] = record.leakage_rule
@@ -255,7 +255,7 @@ def read_performance_cache_key(path: Path) -> str | None:
     """Identity digest, or None for missing/unreadable/old-format records."""
     try:
         header = fits.getheader(path, 0)
-        return header.get("CACHEKEY") if header.get("PERFVER") == 3 else None
+        return header.get("CACHEKEY") if header.get("PERFVER") == 4 else None
     except (OSError, ValueError):
         return None
 
@@ -267,8 +267,8 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
 
     with fits.open(Path(indir) / filename) as hdus:
         header = hdus[0].header
-        if header.get("PERFVER") != 3:
-            raise ValueError("performance cache requires PERFVER=3")
+        if header.get("PERFVER") != 4:
+            raise ValueError("performance cache requires PERFVER=4")
         rule_type = {
             "Circular": Circular,
             "HalfMaximum": HalfMaximum,

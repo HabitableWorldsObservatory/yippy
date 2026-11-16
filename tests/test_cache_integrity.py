@@ -32,11 +32,71 @@ import yippy.performance as perf
 from yippy import Circular, Coronagraph, HalfMaximum
 from yippy.util import (
     load_coro_performance_from_fits,
+    read_performance_cache_key,
     save_coro_performance_to_fits,
 )
 
 RTOL = 1e-6
 SEPS = np.array([1.5, 3.0, 4.25])
+
+
+def test_circular_centres_have_distinct_complete_cache_records(
+    synthetic_1d, tmp_path, monkeypatch
+):
+    """Fails if centre is lost, cache entries alias, or old schemas are reused.
+
+    Basis: exact storage round-trip of all float64 arrays and scalar fields,
+    including IWA; a warm load is forbidden from recomputing either estimand.
+    """
+    from astropy.io import fits
+
+    obj = Coronagraph(synthetic_1d.path)
+    records, paths = [], []
+    for centre in ("source", "peak"):
+        obj.set_aperture_rule(Circular(0.7, centre=centre))
+        record = obj.performance
+        records.append(record)
+        path = obj._perf_dir / obj._perf_filename()
+        paths.append(path)
+        header = fits.getheader(path)
+        assert header["PERFVER"] == 4
+        assert json.loads(header["RULEJSON"])["centre"] == centre
+        identity = json.loads(header["CACHEID"])
+        assert identity["rule"]["centre"] == centre
+        assert float.fromhex(identity["performance_record"]) == 4
+        assert record.rule.centre == centre
+    assert paths[0] != paths[1]
+    assert all(p.exists() for p in paths)
+    _forbid_persisted_computation(monkeypatch)
+    for original in records:
+        loaded = Coronagraph(synthetic_1d.path, rule=original.rule).performance
+        assert loaded.rule == original.rule
+        for name in (
+            "separation_lod",
+            "throughput",
+            "core_area_lod2",
+            "leakage_fraction",
+            "leakage_density_lod2",
+            "raw_contrast",
+        ):
+            np.testing.assert_array_equal(
+                getattr(loaded, name), getattr(original, name)
+            )
+        for name in (
+            "iwa_lod",
+            "data_extent_lod",
+            "frame",
+            "leakage_rule",
+            "stellar_diameter",
+        ):
+            assert getattr(loaded, name) == getattr(original, name)
+    legacy = tmp_path / "legacy.fits"
+    with fits.open(paths[0]) as hdus:
+        hdus[0].header["PERFVER"] = 3
+        hdus.writeto(legacy)
+    assert read_performance_cache_key(legacy) is None
+    with pytest.raises(ValueError, match="PERFVER=4"):
+        load_coro_performance_from_fits(legacy.name, legacy.parent)
 
 
 def _yip(tmp_path, name, **kwargs):

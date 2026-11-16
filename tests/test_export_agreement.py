@@ -42,6 +42,7 @@ def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
             csv_data[:, csv_column], expected, rtol=tolerance, atol=0
         )
         assert header["APERRULE"] == type(record.rule).__name__
+        assert header["CENTRE"] == record.rule.centre
         assert header["LEAKRULE"] == record.leakage_rule
 
     np.testing.assert_allclose(

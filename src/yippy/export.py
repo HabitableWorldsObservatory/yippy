@@ -57,6 +57,10 @@ def export_exosims(
     header["LEAKRULE"] = (performance.leakage_rule, "Stellar leakage averaging rule")
     if hasattr(performance.rule, "radius_lod"):
         header["RADLOD"] = (performance.rule.radius_lod, "Aperture radius in lambda/D")
+        header["CENTRE"] = (
+            performance.rule.centre,
+            "Circular aperture centre convention",
+        )
     if hasattr(performance.rule, "fraction"):
         header["FRACPEAK"] = (performance.rule.fraction, "Fraction of peak intensity")
     delta_lambda_nm = None

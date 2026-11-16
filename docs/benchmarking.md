@@ -16,8 +16,11 @@ curves use linear end-segment extrapolation in their declared space.
 
 ## Shared performance record
 
-Select an aperture with `Circular(radius_lod)`, `HalfMaximum(fraction)`, or
-`Matched()`. HalfMaximum includes only the region connected to the source peak;
+Select an aperture with `Circular(radius_lod, centre="source")`,
+`HalfMaximum(fraction)`, or `Matched()`. Circular defaults to the supplied source
+position, keeping the aperture centre fixed in angle independently of
+pixelization. Use `centre="peak"` for a circle following the refined local PSF
+peak. HalfMaximum includes only the region connected to the source peak;
 Matched uses the PSF as a weighted template and reports a noise-equivalent area.
 The selected result is `coro.performance`; previously requested rules are in
 `coro.curves_by_rule`. Evaluate every curve with

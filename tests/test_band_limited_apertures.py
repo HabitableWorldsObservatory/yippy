@@ -89,7 +89,9 @@ def encircled_energy(radius_lod):
 def test_circle_airy_encircled_energy(pixel_lod, shift_pix, radius_lod):
     """A circular sum recovers the Airy encircled energy at each sampling phase."""
     coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, rule=Circular(radius_lod))[1][0]
+    measured = compute_throughput_curve(coro, rule=Circular(radius_lod, centre="peak"))[
+        1
+    ][0]
     assert measured == pytest.approx(encircled_energy(radius_lod), rel=1e-3)
 
 
@@ -115,9 +117,10 @@ def test_truncation_airy_half_maximum(pixel_lod, shift_pix, metric):
 def test_circle_is_invariant_to_subpixel_shift(pixel_lod):
     """A 0.3-pixel source shift preserves the peak-centered encircled flux."""
     fluxes = [
-        compute_throughput_curve(image_coro(airy_psf(pixel_lod, shift), pixel_lod))[1][
-            0
-        ]
+        compute_throughput_curve(
+            image_coro(airy_psf(pixel_lod, shift), pixel_lod),
+            rule=Circular(0.7, centre="peak"),
+        )[1][0]
         for shift in (0.0, 0.3)
     ]
     assert fluxes[0] == pytest.approx(fluxes[1], rel=1e-3)
@@ -176,7 +179,9 @@ def test_circle_matches_independently_sampled_airy(pixel_lod, shift_pix, radius_
     weights = reference_circle_weights(rows, cols, radius_lod / h)
     expected = (weights * intensity).sum() * h**2
     coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, rule=Circular(radius_lod))[1][0]
+    measured = compute_throughput_curve(coro, rule=Circular(radius_lod, centre="peak"))[
+        1
+    ][0]
     assert measured == pytest.approx(expected, rel=2e-6)
 
 

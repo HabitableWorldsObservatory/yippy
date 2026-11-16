@@ -118,6 +118,38 @@ def syn_eqx_1d(syn_coro_1d):
     return EqxCoronagraph(yippy_coro=syn_coro_1d)
 
 
+@pytest.fixture
+def displaced_gaussian_source():
+    """Gaussian source displaced by (0.08, -0.06) lod from its nominal point."""
+    from hwoutils.grids import Frame, Image, PixelGrid
+
+    def build(step):
+        grid = PixelGrid.focal(int(12 / step), step, Frame(500, 6, "circumscribed"))
+        x, y = grid.coordinates()
+
+        def source(separation):
+            data = (
+                0.31
+                * np.exp(
+                    -((x - separation - 0.08) ** 2 + (y + 0.06) ** 2) / (2 * 0.6**2)
+                )
+                / (2 * np.pi * 0.6**2)
+                * step**2
+            )
+            return Image(data, grid, (), "per_pixel", "stellar_flux_fraction")
+
+        star = Image(
+            np.full(grid.shape, 1e-9 * step**2),
+            grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )
+        return source, star
+
+    return build
+
+
 # A cold cache with no network is a missing referent, not a passing test. The
 # default is to skip with a reason that names the cause, so that a contributor
 # without the data can still run the physics suite; setting this flag turns

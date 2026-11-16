@@ -35,9 +35,9 @@ FAR_FIELD_SEPARATIONS_LOD = (20.0, 25.0)
 # reader's half-maximum crossing is visible in review. This is a regression
 # pin, not a derivation: it catches unintended change and establishes nothing
 # about correctness.
-# Measured with the 10x band-limited circle of radius 0.7 lambda/D.
+# Measured with the source-centred 10x band-limited circle of radius 0.7 lambda/D.
 # Every record uses the same PCHIP half-maximum crossing.
-EAC1_AAVC_IWA_LOD = 4.060305
+EAC1_AAVC_IWA_LOD = 4.054787
 EAC1_AAVC_IWA_TOL = 5e-3
 
 
@@ -123,7 +123,10 @@ def test_inscribed_conversion_is_explicit(syn_coro_1d):
         )
 
 
-def test_the_inner_working_angle_has_not_moved(shipped_coro):
+@pytest.mark.parametrize(
+    "centre,expected", [("source", EAC1_AAVC_IWA_LOD), ("peak", 4.060305)]
+)
+def test_the_inner_working_angle_has_not_moved(shipped_coro, centre, expected):
     """A regression pin on the derived inner working angle.
 
     Every yield number depends on where the reader says the mask opens. This
@@ -131,8 +134,19 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro):
     throughput curve beneath it; it is not evidence that the value is right.
     The closed-form check of the same derivation is in ``test_analytic_yip.py``.
     """
-    got = shipped_coro.iwa_lod
-    expected = EAC1_AAVC_IWA_LOD
+    from yippy import Circular, performance_curves
+
+    record = (
+        shipped_coro.performance
+        if centre == "source"
+        else performance_curves(
+            shipped_coro,
+            shipped_coro.stellar_intens(0.0 * lod),
+            Circular(0.7, centre=centre),
+        )
+    )
+    assert record.rule.centre == centre
+    got = record.iwa_lod
     assert got == pytest.approx(expected, abs=EAC1_AAVC_IWA_TOL), (
         f"the inner working angle moved to {got:.4f} lambda/D "
         f"from the pinned {expected}"
