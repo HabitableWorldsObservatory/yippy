@@ -5,6 +5,7 @@ import astropy.units as u
 import jax
 import numpy as np
 import pytest
+from hwoutils.grids import Frame, PixelGrid
 
 from yippy.offax import OffAx
 
@@ -23,6 +24,10 @@ def test_downsample_fits_psfs(tmp_path):
     fits.writeto(tmp_path / "psfs.fits", psfs)
     fits.writeto(tmp_path / "offsets.fits", offsets)
     assert not fits.getdata(tmp_path / "psfs.fits").dtype.isnative
+    # The parent reader bypassed metadata; it supplied no default PIXSCALE.
+    # A physical grid now needs it, unless an explicit grid is supplied.
+    with pytest.raises(ValueError, match="PIXSCALE"):
+        OffAx(tmp_path, "psfs.fits", "offsets.fits", 0.1 * u.arcsec / u.pix, True, True)
     result = OffAx(
         tmp_path,
         "psfs.fits",
@@ -31,6 +36,7 @@ def test_downsample_fits_psfs(tmp_path):
         True,
         True,
         downsample_shape=(4, 4),
+        grid=PixelGrid.focal(8, 0.1, Frame(500, 6, "circumscribed")),
     )
     assert result.flat_psfs.shape == (4, 4, 4)
     assert np.isfinite(result.flat_psfs).all()

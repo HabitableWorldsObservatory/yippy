@@ -17,17 +17,19 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from hwoutils.grids import Frame
 from numpy.testing import assert_allclose
 from synthetic_yip import write_synthetic_yip
 from test_band_limited_apertures import reference_circle_weights
 
 import yippy.coronagraph as coronagraph_module
 import yippy.performance as perf
-from yippy import Coronagraph
+from yippy import Circular, Coronagraph, HalfMaximum
 from yippy.util import (
     load_coro_performance_from_fits,
     save_coro_performance_to_fits,
@@ -68,11 +70,7 @@ def _forbid_persisted_computation(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("persisted quantity was recomputed")
 
-    for name in (
-        "compute_throughput_curve",
-        "compute_truncation_curves",
-        "compute_raw_contrast_curve",
-    ):
+    for name in ("performance_curves",):
         _patch_everywhere(monkeypatch, name, fail)
 
 
@@ -92,9 +90,11 @@ def test_setter_then_constructor_matches_cold(tmp_path):
     """A cache written by the setter reproduces a cold truncation construction."""
     path = _yip(tmp_path, "warm")
     seed = Coronagraph(path)
-    seed.set_psf_trunc_ratio(0.3)
-    warm = Coronagraph(path, psf_trunc_ratio=0.3)
-    cold = Coronagraph(_yip(tmp_path, "cold"), psf_trunc_ratio=0.3)
+    seed.set_aperture_rule(HalfMaximum(0.3))
+    assert seed.rule == HalfMaximum(0.3)
+    assert seed.performance is seed.curves_by_rule[HalfMaximum(0.3)]
+    warm = Coronagraph(path, rule=HalfMaximum(0.3))
+    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold)
     # The setter object itself must also match
     _assert_same_metrics(seed, cold)
@@ -103,46 +103,60 @@ def test_setter_then_constructor_matches_cold(tmp_path):
 def test_constructor_then_setter_matches_cold(tmp_path):
     """Reaching truncation mode through the setter after a cache hit matches cold."""
     path = _yip(tmp_path, "warm")
-    Coronagraph(path, psf_trunc_ratio=0.3)
+    Coronagraph(path, rule=HalfMaximum(0.3))
     warm = Coronagraph(path)
-    warm.set_psf_trunc_ratio(0.3)
-    cold = Coronagraph(_yip(tmp_path, "cold"), psf_trunc_ratio=0.3)
+    warm.set_aperture_rule(HalfMaximum(0.3))
+    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold)
 
 
 def test_truncation_core_is_read_from_the_cache(tmp_path, monkeypatch, caplog):
     """A cache hit in truncation mode recomputes nothing and warns of nothing."""
     path = _yip(tmp_path, "warm")
-    cold = Coronagraph(path, psf_trunc_ratio=0.3)
+    cold = Coronagraph(path, rule=HalfMaximum(0.3))
     _forbid_persisted_computation(monkeypatch)
     with caplog.at_level("WARNING", logger="yippy"):
-        warm = Coronagraph(path, psf_trunc_ratio=0.3)
+        warm = Coronagraph(path, rule=HalfMaximum(0.3))
     assert not any("not checked" in r.getMessage() for r in caplog.records)
     _assert_same_metrics(warm, cold)
 
 
-def test_explicit_import_in_truncation_mode_warns(tmp_path, caplog):
-    """Importing a table with a truncation ratio says its ratio is unchecked."""
-    path = _yip(tmp_path, "warm")
-    coro = Coronagraph(path, psf_trunc_ratio=0.3)
-    with caplog.at_level("WARNING", logger="yippy"):
-        coro.compute_all_performance_curves(
-            save_to_fits=False,
-            load_from_file=coro._perf_filename(),
-            cache_dir=coro._perf_dir,
-            psf_trunc_ratio=0.3,
-        )
-    assert any("not checked" in r.getMessage() for r in caplog.records)
+def test_explicit_import_checks_rule_and_leakage(tmp_path):
+    """Fails if an explicit import accepts different aperture or leakage metadata."""
+    coro = Coronagraph(_yip(tmp_path, "warm"), rule=HalfMaximum(0.3))
+    filename = coro._perf_filename()
+    loaded = coro.compute_all_performance_curves(
+        rule=HalfMaximum(0.3),
+        save_to_fits=False,
+        load_from_file=filename,
+        cache_dir=coro._perf_dir,
+    )
+    np.testing.assert_array_equal(loaded.throughput, coro.performance.throughput)
+    for kwargs in (
+        {"rule": HalfMaximum(0.5)},
+        {"rule": HalfMaximum(0.3), "leakage_rule": "azimuthal_ring_mean"},
+    ):
+        with pytest.raises(ValueError, match=r"rule|leakage"):
+            coro.compute_all_performance_curves(
+                **kwargs,
+                save_to_fits=False,
+                load_from_file=filename,
+                cache_dir=coro._perf_dir,
+            )
 
 
 def test_setter_does_not_persist_contrast_floor(tmp_path):
     """The setter stores unfloored contrast, as the constructor does."""
     path = _yip(tmp_path, "warm")
-    seed = Coronagraph(path, contrast_floor=1e-8)
-    seed.set_psf_trunc_ratio(0.3)
-    warm = Coronagraph(path, psf_trunc_ratio=0.3)
-    cold = Coronagraph(_yip(tmp_path, "cold"), psf_trunc_ratio=0.3)
-    assert np.all(cold.raw_contrast(SEPS) < 1e-8), "floor must bind for this test"
+    contrast_floor = 1e-6
+    seed = Coronagraph(path, contrast_floor=contrast_floor)
+    seed.set_aperture_rule(HalfMaximum(0.3))
+    warm = Coronagraph(path, rule=HalfMaximum(0.3))
+    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
+    assert np.all(cold.raw_contrast(SEPS) < contrast_floor), "floor must bind"
+    np.testing.assert_array_equal(
+        seed.raw_contrast(SEPS), np.full_like(SEPS, contrast_floor)
+    )
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
 
 
@@ -155,9 +169,9 @@ def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
     before = seed._perf_filename()
     seed.throughput(lod_inscribed_to_circumscribed(5.0, seed.grid.frame, 5.0))
     assert seed._perf_filename() == before
-    seed.set_psf_trunc_ratio(0.3)
-    warm = Coronagraph(path, psf_trunc_ratio=0.3)
-    cold = Coronagraph(_yip(tmp_path, "cold"), psf_trunc_ratio=0.3)
+    seed.set_aperture_rule(HalfMaximum(0.3))
+    warm = Coronagraph(path, rule=HalfMaximum(0.3))
+    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
 
 
@@ -166,14 +180,18 @@ def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_truncation_cache_distinguishes_contrast_aperture(tmp_path):
-    """Truncation-mode entries at radii 0.7 and 0.85 do not alias."""
+def test_truncation_cache_distinguishes_leakage_rule(tmp_path):
+    """Fails if aperture-mean and azimuthal-ring records alias in the cache."""
     path = _yip(tmp_path, "warm")
-    Coronagraph(path, psf_trunc_ratio=0.3, aperture_radius_lod=0.7)
-    warm = Coronagraph(path, psf_trunc_ratio=0.3, aperture_radius_lod=0.85)
+    aperture = Coronagraph(path, rule=HalfMaximum(0.3))
+    warm = Coronagraph(path, rule=HalfMaximum(0.3), leakage_rule="azimuthal_ring_mean")
     cold = Coronagraph(
-        _yip(tmp_path, "cold"), psf_trunc_ratio=0.3, aperture_radius_lod=0.85
+        _yip(tmp_path, "cold"),
+        rule=HalfMaximum(0.3),
+        leakage_rule="azimuthal_ring_mean",
     )
+    assert aperture._perf_filename() != warm._perf_filename()
+    assert warm.performance.leakage_rule == "azimuthal_ring_mean"
     _assert_same_metrics(warm, cold)
 
 
@@ -184,9 +202,9 @@ def test_fine_radius_difference_does_not_alias(tmp_path):
     even though their rounded two-decimal filename tokens would coincide.
     """
     path = _yip(tmp_path, "warm")
-    first = Coronagraph(path, aperture_radius_lod=0.706)
-    warm = Coronagraph(path, aperture_radius_lod=0.708)
-    cold = Coronagraph(_yip(tmp_path, "cold"), aperture_radius_lod=0.708)
+    first = Coronagraph(path, rule=Circular(0.706))
+    warm = Coronagraph(path, rule=Circular(0.708))
+    cold = Coronagraph(_yip(tmp_path, "cold"), rule=Circular(0.708))
     assert not np.allclose(first.throughput(SEPS), cold.throughput(SEPS), rtol=RTOL)
     assert first._perf_filename() != warm._perf_filename()
     _assert_same_metrics(warm, cold)
@@ -195,76 +213,77 @@ def test_fine_radius_difference_does_not_alias(tmp_path):
 def test_fine_threshold_difference_has_distinct_identity(tmp_path):
     """Thresholds 0.301 and 0.304 get distinct performance identities."""
     coro = Coronagraph(_yip(tmp_path, "yip"))
-    coro.psf_trunc_ratio = 0.301
+    coro.set_aperture_rule(HalfMaximum(0.301))
     first = coro._perf_filename()
-    coro.psf_trunc_ratio = 0.304
+    coro.set_aperture_rule(HalfMaximum(0.304))
     assert coro._perf_filename() != first
 
 
 def test_equivalent_scalar_types_share_identity(tmp_path):
     """An integer-valued radius and the equal float resolve to one entry."""
     path = _yip(tmp_path, "yip")
-    a = Coronagraph(path, aperture_radius_lod=1)
-    b = Coronagraph(path, aperture_radius_lod=np.float64(1.0))
+    a = Coronagraph(path, rule=Circular(1))
+    b = Coronagraph(path, rule=Circular(np.float64(1.0)))
     assert a._perf_filename() == b._perf_filename()
 
 
 # ---------------------------------------------------------------------------
-# Oversampling
+# Explicit sampling axes
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_oversampling_does_not_feed_automatic_cache(tmp_path, monkeypatch):
-    """A table saved at oversample 5 under the automatic name is not reused.
-
-    A table saved at the automatic settings is.
-    """
+def test_explicit_separations_do_not_feed_automatic_cache(tmp_path, monkeypatch):
+    """Fails if a custom separation grid overwrites the automatic cache identity."""
     path = _yip(tmp_path, "warm")
     obj = Coronagraph(path)
+    filename = obj._perf_filename()
     obj.compute_all_performance_curves(
-        aperture_radius_lod=0.7,
-        oversample=5,
+        rule=Circular(0.7),
+        separations_lod=np.array([0.5, 2.5, 4.5]),
         save_to_fits=True,
-        performance_file=obj._perf_filename(),
+        performance_file=filename,
         cache_dir=obj._perf_dir,
     )
     warm = Coronagraph(path)
     cold = Coronagraph(_yip(tmp_path, "cold"))
-    _assert_same_metrics(warm, cold)
-
-    obj.compute_all_performance_curves(
-        aperture_radius_lod=0.7,
-        oversample=10,
-        save_to_fits=True,
-        performance_file=obj._perf_filename(),
-        cache_dir=obj._perf_dir,
+    np.testing.assert_array_equal(
+        warm.performance.separation_lod, cold.performance.separation_lod
     )
+    _assert_same_metrics(warm, cold)
     _forbid_persisted_computation(monkeypatch)
     _assert_same_metrics(Coronagraph(path), cold)
 
 
 @pytest.mark.parametrize("mode", ["circle", "truncation", "setter"])
-def test_default_construction_measures_the_ten_subpixel_circle(tmp_path, mode):
-    """Constructor and setter contrast use the same fractional circular aperture."""
+def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
+    """Fails if constructor or setter contrast uses an unrelated circular aperture.
+
+    Circular quadrature has a 1e-5 sampling bound from the analytic Gaussian;
+    half-maximum area/flux ratios use 1e-6 for independently rounded stored fields.
+    """
     package = write_synthetic_yip(tmp_path / "yip")
     coro = Coronagraph(
-        package.path, psf_trunc_ratio=0.3 if mode == "truncation" else None
+        package.path, rule=HalfMaximum(0.3) if mode == "truncation" else Circular(0.7)
     )
     if mode == "setter":
-        coro.set_psf_trunc_ratio(0.5)
+        coro.set_aperture_rule(HalfMaximum(0.5))
     sep = 3.0
-    # Independent circle-square quadrature of the analytic sigma=2 Gaussian.
-    rows, cols = np.mgrid[-29:29, -29:29] + 0.5
-    weights = reference_circle_weights(rows, cols, 28.0)
-    intensity = np.exp(-(rows**2 + cols**2) / (2 * 20**2)) / (2 * np.pi * 2**2)
-    planet_flux = (weights * intensity).sum() / 10**2 * package.occulter(sep)
-    area_pixels = np.pi * 2.8**2
+    if mode == "circle":
+        rows, cols = np.mgrid[-29:29, -29:29] + 0.5
+        weights = reference_circle_weights(rows, cols, 28.0)
+        intensity = np.exp(-(rows**2 + cols**2) / (2 * 20**2)) / (2 * np.pi * 2**2)
+        planet_flux = (weights * intensity).sum() / 10**2 * package.occulter(sep)
+        area_pixels = np.pi * 2.8**2
+        assert coro.throughput(sep) == pytest.approx(planet_flux, rel=1e-5)
+        assert coro.core_area(sep) == pytest.approx(area_pixels * package.pixscale**2)
+    else:
+        # Uniform stellar light makes the numerator exactly level times area.
+        planet_flux = coro.throughput(sep)
+        area_pixels = coro.core_area(sep) / package.pixscale**2
+        assert not np.isclose(area_pixels, np.pi * 2.8**2, rtol=1e-3)
     assert coro.raw_contrast(sep) == pytest.approx(
         package.stellar_level * area_pixels / planet_flux, rel=1e-5
     )
-    if mode == "circle":
-        assert coro.throughput(sep) == pytest.approx(planet_flux, rel=1e-5)
-        assert coro.core_area(sep) == pytest.approx(area_pixels * package.pixscale**2)
 
 
 # ---------------------------------------------------------------------------
@@ -276,19 +295,23 @@ def test_default_construction_measures_the_ten_subpixel_circle(tmp_path, mode):
 def test_unchanged_request_is_a_real_cache_hit(tmp_path, monkeypatch, trunc):
     """A repeated request loads the stored table instead of recomputing it."""
     path = _yip(tmp_path, "yip")
-    first = Coronagraph(path, psf_trunc_ratio=trunc)
+    first = Coronagraph(
+        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
+    )
     _forbid_persisted_computation(monkeypatch)
-    second = Coronagraph(path, psf_trunc_ratio=trunc)
+    second = Coronagraph(
+        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
+    )
     _assert_same_metrics(second, first)
 
 
 def test_setter_repeat_is_a_real_cache_hit(tmp_path, monkeypatch):
     """Switching back to a ratio already computed loads the stored table."""
     coro = Coronagraph(_yip(tmp_path, "yip"))
-    coro.set_psf_trunc_ratio(0.3)
+    coro.set_aperture_rule(HalfMaximum(0.3))
     expected = _metrics(coro)
     _forbid_persisted_computation(monkeypatch)
-    coro.set_psf_trunc_ratio(0.3)
+    coro.set_aperture_rule(HalfMaximum(0.3))
     for name, values in _metrics(coro).items():
         assert_allclose(values, expected[name], rtol=RTOL, err_msg=name)
 
@@ -297,14 +320,12 @@ def test_entry_without_identity_metadata_is_ignored(tmp_path):
     """A table lacking identity metadata at the automatic path is a miss."""
     path = _yip(tmp_path, "warm")
     probe = Coronagraph(path)
-    sep = np.arange(0.0, 6.5, 0.5)
-    save_coro_performance_to_fits(
-        sep,
-        np.full_like(sep, 0.5),
-        np.full_like(sep, 1e-3),
-        probe._perf_filename(),
-        probe._perf_dir,
+    poisoned = replace(
+        probe.performance,
+        throughput=np.full_like(probe.performance.throughput, 0.5),
+        raw_contrast=np.full_like(probe.performance.raw_contrast, 1e-3),
     )
+    save_coro_performance_to_fits(poisoned, probe._perf_filename(), probe._perf_dir)
     warm = Coronagraph(path)
     cold = Coronagraph(_yip(tmp_path, "cold"))
     _assert_same_metrics(warm, cold)
@@ -317,13 +338,17 @@ def test_legacy_named_entry_is_ignored(tmp_path):
 
     path = _yip(tmp_path, "warm")
     probe = Coronagraph(path)
-    sep = np.arange(0.0, 6.5, 0.5)
     legacy = (
         f"aper_0.70_v{__version__}_{probe._source_signature()}_"
         f"{probe.npixels}px_{dtype_tag()}_sampling1.fits"
     )
     save_coro_performance_to_fits(
-        sep, np.full_like(sep, 0.5), np.full_like(sep, 1e-3), legacy, probe._perf_dir
+        replace(
+            probe.performance,
+            throughput=np.full_like(probe.performance.throughput, 0.5),
+        ),
+        legacy,
+        probe._perf_dir,
     )
     warm = Coronagraph(path)
     assert warm._perf_filename() != legacy
@@ -492,15 +517,15 @@ def test_stale_object_does_not_label_cube_as_new_source(tmp_path):
 def test_synthesized_core_cache_does_not_feed_default_curves(tmp_path):
     """Opt-in synthesized core tables cannot masquerade as native-offset tables."""
     path = _yip(tmp_path, "warm", offset_step_lod=2.0)
-    obj = Coronagraph(path, psf_trunc_ratio=0.5)
+    obj = Coronagraph(path, rule=HalfMaximum(0.5))
     expected = _metrics(obj)
     obj.compute_all_performance_curves(
-        psf_trunc_ratio=0.5,
-        separation_step_lod=perf.CORE_STEP_LOD,
+        rule=HalfMaximum(0.5),
+        separations_lod=np.arange(0.5, 6.5, 0.5),
         performance_file=obj._perf_filename(),
         cache_dir=obj._perf_dir,
     )
-    warm = Coronagraph(path, psf_trunc_ratio=0.5)
+    warm = Coronagraph(path, rule=HalfMaximum(0.5))
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 
@@ -509,23 +534,27 @@ def test_synthesized_core_cache_does_not_feed_default_curves(tmp_path):
 def test_legacy_circle_method_is_not_reused(tmp_path, trunc):
     """A table labeled with the previous cubic aperture cannot supply new curves."""
     path = _yip(tmp_path, "warm")
-    obj = Coronagraph(path, psf_trunc_ratio=trunc)
+    obj = Coronagraph(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     expected = _metrics(obj)
     identity = obj._auto_perf_identity()
-    identity.pop("circle_method")
-    identity.pop("circle_oversample")
+    identity.pop("circle_method", None)
+    identity.pop("circle_oversample", None)
     identity["oversample"] = 2
     if trunc is not None:
         identity["core_step_lod"] = perf.CORE_STEP_LOD
     save_coro_performance_to_fits(
-        np.array([0.0, 3.0, 6.0]),
-        np.full(3, 0.123),
-        np.full(3, 0.456),
+        replace(
+            obj.performance,
+            throughput=np.full_like(obj.performance.throughput, 0.123),
+            raw_contrast=np.full_like(obj.performance.raw_contrast, 0.456),
+        ),
         obj._perf_filename(),
         obj._perf_dir,
         identity=identity,
     )
-    warm = Coronagraph(path, psf_trunc_ratio=trunc)
+    warm = Coronagraph(
+        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
+    )
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 
@@ -534,34 +563,67 @@ def test_legacy_circle_method_is_not_reused(tmp_path, trunc):
 def test_center_counting_method_is_not_reused(tmp_path, trunc):
     """A center-counting table cannot supply fractional, source-local curves."""
     path = _yip(tmp_path, "warm")
-    obj = Coronagraph(path, psf_trunc_ratio=trunc)
+    obj = Coronagraph(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     expected = _metrics(obj)
     identity = obj._auto_perf_identity()
     identity["circle_method"] = "band_limited_float64_subpixel_centers"
     save_coro_performance_to_fits(
-        np.array([0.0, 3.0, 6.0]),
-        np.full(3, 0.123),
-        np.full(3, 0.456),
+        replace(
+            obj.performance,
+            throughput=np.full_like(obj.performance.throughput, 0.123),
+            raw_contrast=np.full_like(obj.performance.raw_contrast, 0.456),
+        ),
         obj._perf_filename(),
         obj._perf_dir,
         identity=identity,
     )
-    warm = Coronagraph(path, psf_trunc_ratio=trunc)
+    warm = Coronagraph(
+        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
+    )
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 
 
 def test_performance_fits_preserves_every_float64_bit(tmp_path):
-    """Loading a measured table must not round its values before interpolation."""
-    separation = np.array([10.123456789012345, 5.123456789012345])
+    """Fails if FITS rounds any performance array or loses aperture metadata."""
+    separation = np.array([5.123456789012345, 10.123456789012345])
     throughput = np.array([0.17721052431234567, 0.28832163542345678])
     contrast = np.array([1.234567890123456e-11, 2.345678901234567e-10])
-    save_coro_performance_to_fits(
-        separation, throughput, contrast, "performance.fits", tmp_path
+    record = perf.PerformanceCurves(
+        separation_lod=separation,
+        frame=Frame(
+            reference_wavelength_nm=500.0,
+            diameter_m=6.0,
+            diameter_convention="circumscribed",
+        ),
+        rule=HalfMaximum(0.304),
+        throughput=throughput,
+        core_area_lod2=np.array([1.123456789012345, 2.123456789012345]),
+        leakage_fraction=contrast * throughput,
+        leakage_density_lod2=contrast,
+        raw_contrast=contrast,
+        iwa_lod=1.23456789012345,
+        data_extent_lod=16.0,
+        leakage_rule="azimuthal_ring_mean",
+        stellar_diameter=0.123456789012345,
     )
+    save_coro_performance_to_fits(record, "performance.fits", tmp_path)
     loaded = load_coro_performance_from_fits("performance.fits", tmp_path)
-    order = np.argsort(separation)
-    for actual, expected in zip(
-        loaded, (separation, throughput, contrast), strict=True
+    for name in (
+        "separation_lod",
+        "throughput",
+        "core_area_lod2",
+        "leakage_fraction",
+        "leakage_density_lod2",
+        "raw_contrast",
     ):
-        np.testing.assert_array_equal(actual, expected[order])
+        np.testing.assert_array_equal(getattr(loaded, name), getattr(record, name))
+    for name in (
+        "rule",
+        "frame",
+        "leakage_rule",
+        "stellar_diameter",
+        "iwa_lod",
+        "data_extent_lod",
+    ):
+        assert getattr(loaded, name) == getattr(record, name)

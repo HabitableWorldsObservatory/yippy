@@ -49,9 +49,10 @@ grid:
 This example needs a user-supplied YIP directory (`yip_path`).
 
 ```python notest
-from yippy import Coronagraph
+from yippy import Coronagraph, HalfMaximum
 
-coro = Coronagraph(yip_path, psf_trunc_ratio=0.3)
+coro = Coronagraph(yip_path, rule=HalfMaximum(0.3),
+                   leakage_rule="azimuthal_ring_mean")
 
 # Already available: coro.core_mean_intensity(separation)
 # To get a 2D map:

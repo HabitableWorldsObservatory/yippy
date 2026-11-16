@@ -1,133 +1,175 @@
-"""Whether the contrast a consumer reads is the contrast yippy reports.
+"""Exported performance values obey the record's single interpolation policy."""
 
-``Coronagraph.raw_contrast`` interpolates the logarithm of contrast and
-exponentiates. ``export_exosims`` writes its table from a separate interpolant
-built on the same knots in linear space. The two agree at the knots and diverge
-between them, so a consumer that reads the exported table and interpolates it
-gets a different number from one that calls the accessor at the same
-separation.
+from copy import copy
+from dataclasses import replace
 
-That is a convention fork rather than an arithmetic error: both sides are
-self-consistent and neither is wrong on its own terms. Until one space is
-chosen for both, these tests pin both halves: the agreement at the knots,
-which must be exact to rounding, and the size of the between-knot
-disagreement, which must not grow without someone noticing.
-"""
-
+import astropy.io.fits as fits
+import astropy.units as u
 import numpy as np
-import pytest
+from hwoutils.grids import Image
 
-# Where the two interpolants are compared. The knots of the synthetic package
-# are spaced half a lambda/D apart.
-KNOT_SPACING_LOD = 0.5
-
-# The largest relative disagreement between the two interpolants anywhere
-# between knots, measured on the synthetic package before this test was
-# written. It falls off steeply with separation: 18 percent across the
-# innermost knot interval, 5 percent across the next, and under a part in a
-# thousand beyond about three lambda/D. The innermost interval sits inside the
-# inner working angle, where no consumer reads a contrast, so the number that
-# matters operationally is the 5 percent just outside it. Both are bounded
-# here. Tolerance basis: spike.
-MAX_BETWEEN_KNOT_DISAGREEMENT = 0.20
-MAX_DISAGREEMENT_ABOVE_IWA = 0.06
+from yippy.export import export_ayo_csv, export_exosims
+from yippy.performance import performance_curves
 
 
-def _knots(coro, upper_lod):
-    """Tabulated positive offsets inside the array, as plain floats."""
-    offsets = np.asarray(coro.offax.x_offsets, dtype=float)
-    return offsets[(offsets > 0) & (offsets <= upper_lod)]
+def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
+    """Fails if either export uses a separate interpolator or rounds CSV values.
 
-
-def test_the_two_contrast_paths_agree_at_the_knots(syn_coro_1d):
-    """At a tabulated offset both interpolants return the tabulated value.
-
-    Interpolating a logarithm and exponentiating is a round trip at a knot, so
-    the only difference allowed here is float32 rounding through ``log10`` and
-    ``power``. A real disagreement at a knot would mean the two interpolants
-    were built from different data, not merely in different spaces.
+    FITS binary doubles and 17-digit CSV text preserve evaluated float64 values;
+    four epsilons allow only floating-point parsing/serialization roundoff.
     """
-    coro = syn_coro_1d
-    knots = _knots(coro, 6.0)
-    assert len(knots) >= 4, "too few knots to make this comparison meaningful"
+    coro = copy(syn_coro_1d)
+    coro.yip_path = tmp_path
+    record = coro.performance
+    knots = np.asarray(record.separation_lod)
+    separations = (knots[:-1] + knots[1:]) / 2
+    specs = export_exosims(coro, separations_lod=separations)
+    csv_path = export_ayo_csv(coro, tmp_path / "ayo.csv", separations_lod=separations)
+    csv_data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
+    tolerance = 4 * np.finfo(np.float64).eps
 
-    for separation in knots:
-        accessor = float(coro.raw_contrast(float(separation)))
-        exported = float(coro.raw_contrast_interp(np.array([separation]))[0])
-        assert accessor == pytest.approx(exported, rel=1e-5), (
-            f"at the tabulated offset {separation} the accessor gives "
-            f"{accessor:.6e} and the exported interpolant {exported:.6e}"
+    for filename, quantity, csv_column in (
+        ("raw_contrast", "raw_contrast", 1),
+        ("core_thruput", "throughput", 3),
+    ):
+        data, header = fits.getdata(
+            tmp_path / "exosims" / f"{filename}.fits", header=True
+        )
+        expected = record.evaluate(quantity, separations)
+        np.testing.assert_array_equal(data[:, 0], separations)
+        np.testing.assert_allclose(data[:, 1], expected, rtol=tolerance, atol=0)
+        np.testing.assert_allclose(
+            csv_data[:, csv_column], expected, rtol=tolerance, atol=0
+        )
+        assert header["APERRULE"] == type(record.rule).__name__
+        assert header["LEAKRULE"] == record.leakage_rule
+
+    np.testing.assert_allclose(
+        fits.getdata(tmp_path / "exosims/core_area.fits")[:, 1],
+        record.evaluate("core_area_lod2", separations),
+        rtol=tolerance,
+        atol=0,
+    )
+    np.testing.assert_allclose(
+        fits.getdata(tmp_path / "exosims/core_mean_intensity.fits")[:, 1],
+        record.evaluate("leakage_density_lod2", separations)
+        * coro.stellar_intens.grid.pixel_area,
+        rtol=tolerance,
+        atol=0,
+    )
+    system = specs["starlightSuppressionSystems"][0]
+    assert system["core_area"] == "core_area.fits"
+    assert "OWA" not in system
+
+
+def test_arcsec_export_converts_separation_and_area(syn_coro_1d, tmp_path):
+    """Fails if angular export relabels lod tables or omits the area scale square.
+
+    Both sides perform one angular multiplication (two for area); four float64
+    epsilons cover arithmetic and FITS serialization, not a unit discrepancy.
+    """
+    coro = copy(syn_coro_1d)
+    coro.yip_path = tmp_path
+    record = coro.performance
+    separations = np.array([1.125, 2.375, 4.125])
+    specs = export_exosims(coro, "arcsec", separations_lod=separations)
+    scale = float(record.frame.lod_to_arcsec(coro.header.lambda0.to_value(u.nm)))
+    tolerance = 4 * np.finfo(np.float64).eps
+    for filename in (
+        "core_thruput",
+        "core_area",
+        "raw_contrast",
+        "core_mean_intensity",
+        "occ_trans",
+    ):
+        data = fits.getdata(tmp_path / "exosims" / f"{filename}.fits")
+        np.testing.assert_allclose(
+            data[:, 0], separations * scale, rtol=tolerance, atol=0
+        )
+    np.testing.assert_allclose(
+        fits.getdata(tmp_path / "exosims/core_area.fits")[:, 1],
+        record.evaluate("core_area_lod2", separations) * scale**2,
+        rtol=tolerance,
+        atol=0,
+    )
+    system = specs["starlightSuppressionSystems"][0]
+    np.testing.assert_allclose(
+        system["IWA"], record.iwa_lod * scale, rtol=tolerance, atol=0
+    )
+    assert "OWA" not in system
+
+    # Double the stellar reference diameter: a planet-frame lod covers four
+    # stellar-frame lod2. A constant stellar map must still export its original
+    # per-pixel fraction, not four times that fraction. The 32-epsilon bound
+    # covers FFT quadrature and log interpolation of a constant profile.
+    stellar_reader = copy(coro.stellar_intens)
+    stellar_reader.grid = replace(
+        stellar_reader.grid,
+        frame=replace(record.frame, diameter_m=2 * record.frame.diameter_m),
+    )
+    coro.stellar_intens = stellar_reader
+    stellar_level = 2.0**-30
+    stellar = Image(
+        np.full(stellar_reader.grid.shape, stellar_level),
+        stellar_reader.grid,
+        (),
+        "per_pixel",
+        "stellar_flux_fraction",
+    )
+    separations = np.array([1.125, 2.125, 2.875])
+    coro.performance = performance_curves(
+        coro, stellar, record.rule, separations_lod=separations
+    )
+    midpoints = (separations[:-1] + separations[1:]) / 2
+    export_exosims(coro, "arcsec", separations_lod=midpoints)
+    np.testing.assert_allclose(
+        fits.getdata(tmp_path / "exosims/core_mean_intensity.fits")[:, 1],
+        stellar_level,
+        rtol=32 * np.finfo(np.float64).eps,
+        atol=0,
+    )
+
+
+def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
+    """Fails for the wrong interpolation space or an unrequested contrast floor.
+
+    Two knots have an analytic midpoint: the arithmetic mean for throughput,
+    geometric mean for contrast-like fields. Sixteen float64 epsilons cover
+    logarithm/exponentiation; the wrong interpolation space differs by order one.
+    """
+    coro = copy(syn_coro_1d)
+    coro.yip_path = tmp_path
+    coro.performance = replace(
+        coro.performance,
+        separation_lod=np.array([1.0, 3.0]),
+        throughput=np.array([0.2, 0.6]),
+        core_area_lod2=np.array([1.0, 1.0]),
+        leakage_fraction=np.array([1e-8, 1e-10]),
+        leakage_density_lod2=np.array([1e-8, 1e-10]),
+        raw_contrast=np.array([1e-11, 1e-13]),
+    )
+    record = coro.performance
+    separations = np.array([2.0])
+    tolerance = 16 * np.finfo(np.float64).eps
+    np.testing.assert_allclose(
+        record.evaluate("throughput", separations), [0.4], rtol=tolerance
+    )
+    for quantity, midpoint in (
+        ("raw_contrast", 1e-12),
+        ("leakage_fraction", 1e-9),
+        ("leakage_density_lod2", 1e-9),
+    ):
+        np.testing.assert_allclose(
+            record.evaluate(quantity, separations), [midpoint], rtol=tolerance, atol=0
         )
 
-
-def test_the_between_knot_disagreement_is_bounded_and_real(syn_coro_1d):
-    """Between knots the two paths differ, by a bounded and recorded amount.
-
-    Both halves of this matter. The disagreement has to be real, because a
-    version of this test that passed trivially would hide the fork rather than
-    record it; and it has to be bounded, because the bound is what a consumer
-    reading the exported table is entitled to assume about how far it sits from
-    the accessor.
-    """
-    coro = syn_coro_1d
-    knots = _knots(coro, 6.0)
-    midpoints = (knots[:-1] + knots[1:]) / 2.0
-
-    disagreements = []
-    for separation in midpoints:
-        accessor = float(coro.raw_contrast(float(separation)))
-        exported = float(coro.raw_contrast_interp(np.array([separation]))[0])
-        disagreements.append(abs(accessor - exported) / exported)
-    disagreements = np.array(disagreements)
-
-    assert disagreements.max() < MAX_BETWEEN_KNOT_DISAGREEMENT, (
-        f"the two contrast paths now disagree by {disagreements.max():.3f} "
-        f"between knots, above the recorded {MAX_BETWEEN_KNOT_DISAGREEMENT}"
+    plain = export_ayo_csv(coro, tmp_path / "plain.csv", separations_lod=separations)
+    floored = export_ayo_csv(
+        coro, tmp_path / "floor.csv", contrast_floor=1e-10, separations_lod=separations
     )
-
-    # The operationally relevant bound: inside the inner working angle nothing
-    # reads a contrast, so a large disagreement there costs nothing.
-    usable = disagreements[midpoints >= float(coro.IWA.value)]
-    assert len(usable) >= 3, "too few usable knot intervals to bound"
-    assert usable.max() < MAX_DISAGREEMENT_ABOVE_IWA, (
-        f"outside the inner working angle the two paths now disagree by "
-        f"{usable.max():.3f}, above the recorded {MAX_DISAGREEMENT_ABOVE_IWA}"
-    )
-    assert disagreements.max() > 1e-3, (
-        "the two paths no longer disagree between knots, which means either "
-        "the fork was closed, in which case delete this test and assert "
-        "equality instead, or this comparison stopped exercising it"
-    )
-
-
-def test_the_disagreement_is_worst_where_the_curve_is_steepest(syn_coro_1d):
-    """The fork is largest across the innermost knot intervals.
-
-    Interpolating a quantity and interpolating its logarithm differ in
-    proportion to the curvature over a knot interval, so the disagreement is
-    largest where contrast falls fastest, which is at small separations. The
-    steep region continues a little way past the inner working angle, so the
-    fork reaches into the band a yield code actually reads, which is why it is
-    worth closing rather than merely bounding.
-    """
-    coro = syn_coro_1d
-    knots = _knots(coro, 6.0)
-    midpoints = (knots[:-1] + knots[1:]) / 2.0
-
-    disagreements = np.array(
-        [
-            abs(
-                float(coro.raw_contrast(float(s)))
-                - float(coro.raw_contrast_interp(np.array([s]))[0])
-            )
-            / float(coro.raw_contrast_interp(np.array([s]))[0])
-            for s in midpoints
-        ]
-    )
-
-    worst = midpoints[np.argmax(disagreements)]
-    assert worst < float(coro.IWA.value) + 2.0 * KNOT_SPACING_LOD, (
-        f"the worst disagreement has moved to {worst} lambda/D, away from the "
-        f"steep part of the curve near the inner working angle "
-        f"({float(coro.IWA.value):.2f})"
-    )
+    plain_data = np.loadtxt(plain, delimiter=",", skiprows=1, ndmin=2)
+    floor_data = np.loadtxt(floored, delimiter=",", skiprows=1, ndmin=2)
+    np.testing.assert_allclose(plain_data[:, 1], [1e-12], rtol=tolerance, atol=0)
+    np.testing.assert_array_equal(floor_data[:, 1], [1e-10])
+    np.testing.assert_allclose(floor_data[:, 2], [1e-10 / 30], rtol=tolerance, atol=0)
+    np.testing.assert_array_equal(record.raw_contrast, [1e-11, 1e-13])

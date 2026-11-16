@@ -6,8 +6,13 @@ __all__ = [
     "CORE_WINDOW_LOD",
     "PEAK_SEARCH_RADIUS_LOD",
     "PROFILE_STEP_PIX",
+    "ApertureRule",
+    "Circular",
     "Coronagraph",
     "EqxCoronagraph",
+    "HalfMaximum",
+    "Matched",
+    "PerformanceCurves",
     "SincOptions",
     "__version__",
     "azimuthal_mean_profile",
@@ -31,6 +36,7 @@ __all__ = [
     "list_yips",
     "lod_inscribed_to_circumscribed",
     "logger",
+    "performance_curves",
     "plot_performance_curve",
     "profile_radii",
     "truncation_core",
@@ -39,6 +45,7 @@ __all__ = [
 ]
 
 from ._version import __version__
+from .apertures import ApertureRule, Circular, HalfMaximum, Matched
 from .coronagraph import Coronagraph
 from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
 from .eqx_coronagraph import EqxCoronagraph
@@ -51,6 +58,7 @@ from .performance import (
     CORE_WINDOW_LOD,
     PEAK_SEARCH_RADIUS_LOD,
     PROFILE_STEP_PIX,
+    PerformanceCurves,
     azimuthal_mean_profile,
     circular_aperture,
     compute_all_performance_curves,
@@ -67,6 +75,7 @@ from .performance import (
     core_separations,
     core_subpixel_window,
     core_window_half_width_pix,
+    performance_curves,
     plot_performance_curve,
     profile_radii,
     truncation_core,

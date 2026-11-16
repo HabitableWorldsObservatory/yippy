@@ -161,29 +161,25 @@ def test_inner_working_angle_is_the_half_maximum_crossing(package, coro):
     interpolation error over a half-lambda/D knot spacing and narrow enough
     that an off-by-one in the crossing search would fail.
     """
-    got = float(coro.IWA.value)
+    got = coro.iwa_lod
     expected = package.expected_iwa()
     assert abs(got - expected) < package.pixscale, (
         f"IWA {got:.4f} is more than one native pixel from {expected:.4f}"
     )
 
 
-def test_outer_working_angle_is_geometric_not_derived(package, coro):
-    """OWA is the largest offset whose PSF center is still on the array.
-
-    It is not read off the throughput curve. Pinning that here makes the
-    convention visible, because a consumer that assumes OWA marks the end of
-    the tabulated offsets will query separations the package never sampled.
-    """
-    assert float(coro.OWA.value) == pytest.approx(package.max_offset_in_image)
-    assert float(coro.OWA.value) > package.offsets[:, 0].max(), (
-        "this package is meant to have a geometric OWA beyond its last offset, "
+def test_data_extent_is_array_half_width(package, coro):
+    """Fails if array extent is labeled as a physical outer working angle."""
+    assert not hasattr(coro, "OWA")
+    assert coro.data_extent_lod == pytest.approx(package.max_offset_in_image)
+    assert coro.data_extent_lod > package.offsets[:, 0].max(), (
+        "this package has data extent beyond its last offset, "
         "which is the regime the contrast sentinel guards"
     )
 
 
-def test_contrast_does_not_blow_up_between_the_last_offset_and_the_owa(package, coro):
-    """Contrast inside the OWA stays near its bracketing tabulated values.
+def test_contrast_does_not_blow_up_between_last_offset_and_data_extent(package, coro):
+    """Synthetic contrast stays bounded through the array extent.
 
     Beyond the last tabulated offset the reader is extrapolating, and the
     quantity it extrapolates is a ratio whose denominator is heading toward
@@ -193,11 +189,11 @@ def test_contrast_does_not_blow_up_between_the_last_offset_and_the_owa(package, 
     larger of the two in-image knots that bracket the tabulated range.
     """
     last_offset = float(package.offsets[:, 0].max())
-    owa = float(coro.OWA.value)
+    data_extent_lod = coro.data_extent_lod
     in_image = [float(coro.raw_contrast(s)) for s in (last_offset - 0.5, last_offset)]
     ceiling = 10.0 * max(in_image)
 
-    probes = np.linspace(last_offset, owa, 9)
+    probes = np.linspace(last_offset, data_extent_lod, 9)
     checked = 0
     for separation in probes:
         value = float(coro.raw_contrast(separation))

@@ -2,17 +2,33 @@
 
 This page summarizes validation of yippy's coronagraph performance metrics
 against AYO's IDL implementation, tested on two coronagraphs (AAVC and OVC)
-with PSF truncation ratio 0.3. These historical results used synthesized-PSF
+with `HalfMaximum(0.3)`. These historical results used synthesized-PSF
 core measurements between offsets. That calculation now requires the explicit
-`separation_step_lod=CORE_STEP_LOD` opt-in; default curves measure the shipped
+`separations_lod=core_separations(coro, CORE_STEP_LOD)` opt-in; default curves measure the shipped
 PSFs at their own offsets and interpolate the resulting values.
 
 Performance curves are PCHIP-interpolated between the YIP's offsets by
-default. PCHIP preserves the shape of the tabulated curves without overshoot
+through `PerformanceCurves.evaluate`. PCHIP preserves the shape of the tabulated curves without overshoot
 near the inner working angle (Fritsch, F. N. and Carlson, R. E. 1980,
-*SIAM Journal on Numerical Analysis* 17, 238). Set `interp_order=1` to restore
-the previous linear interpolation. Outside the tabulated range, curves retain linear
-end-segment extrapolation.
+*SIAM Journal on Numerical Analysis* 17, 238). Throughput and area use linear
+values; leakage and contrast use logarithmic values. Outside the tabulated range,
+curves use linear end-segment extrapolation in their declared space.
+
+## Shared performance record
+
+Select an aperture with `Circular(radius_lod)`, `HalfMaximum(fraction)`, or
+`Matched()`. HalfMaximum includes only the region connected to the source peak;
+Matched uses the PSF as a weighted template and reports a noise-equivalent area.
+The selected result is `coro.performance`; previously requested rules are in
+`coro.curves_by_rule`. Evaluate every curve with
+`coro.performance.evaluate(name, separation_lod)`, including export samples.
+
+The record contains throughput, `core_area_lod2`, absolute `leakage_fraction`,
+`leakage_density_lod2`, and `raw_contrast`. Its `leakage_rule` distinguishes
+`aperture_mean` from `azimuthal_ring_mean`. Contrast is the selected leakage
+density times aperture area divided by throughput. `iwa_lod` is the first
+half-maximum-throughput crossing. `data_extent_lod` is the array half-width;
+it does not specify an outer working angle.
 
 ## Key Results
 
@@ -31,9 +47,10 @@ throughput agrees to 2.0% (AAVC) and 1.1% (OVC), with means of 1.0031 and
 measures the core of the PSF synthesized at each separation and AYO
 interpolates linearly between the tabulated offsets.
 
-Raw contrast and noise floor match exactly because both AYO and yippy
-clamp values at the contrast floor ($10^{-10}$), which dominates across
-most of the science region.
+These historical raw-contrast and noise-floor comparisons applied an explicit
+contrast floor ($10^{-10}$), which dominates across
+most of the science region. Current records retain unfloored raw contrast;
+export floors apply only when explicitly requested.
 
 ## Reproducible aperture accuracy benchmark
 

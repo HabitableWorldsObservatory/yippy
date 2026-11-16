@@ -10,6 +10,7 @@ import pytest
 from lod_unit import lod
 from test_band_limited_apertures import image_coro
 
+from yippy import HalfMaximum
 from yippy import performance as perf
 
 
@@ -42,9 +43,7 @@ def test_notebook_measurements_match_public_curves(prefix, cell_index, frames, m
     elif metric == "contrast":
         expected = perf.compute_raw_contrast_curve(coro)[1][0]
     else:
-        _, flux, area = perf.compute_truncation_curves(
-            coro, namespace["psf_trunc_ratio"]
-        )
+        _, flux, area = perf.compute_truncation_curves(coro, namespace["aperture_rule"])
         expected = area[0] if metric == "area" else flux[0]
     assert float(frame[metric]) == pytest.approx(expected, rel=1e-6)
     if "mask" in frame:
@@ -66,7 +65,9 @@ def test_comparison_notebook_uses_nominal_position():
     exec(compile(source, str(path), "exec"), namespace)
     pos = next(perf._iter_xaxis_positions(coro))
     flux, area = namespace["trunc_core"](pos, 0.3)
-    _, expected_flux, expected_area = perf.compute_truncation_curves(coro, 0.3)
+    _, expected_flux, expected_area = perf.compute_truncation_curves(
+        coro, HalfMaximum(0.3)
+    )
     np.testing.assert_allclose(
         [flux, area], [expected_flux[0], expected_area[0]], rtol=1e-6
     )

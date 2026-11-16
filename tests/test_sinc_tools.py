@@ -73,8 +73,8 @@ def local_header():
     header["N_LAM"] = 1
     header["D"] = (15.0, "entrance diameter, m")
     header["PIXSCALE"] = (0.25, "lambda0/D per pixel")
-    header["XCENTER"] = 1.5
-    header["YCENTER"] = 1.5
+    header["XCENTER"] = (2.0, "00LL pixel corner count")
+    header["YCENTER"] = (2.0, "00LL pixel corner count")
     header["BUNIT"] = "incident_fraction_per_pixel"
     return header
 

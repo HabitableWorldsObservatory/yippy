@@ -21,13 +21,13 @@ class TestSeparationMap:
     def test_center_is_zero(self, coro):
         """Separation at the grid center is zero."""
         r = coro.separation_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         assert r[cy, cx] == pytest.approx(0, abs=coro.pixel_scale_arcsec.value)
 
     def test_radially_symmetric(self, coro):
         """Values at equal pixel distance from center should be equal."""
         r = coro.separation_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
         assert r[cy, cx + d] == pytest.approx(r[cy + d, cx], rel=1e-10)
         # The axis sits between pixels cx - 1 and cx, so cx + d mirrors to
@@ -51,7 +51,7 @@ class TestCoreMeanIntensityMap:
     def test_radially_symmetric(self, coro):
         """Output should be perfectly radially symmetric."""
         m = coro.core_mean_intensity_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
         assert m[cy, cx + d] == pytest.approx(m[cy + d, cx], rel=1e-10)
         assert m[cy, cx + d] == pytest.approx(m[cy - 1 - d, cx], rel=1e-10)
@@ -65,7 +65,7 @@ class TestCoreMeanIntensityMap:
         """Map values should match point-query at the same separation."""
         r = coro.separation_map()
         m = coro.core_mean_intensity_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 15
         sep = r[cy, cx + d]
         expected = coro.core_mean_intensity(sep)
@@ -111,7 +111,7 @@ class TestThroughputMap:
     def test_radially_symmetric(self, coro):
         """Equidistant points from center have equal throughput."""
         m = coro.throughput_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
         assert m[cy, cx + d] == pytest.approx(m[cy + d, cx], rel=1e-10)
 
@@ -119,7 +119,7 @@ class TestThroughputMap:
         """Map values match the 1D interpolator at the same separation."""
         r = coro.separation_map()
         m = coro.throughput_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 15
         sep = r[cy, cx + d]
         expected = coro.throughput(sep)
@@ -143,7 +143,7 @@ class TestCoreAreaMap:
         """Map values match the 1D interpolator at the same separation."""
         r = coro.separation_map()
         m = coro.core_area_map()
-        cy, cx = round(coro.header.ycenter), round(coro.header.xcenter)
+        cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 15
         sep = r[cy, cx + d]
         expected = coro.core_area(sep)

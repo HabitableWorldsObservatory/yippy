@@ -16,8 +16,8 @@ two tabulated offsets yippy synthesizes the PSF as the two neighboring PSFs
 shifted onto the source and mixed with weights linear in separation; for
 concentric Gaussians that mixture is radially symmetric and its core radius is
 the root of a one-dimensional equation. On a shipped package the reference is
-the synthesized PSF's band-limited reconstruction, thresholded over the whole
-image.
+the synthesized PSF's band-limited reconstruction, thresholded and restricted
+to the peak-connected region.
 """
 
 import astropy.io.fits as pyfits
@@ -27,8 +27,8 @@ from conftest import REFERENCE_DATA_REQUIRED
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
-from yippy import Coronagraph
-from yippy.performance import CORE_STEP_LOD
+from yippy import Coronagraph, HalfMaximum
+from yippy.performance import CORE_STEP_LOD, core_separations
 
 # Separations (lambda/D) probed, on and between the tabulated offsets.
 GAUSSIAN_SEPARATIONS_LOD = (2.1, 2.37, 3.0, 3.62, 4.13, 5.05)
@@ -86,7 +86,7 @@ def test_core_area_of_a_gaussian_is_its_closed_form(gaussian_package, ratio):
     centered on a pixel the cells cross the threshold in symmetric rings and
     the area is off by 9 percent at a ratio of 0.5.
     """
-    coro = Coronagraph(gaussian_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
     expected = gaussian_core_area(gaussian_package.psf_sigma_lod, ratio)
     got = np.array([coro.core_area(s) for s in GAUSSIAN_SEPARATIONS_LOD])
     err = np.abs(got / expected - 1.0)
@@ -175,9 +175,13 @@ def test_core_area_follows_the_synthesized_psf_between_offsets(growth_package, r
     overstates it by 4 to 9 percent here, because the core of the mixed PSF
     is not the mix of the two cores.
     """
-    coro = Coronagraph(growth_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(growth_package.path, rule=HalfMaximum(ratio))
     coro.compute_all_performance_curves(
-        psf_trunc_ratio=ratio, separation_step_lod=CORE_STEP_LOD, save_to_fits=False
+        rule=HalfMaximum(ratio),
+        separations_lod=np.union1d(
+            core_separations(coro, CORE_STEP_LOD), np.asarray(coro.offax.x_offsets)
+        ),
+        save_to_fits=False,
     )
     separations = np.array([2.5, 3.0, 3.37, 3.5, 4.6, 4.9])
     expected = np.array(
@@ -210,6 +214,18 @@ def fourier_upsampled_core(psf, pixel_lod, ratio, factor):
     padded[start : start + n, start : start + n] = spec
     fine = np.real(np.fft.ifft2(np.fft.ifftshift(padded)))
     above = fine > ratio * fine.max()
+    connected = np.zeros_like(above)
+    pending = [np.unravel_index(np.argmax(fine), fine.shape)]
+    while pending:
+        row, col = pending.pop()
+        if connected[row, col] or not above[row, col]:
+            continue
+        connected[row, col] = True
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            y, x = row + dy, col + dx
+            if 0 <= y < big and 0 <= x < big and above[y, x] and not connected[y, x]:
+                pending.append((y, x))
+    above = connected
     # The inverse transform of the padded spectrum carries 1 / factor^2, so
     # each fine cell already holds its share of the pixel's light.
     return above.sum() * (pixel_lod / factor) ** 2, fine[above].sum()
@@ -232,7 +248,7 @@ def shipped_trunc_coro():
         if REFERENCE_DATA_REQUIRED:
             pytest.fail(message)
         pytest.skip(message)
-    return Coronagraph(yip_path, psf_trunc_ratio=SHIPPED_RATIO)
+    return Coronagraph(yip_path, rule=HalfMaximum(SHIPPED_RATIO))
 
 
 @pytest.mark.parametrize("separation_lod", (3.3, 4.7, 6.1, 9.4))
@@ -287,7 +303,7 @@ def test_core_throughput_of_a_gaussian_is_its_closed_form(gaussian_package, rati
     pixels misplaces the core boundary and is off by several percent for a
     core centered on a pixel.
     """
-    coro = Coronagraph(gaussian_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
     nodes = np.sort(gaussian_package.offsets[:, 0])
     flux = np.interp(
         GAUSSIAN_SEPARATIONS_LOD,
@@ -313,9 +329,13 @@ def test_core_throughput_follows_the_synthesized_psf_between_offsets(
     Interpolating the tabulated throughputs linearly in separation instead
     overstates it by 2 to 7 percent here.
     """
-    coro = Coronagraph(growth_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(growth_package.path, rule=HalfMaximum(ratio))
     coro.compute_all_performance_curves(
-        psf_trunc_ratio=ratio, separation_step_lod=CORE_STEP_LOD, save_to_fits=False
+        rule=HalfMaximum(ratio),
+        separations_lod=np.union1d(
+            core_separations(coro, CORE_STEP_LOD), np.asarray(coro.offax.x_offsets)
+        ),
+        save_to_fits=False,
     )
     separations = np.array([2.5, 3.0, 3.37, 3.5, 4.6, 4.9])
     expected = np.array(
@@ -400,7 +420,7 @@ def test_core_near_the_image_edge_is_its_closed_form(edge_package, ratio):
     interpolant evaluated next to the edge would wrap light from the
     opposite border into it.
     """
-    coro = Coronagraph(edge_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(edge_package.path, rule=HalfMaximum(ratio))
     separations = (6.0, 6.5, 7.0)
     t_expected, a_expected = gaussian_core_expected(edge_package, separations, ratio)
     t_got = np.array([coro.throughput(s) for s in separations])
@@ -419,7 +439,7 @@ def test_core_inside_the_inner_working_angle_is_its_closed_form(
     magnitude near the axis without changing their shape, so the core is
     defined relative to the PSF's own peak and keeps its closed form.
     """
-    coro = Coronagraph(gaussian_package.path, psf_trunc_ratio=ratio)
+    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
     separations = (0.1, 0.25, 0.5, 0.8)
     t_expected, a_expected = gaussian_core_expected(
         gaussian_package, separations, ratio
@@ -522,7 +542,7 @@ def test_default_core_separations_are_the_package_offsets(growth_package, curve)
         compute_truncation_throughput_curve,
     )
 
-    coro = Coronagraph(growth_package.path, psf_trunc_ratio=0.5)
+    coro = Coronagraph(growth_package.path, rule=HalfMaximum(0.5))
     compute = {
         "both": compute_truncation_curves,
         "throughput": compute_truncation_throughput_curve,

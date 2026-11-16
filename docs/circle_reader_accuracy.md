@@ -30,8 +30,8 @@ reported here. The option is also available on `core_mean_intensity_profile`,
 `compute_core_mean_intensity_curve`, `Coronagraph.core_mean_intensity_curve`,
 and both `Coronagraph.core_mean_intensity` and
 `EqxCoronagraph.core_mean_intensity`. The intensity map and AYO noise-floor
-helpers forward it. This controls spatial interpolation; `interp_order`
-still controls the subsequent interpolation between radial profile knots.
+helpers forward it. This controls spatial interpolation; the resulting profile
+uses the shared record evaluator for PCHIP interpolation between radial knots.
 
 The quintic implementation is pure JAX, with no SciPy at read time. It follows
 P. Thevenaz, T. Blu and M. Unser, "Interpolation Revisited", *IEEE Transactions

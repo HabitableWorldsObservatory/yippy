@@ -36,8 +36,8 @@ FAR_FIELD_SEPARATIONS_LOD = (20.0, 25.0)
 # pin, not a derivation: it catches unintended change and establishes nothing
 # about correctness.
 # Measured with the 10x band-limited circle of radius 0.7 lambda/D.
-# PCHIP is the default; the explicit linear option preserves the old crossing.
-EAC1_AAVC_IWA_LOD = {None: 4.060305, 1: 4.27092}
+# Every record uses the same PCHIP half-maximum crossing.
+EAC1_AAVC_IWA_LOD = 4.060305
 EAC1_AAVC_IWA_TOL = 5e-3
 
 
@@ -123,8 +123,7 @@ def test_inscribed_conversion_is_explicit(syn_coro_1d):
         )
 
 
-@pytest.mark.parametrize("order", [None, 1])
-def test_the_inner_working_angle_has_not_moved(shipped_coro, order):
+def test_the_inner_working_angle_has_not_moved(shipped_coro):
     """A regression pin on the derived inner working angle.
 
     Every yield number depends on where the reader says the mask opens. This
@@ -132,87 +131,40 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro, order):
     throughput curve beneath it; it is not evidence that the value is right.
     The closed-form check of the same derivation is in ``test_analytic_yip.py``.
     """
-    from yippy import Coronagraph
-
-    coro = (
-        shipped_coro
-        if order is None
-        else Coronagraph(shipped_coro.yip_path, interp_order=order)
-    )
-    got = float(coro.IWA.to_value(lod))
-    expected = EAC1_AAVC_IWA_LOD[order]
+    got = shipped_coro.iwa_lod
+    expected = EAC1_AAVC_IWA_LOD
     assert got == pytest.approx(expected, abs=EAC1_AAVC_IWA_TOL), (
-        f"the inner working angle for interp_order={order} moved to "
-        f"{got:.4f} lambda/D from the pinned {expected}"
+        f"the inner working angle moved to {got:.4f} lambda/D "
+        f"from the pinned {expected}"
     )
 
 
-def test_the_outer_working_angle_is_the_array_edge(shipped_coro):
-    """OWA is geometric: it is where the PSF centre leaves the array.
+def test_data_extent_is_the_array_half_width(shipped_coro):
+    """Fails if the array half-width is mislabeled as an outer working angle."""
+    expected = min(shipped_coro.grid.shape) / 2 * shipped_coro.grid.step
+    assert shipped_coro.data_extent_lod == pytest.approx(expected)
+    assert not hasattr(shipped_coro, "OWA")
+    assert shipped_coro.data_extent_lod > shipped_coro.iwa_lod
 
-    It is not the last tabulated offset and not a point on the throughput
-    curve. A consumer that treats it as the edge of the sampled region will
-    query separations the package never tabulated, which is the regime the
-    contrast sentinel in the analytic suite guards.
+
+def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
+    """Fails if the array edge again implies a usable low-contrast region.
+
+    The shipped stellar map rises toward the array edge. The previous OWA
+    sentinel xfailed because a geometric bound promised optical performance;
+    the new API makes that distinction explicit and retains this physical
+    counterexample. A factor of ten is deliberately below the measured rise.
     """
-    expected = shipped_coro.npixels / 2 * float(shipped_coro.pixel_scale_arcsec.value)
-    assert float(shipped_coro.OWA.to_value(lod)) == pytest.approx(expected), (
-        "the outer working angle is not the half-width of the array"
-    )
-    assert float(shipped_coro.OWA.to_value(lod)) > float(
-        shipped_coro.IWA.to_value(lod)
-    ), "the outer working angle is inside the inner one"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The reported outer working angle is the geometric edge of the array, "
-        "32 lambda/D, but the package's controlled dark hole ends near 26 to "
-        "28. This is a property of the package rather than an artefact of the "
-        "reader: the stellar intensity map's own radial mean rises from "
-        "3.8e-13 at 24 lambda/D to 3.5e-8 at 31, five orders, while throughput "
-        "over the same span falls by under twenty percent. Raw contrast "
-        "follows it, 3.0e-11 at 25 lambda/D and 1.7e-3 at the reported angle. "
-        "A yield code that trusts the reported angle therefore places planets "
-        "in a band the coronagraph does not control. Separately, offsets "
-        "tabulated beyond the array edge are given a 1e20 contrast sentinel, "
-        "so a query above the reported angle returns a number climbing toward "
-        "it rather than an error. Either the reported angle is derived from "
-        "the contrast curve, or the package carries its dark hole edge as its "
-        "own keyword; both change numbers in every consumer, so the contract "
-        "is written here and the choice is escalated."
-    ),
-)
-def test_the_contrast_sentinel_holds_on_the_shipped_package(shipped_coro):
-    """Contrast inside the OWA stays near its bracketing tabulated values.
-
-    The same sentinel the analytic suite applies to a package whose answers are
-    known, applied here to the one a yield code actually consumes. Beyond the
-    last tabulated offset the reader extrapolates a ratio whose denominator is
-    heading toward zero, and a contrast that climbs by orders of magnitude
-    there reaches a yield code as an unreachable region rather than as an
-    extrapolation.
-    """
-    owa = float(shipped_coro.OWA.to_value(lod))
-    iwa = float(shipped_coro.IWA.to_value(lod))
+    extent = shipped_coro.data_extent_lod
     reference = max(
         float(shipped_coro.raw_contrast(s))
-        for s in np.linspace(iwa + 1.0, 0.75 * owa, 8)
+        for s in np.linspace(shipped_coro.iwa_lod + 1.0, 0.75 * extent, 8)
     )
-    ceiling = 10.0 * reference
-
-    probes = np.linspace(0.75 * owa, owa, 9)
-    checked = 0
-    for separation in probes:
-        value = float(shipped_coro.raw_contrast(separation))
-        assert np.isfinite(value), f"raw_contrast({separation:.2f}) is not finite"
-        assert value <= ceiling, (
-            f"raw_contrast({separation:.2f}) = {value:.3e} exceeds ten times the "
-            f"largest in-image value below it ({ceiling:.3e})"
-        )
-        checked += 1
-    assert checked == len(probes), "the sentinel loop skipped separations"
+    probes = np.linspace(0.75 * extent, extent, 9)
+    values = np.asarray(shipped_coro.raw_contrast(probes))
+    assert np.all(np.isfinite(values))
+    assert values.max() > 10.0 * reference
+    assert not hasattr(shipped_coro, "OWA")
 
 
 def test_header_grid_corner_counts(syn_coro_1d):

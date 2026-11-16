@@ -204,101 +204,97 @@ def cache_identity_digest(identity: dict) -> str:
 
 
 def save_coro_performance_to_fits(
-    sep: np.ndarray,
-    throughput: np.ndarray,
-    raw_contrast: np.ndarray,
-    filename: str,
-    outdir: Path,
-    overwrite=True,
-    identity: dict | None = None,
-    core: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    record, filename, outdir, overwrite=True, identity=None
 ):
-    """Save coronagraph performance (throughput, raw_contrast) to a FITS file.
+    """Atomically store the complete single-axis record as float64 columns."""
+    import os
+    from dataclasses import asdict
 
-    Double-precision columns preserve measured float64 values across cache reloads.
-
-    Args:
-        sep: Separations in lambda/D.
-        throughput: Throughput at each separation.
-        raw_contrast: Unfloored raw contrast at each separation.
-        filename: Output file name.
-        outdir: Output directory.
-        overwrite: Whether to overwrite an existing file.
-        identity: Optional mapping describing the settings that produced the
-            table. Its digest (``CACHEKEY``) and canonical JSON (``CACHEID``)
-            are written to the primary header, which is what automatic cache
-            reuse validates against.
-        core: Optional ``(separations, throughputs, core_areas)`` of the
-            truncation core, written as a second table (``CORE_TRUNCATION``)
-            on its own separation grid.
-    """
-    sort_idx = np.argsort(sep)
-    col_sep = fits.Column(name="separation_lamD", format="D", array=sep[sort_idx])
-    col_thr = fits.Column(name="throughput", format="D", array=throughput[sort_idx])
-    col_con = fits.Column(name="raw_contrast", format="D", array=raw_contrast[sort_idx])
-    cols = fits.ColDefs([col_sep, col_thr, col_con])
-    tbhdu = fits.BinTableHDU.from_columns(cols)
-    tbhdu.name = "CORO_PERFORMANCE"
-
-    primary_hdu = fits.PrimaryHDU()
+    header = fits.Header()
+    header["PERFVER"] = 3
+    header["APERRULE"] = type(record.rule).__name__
+    header["RULEJSON"] = json.dumps(asdict(record.rule), sort_keys=True)
+    header["LEAKRULE"] = record.leakage_rule
+    header["FRAME"] = json.dumps(asdict(record.frame), sort_keys=True)
+    header["IWA_LOD"] = record.iwa_lod if np.isfinite(record.iwa_lod) else "undefined"
+    header["EXTENT"] = record.data_extent_lod
+    if record.stellar_diameter is not None:
+        header["STARDIAM"] = record.stellar_diameter
     if identity is not None:
-        primary_hdu.header["CACHEKEY"] = cache_identity_digest(identity)
-        primary_hdu.header["CACHEID"] = cache_identity_json(identity)
-    hdus = [primary_hdu, tbhdu]
-    if core is not None:
-        core_sep, core_thr, core_area = (np.asarray(a) for a in core)
-        core_hdu = fits.BinTableHDU.from_columns(
-            [
-                fits.Column(name="separation_lamD", format="D", array=core_sep),
-                fits.Column(name="throughput", format="D", array=core_thr),
-                fits.Column(name="core_area_lamD2", format="D", array=core_area),
-            ]
+        header["CACHEKEY"] = cache_identity_digest(identity)
+        header["CACHEID"] = cache_identity_json(identity)
+    names = (
+        "separation_lod",
+        "throughput",
+        "core_area_lod2",
+        "leakage_fraction",
+        "leakage_density_lod2",
+        "raw_contrast",
+    )
+    table = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name=name, format="D", array=getattr(record, name))
+            for name in names
+        ],
+        name="PERFORMANCE",
+    )
+    outpath = Path(outdir) / filename
+    if outpath.exists() and not overwrite:
+        raise FileExistsError(outpath)
+    temporary = outpath.with_name(f"{outpath.name}.{os.getpid()}.tmp")
+    try:
+        fits.HDUList([fits.PrimaryHDU(header=header), table]).writeto(
+            temporary, overwrite=True
         )
-        core_hdu.name = "CORE_TRUNCATION"
-        hdus.append(core_hdu)
-    hdul = fits.HDUList(hdus)
-    outpath = outdir / filename
-    hdul.writeto(outpath, overwrite=overwrite)
+        os.replace(temporary, outpath)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read_performance_cache_key(path: Path) -> str | None:
-    """Return the ``CACHEKEY`` digest of a performance table, or None.
-
-    Unreadable files and tables written without identity metadata return
-    None, so a caller comparing against an expected digest treats them as a
-    cache miss.
-    """
+    """Identity digest, or None for missing/unreadable/old-format records."""
     try:
-        return fits.getheader(path, 0).get("CACHEKEY")
+        header = fits.getheader(path, 0)
+        return header.get("CACHEKEY") if header.get("PERFVER") == 3 else None
     except (OSError, ValueError):
         return None
 
 
 def load_coro_performance_from_fits(filename: str, indir: Path):
-    """Load (separation, throughput, raw_contrast) from a FITS file."""
-    inpath = indir / filename
-    with fits.open(inpath) as hdul:
-        data = hdul["CORO_PERFORMANCE"].data
-        sep = data["separation_lamD"]
-        thr = data["throughput"]
-        con = data["raw_contrast"]
-    return sep, thr, con
+    """Read a complete record; legacy partial tables are not supported."""
+    from .apertures import Circular, HalfMaximum, Matched
+    from .performance import PerformanceCurves
 
-
-def load_core_truncation_from_fits(filename: str, indir: Path):
-    """Load the truncation core table, or None if the file has none.
-
-    Returns:
-        ``(separations, throughputs, core_areas)`` or None.
-    """
-    with fits.open(indir / filename) as hdul:
-        if "CORE_TRUNCATION" not in hdul:
-            return None
-        data = hdul["CORE_TRUNCATION"].data
-        return (
-            np.array(data["separation_lamD"], dtype=float),
-            np.array(data["throughput"], dtype=float),
-            np.array(data["core_area_lamD2"], dtype=float),
+    with fits.open(Path(indir) / filename) as hdus:
+        header = hdus[0].header
+        if header.get("PERFVER") != 3:
+            raise ValueError("performance cache requires PERFVER=3")
+        rule_type = {
+            "Circular": Circular,
+            "HalfMaximum": HalfMaximum,
+            "Matched": Matched,
+        }[header["APERRULE"]]
+        rule = rule_type(**json.loads(header["RULEJSON"]))
+        fields = {
+            name: np.array(hdus["PERFORMANCE"].data[name], dtype=float)
+            for name in (
+                "separation_lod",
+                "throughput",
+                "core_area_lod2",
+                "leakage_fraction",
+                "leakage_density_lod2",
+                "raw_contrast",
+            )
+        }
+        iwa = header["IWA_LOD"]
+        return PerformanceCurves(
+            **fields,
+            frame=Frame(**json.loads(header["FRAME"])),
+            rule=rule,
+            leakage_rule=header["LEAKRULE"],
+            iwa_lod=np.nan if iwa == "undefined" else float(iwa),
+            data_extent_lod=header["EXTENT"],
+            stellar_diameter=header.get("STARDIAM"),
         )
 
 

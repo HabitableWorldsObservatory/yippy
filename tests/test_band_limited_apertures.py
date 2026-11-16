@@ -22,6 +22,7 @@ from scipy.integrate import quad
 from scipy.optimize import brentq
 from scipy.special import j0, j1, jvp
 
+from yippy import Circular
 from yippy.performance import (
     _iter_xaxis_positions,
     circular_aperture,
@@ -57,8 +58,11 @@ def image_coro(psf, pixel_lod, star=None):
     stellar_reader = lambda diam: Image(  # noqa: E731
         psf if star is None else star, grid, (), "per_pixel", "stellar_flux_fraction"
     )
+    stellar_reader.grid = grid
+    stellar_reader.diams = np.array([0.0]) * lod
     stellar_reader._evaluate_array = lambda diam: psf if star is None else star
     return SimpleNamespace(
+        grid=grid,
         pixel_scale_arcsec=pixel_lod * lod / u.pix,
         offax=SimpleNamespace(
             x_offsets=np.array([0.0]) * lod,
@@ -84,7 +88,7 @@ def encircled_energy(radius_lod):
 def test_circle_airy_encircled_energy(pixel_lod, shift_pix, radius_lod):
     """A circular sum recovers the Airy encircled energy at each sampling phase."""
     coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, aperture_radius_lod=radius_lod)[1][0]
+    measured = compute_throughput_curve(coro, rule=Circular(radius_lod))[1][0]
     assert measured == pytest.approx(encircled_energy(radius_lod), rel=1e-3)
 
 
@@ -150,7 +154,7 @@ def test_circle_matches_independently_sampled_airy(pixel_lod, shift_pix, radius_
     weights = reference_circle_weights(rows, cols, radius_lod / h)
     expected = (weights * intensity).sum() * h**2
     coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, aperture_radius_lod=radius_lod)[1][0]
+    measured = compute_throughput_curve(coro, rule=Circular(radius_lod))[1][0]
     assert measured == pytest.approx(expected, rel=2e-6)
 
 
@@ -254,7 +258,9 @@ def test_shipped_circle_stays_near_nominal_source(shipped_coro):
     """A dark on-axis source must not jump to a remote leakage speckle."""
     _, flux = compute_throughput_curve(shipped_coro)
     assert flux[0] < 1e-8
-    first_max = next(i for i in range(1, len(flux) - 1) if flux[i] > flux[i + 1])
+    first_max = next(
+        (i for i in range(1, len(flux) - 1) if flux[i] > flux[i + 1]), len(flux) - 1
+    )
     assert np.all(np.diff(flux[: first_max + 1]) >= 0)
 
 

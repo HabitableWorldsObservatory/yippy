@@ -161,13 +161,13 @@ def test_curve_follows_the_map_between_tabulated_diameters(ring_coro, diameter_l
     )
 
 
-@pytest.mark.parametrize("order", [None, 1])
-def test_jax_view_matches_the_loader_between_diameters(ring_coro, order):
+@pytest.mark.parametrize("leakage_rule", ["aperture_mean", "azimuthal_ring_mean"])
+def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
     """A nonconstant radial profile agrees in float64, including linear tails."""
     from yippy.eqx_coronagraph import EqxCoronagraph
 
     with jax.enable_x64():
-        coro = Coronagraph(ring_coro.yip_path, interp_order=order)
+        coro = Coronagraph(ring_coro.yip_path, leakage_rule=leakage_rule)
         eqx_coro = EqxCoronagraph(yippy_coro=coro)
         nodes = coro.core_intensity_separations
         separations = np.array(
@@ -185,6 +185,16 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, order):
         evaluate = jax.jit(lambda x, d: eqx_coro.core_mean_intensity(x, d))
         for diameter in [0.0, 0.075]:
             expected = coro.core_mean_intensity(separations, diameter * lod)
+            profile_record = coro._core_intensity_cache.get(diameter)
+            if profile_record is None:
+                coro._core_intensity_interp_at(diameter)
+                profile_record = coro._core_intensity_cache[diameter]
+            np.testing.assert_allclose(
+                profile_record.evaluate("core_mean_intensity", separations),
+                expected,
+                rtol=1e-12,
+                atol=1e-24,
+            )
             eager = eqx_coro.core_mean_intensity(separations, diameter)
             np.testing.assert_allclose(eager, expected, rtol=1e-12, atol=1e-24)
             np.testing.assert_allclose(

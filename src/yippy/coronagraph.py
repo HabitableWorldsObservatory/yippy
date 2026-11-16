@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from ._precision import dtype_tag, float_dtype
 from ._version import __version__
+from .apertures import Circular
 from .export import export_ayo_csv
 from .header import HeaderData
 from .interpolation import SincOptions, blend_read
@@ -22,9 +23,7 @@ from .logger import logger
 from .offjax import OffJAX
 from .performance import (
     CORE_OVERSAMPLE,
-    CORE_WINDOW_LOD,
-    PEAK_SEARCH_RADIUS_LOD,
-    _build_curve_interp,
+    PerformanceCurves,
     compute_core_area_curve,
     compute_core_mean_intensity_curve,
     compute_occ_trans_curve,
@@ -32,14 +31,17 @@ from .performance import (
     compute_raw_contrast_curve,
     compute_throughput_curve,
     core_mean_intensity_profile,
+    performance_curves,
     plot_performance_curve,
-)
-from .performance import (
-    compute_all_performance_curves as _compute_all_perf,
 )
 from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
-from .util import cache_identity_digest, read_performance_cache_key
+from .util import (
+    cache_identity_digest,
+    load_coro_performance_from_fits,
+    read_performance_cache_key,
+    save_coro_performance_to_fits,
+)
 
 # Invalidate artifacts using corner counts as pixel-center indices, including
 # datacube layouts and nominal peak locations in performance tables.
@@ -108,10 +110,9 @@ class Coronagraph:
         y_symmetric: bool = True,
         use_quarter_psf_datacube: bool = True,
         downsample_shape: tuple[int, int] | None = None,
-        aperture_radius_lod: float = 0.7,
+        rule=Circular(0.7),  # noqa: B008 - frozen rule
         contrast_floor: float | None = None,
-        psf_trunc_ratio: float | None = None,
-        interp_order: int | None = None,
+        leakage_rule: str = "aperture_mean",
         *,
         interpolation: str = "blend",
         sinc_options: SincOptions | None = None,
@@ -155,22 +156,10 @@ class Coronagraph:
                 conserving total flux. The pixel_scale_arcsec will be updated
                 accordingly.
                 Default is None (no downsampling).
-            aperture_radius_lod (float):
-                Aperture radius in lambda/D for throughput and contrast calculations.
-                Default is 0.7 (AYO typically uses 0.85).
-            contrast_floor (float | None):
-                Minimum contrast value for engineering stability floor.
-                If provided, raw contrast values are floored at this value.
-                Typical AYO value is 1e-10. Default is None (no floor).
-            psf_trunc_ratio (float | None):
-                PSF truncation ratio for throughput and core area computation.
-                When set, pixels above ``ratio * peak`` define the aperture,
-                the definition behind AYO's ``photap_frac`` / ``omega_lod``.
-                AYO measures it on the tabulated PSFs with 5x bilinear
-                resampling, which gives a core a few percent larger than
-                the converged one computed here.
-                When None, a fixed circular aperture is used instead.
-                Typical AYO value is 0.3. Default is None.
+            rule: Static Circular, HalfMaximum or Matched photometric rule.
+            leakage_rule: aperture_mean or azimuthal_ring_mean for the density.
+            contrast_floor: Optional floor applied by the contrast accessor;
+                the physical record and cache always retain unfloored values.
             interpolation (str):
                 Off-axis backend: blend (default), auto, or strict sinc. Legacy
                 blend loading and caches are unchanged. Versioned quadrant
@@ -178,11 +167,6 @@ class Coronagraph:
             sinc_options (SincOptions | None):
                 Selected fixed product, permission restriction, allocation
                 ceilings and read policy. Error budgets use photons per pixel.
-            interp_order (int | None):
-                None (default) uses shape-preserving PCHIP between performance
-                curve nodes, with linear end-segment extrapolation. An integer
-                uses make_interp_spline(k=interp_order) unchanged. Set 1 to
-                reproduce the previous linear default, or 3 for cubic.
         """
         ###################
         # Read input data #
@@ -220,9 +204,10 @@ class Coronagraph:
         self.name = yip_path.stem
 
         # Store performance curve parameters
-        self.aperture_radius_lod = aperture_radius_lod
+        self.rule = rule
+        self.leakage_rule = leakage_rule
         self.contrast_floor = contrast_floor
-        self.psf_trunc_ratio = psf_trunc_ratio
+        self.curves_by_rule = {}
 
         # Get header and calculate the lambda/D value
         stellar_intens_header = pyfits.getheader(
@@ -297,9 +282,8 @@ class Coronagraph:
         assert self.psf_shape[0] == self.psf_shape[1], "PSF must be square"
         self.npixels = self.psf_shape[0]
 
-        self.interp_order = interp_order
-
         self._load_or_compute_performance()
+        self._initialize_profiles()
 
         logger.info(f"Created {yip_path.stem}")
 
@@ -352,42 +336,56 @@ class Coronagraph:
         return jax.vmap(self.create_psf_with_info)(x, y)
 
     def _load_or_compute_performance(self):
-        """Build performance interpolators from a valid cache entry or afresh.
+        """Select the current rule's complete record from a validated cache."""
+        return self.compute_all_performance_curves()
 
-        Shared by the constructor and ``set_psf_trunc_ratio`` so both use the
-        same settings and the same stored-value meaning. An entry is reused
-        only when its recorded identity digest equals the identity of the
-        current request; anything else (missing, legacy, unreadable, or
-        written under other settings) is a miss and is overwritten.
-        """
-        perf_file = self._perf_filename()
-        perf_path = self._perf_dir / perf_file
-        expected = cache_identity_digest(self._auto_perf_identity())
-        hit = perf_path.exists() and read_performance_cache_key(perf_path) == expected
+    @property
+    def iwa_lod(self):
+        """Half-maximum-throughput inner working angle of the selected rule."""
+        return self.performance.iwa_lod
 
-        if hit:
-            logger.info(f"Loading performance metrics from {perf_path}")
-        else:
-            if perf_path.exists():
-                logger.info(f"Ignoring incompatible performance cache {perf_path}")
-            if self.psf_trunc_ratio is not None:
-                logger.info(
-                    f"Computing performance with PSF trunc ratio "
-                    f"= {self.psf_trunc_ratio}..."
-                )
-            else:
-                logger.info("Computing all performance metrics...")
-        self.compute_all_performance_curves(
-            aperture_radius_lod=self.aperture_radius_lod,
-            oversample=_DEFAULT_OVERSAMPLE,
-            save_to_fits=not hit,
-            performance_file=perf_file,
-            load_from_file=perf_file if hit else None,
-            cache_dir=self._perf_dir,
-            plot=False,
-            psf_trunc_ratio=self.psf_trunc_ratio,
-            interp_order=self.interp_order,
-            _validated_cache=hit,
+    @property
+    def data_extent_lod(self):
+        """Array half-width; no outer working angle is inferred from data support."""
+        return self.performance.data_extent_lod
+
+    def _profile_record(self, separation, name, values):
+        """Put ancillary sampled quantities through the common curve evaluator."""
+        base = self.performance
+        fields = {
+            key: base.evaluate(key, separation)
+            for key in (
+                "throughput",
+                "core_area_lod2",
+                "leakage_fraction",
+                "leakage_density_lod2",
+                "raw_contrast",
+            )
+        }
+        return PerformanceCurves(
+            separation,
+            base.frame,
+            base.rule,
+            **fields,
+            iwa_lod=base.iwa_lod,
+            data_extent_lod=base.data_extent_lod,
+            leakage_rule=base.leakage_rule,
+            extra={name: values},
+        )
+
+    def _initialize_profiles(self):
+        sep, values = compute_occ_trans_curve(self)
+        self._occultation_record = self._profile_record(
+            sep, "occulter_transmission", values
+        )
+        sep, profiles = compute_core_mean_intensity_curve(self)
+        self.core_intensity_dict = profiles
+        self.core_intensity_separations = sep
+        self._core_intensity_cache = {}
+        self._core_intensity_interpolation = "keys"
+        self._core_intensity_diameter = float(self.stellar_intens.diams[0].value)
+        self._intensity_record = self._profile_record(
+            sep, "core_mean_intensity", profiles[self.stellar_intens.diams[0]]
         )
 
     def _datacube_offsets(self):
@@ -645,27 +643,10 @@ class Coronagraph:
         base_str = f"Coronagraph {self.name} ({self.yip_path})\n"
         base_str += f"{self.offax.type} off-axis PSFs, {self.offax.n_psfs} provided"
 
-        # Add information about performance metrics
-        interp_info = []
-        if hasattr(self, "throughput_interp"):
-            interp_info.append("throughput")
-        if hasattr(self, "raw_contrast_interp"):
-            interp_info.append("raw contrast")
-        if hasattr(self, "occ_trans_interp"):
-            interp_info.append("occulter transmission")
-        if hasattr(self, "core_area_interp"):
-            interp_info.append("core area")
-        if hasattr(self, "core_intensity_interp"):
-            interp_info.append("core mean intensity")
-
-        if interp_info:
-            base_str += f"\nInterpolators available: {', '.join(interp_info)}"
-
-        if hasattr(self, "IWA"):
-            base_str += f"\nInner Working Angle: {self.IWA:.2f}"
-
-        if hasattr(self, "OWA"):
-            base_str += f"\nOuter Working Angle: {self.OWA:.2f}"
+        if hasattr(self, "performance"):
+            base_str += f"\nAperture: {self.rule}; leakage: {self.leakage_rule}"
+            base_str += f"\nInner working angle: {self.iwa_lod:.2f} lod"
+            base_str += f"\nData half-width: {self.data_extent_lod:.2f} lod"
 
         if self.has_psf_datacube:
             base_str += "\nPSF datacube loaded"
@@ -770,100 +751,50 @@ class Coronagraph:
         return d
 
     def _perf_identity(
-        self,
-        aperture_radius_lod,
-        psf_trunc_ratio,
-        oversample,
-        stellar_diam,
-        separation_step_lod=None,
-    ) -> dict:
-        """Complete identity of a stored performance table.
+        self, rule, leakage_rule, stellar_diameter, separations_lod=None
+    ):
+        """Complete identity of a single-axis photometry record (schema 3)."""
+        from dataclasses import asdict
 
-        The table holds separation, throughput and unfloored raw contrast,
-        and in truncation mode the core throughput and core area on their own
-        separation grid, so the identity covers everything those depend on:
-        the source files and their generation, realized resolution and dtype,
-        the circular aperture radius (which sets contrast even in truncation
-        mode), the aperture mode and threshold, the effective oversampling,
-        the stellar diameter of the contrast calculation, and in truncation
-        mode the core's subpixel factor, grid step and window. Settings
-        applied after loading (contrast floor,
-        interpolation order) and quantities recomputed on every construction
-        (circular-mode core area, occulter transmission, core mean intensity)
-        are not part of it.
-        """
         identity = self._cache_identity_base(
             "performance",
             ("stellar_intens", "stellar_diams", "offax_psf", "offax_offsets"),
         )
         identity.update(
             {
+                "performance_record": 3,
+                "aperture_algorithm": "local_component_native_leakage_v1",
                 "yippy_version": __version__,
                 "table_storage": "float64",
-                "aperture": "circular" if psf_trunc_ratio is None else "truncation",
-                "aperture_radius_lod": aperture_radius_lod,
-                "psf_trunc_ratio": psf_trunc_ratio,
-                "oversample": oversample,
-                "circle_method": "band_limited_fractional_image_domain_peak",
-                "peak_search_radius_lod": PEAK_SEARCH_RADIUS_LOD,
-                "circle_oversample": oversample,
-                "stellar_diam_lod": getattr(stellar_diam, "value", stellar_diam),
+                "rule": {"name": type(rule).__name__, **asdict(rule)},
+                "leakage_rule": leakage_rule,
+                "stellar_diameter": stellar_diameter,
+                "oversample": CORE_OVERSAMPLE,
+                "separations_lod": None
+                if separations_lod is None
+                else np.asarray(separations_lod).tolist(),
+                "offaxis_grid": asdict(self.grid),
+                "stellar_grid": asdict(self.stellar_intens.grid),
             }
         )
-        if psf_trunc_ratio is not None:
-            identity.update(
-                {
-                    "core_method": "spectral_tangent_fraction_global_strips",
-                    "core_oversample": CORE_OVERSAMPLE,
-                    "core_step_lod": separation_step_lod,
-                    "core_window_lod": CORE_WINDOW_LOD,
-                }
-            )
         return identity
 
-    def _auto_perf_identity(self) -> dict:
-        """Identity of the automatically managed table for current settings."""
+    def _auto_perf_identity(self):
         return self._perf_identity(
-            aperture_radius_lod=self.aperture_radius_lod,
-            psf_trunc_ratio=self.psf_trunc_ratio,
-            oversample=_DEFAULT_OVERSAMPLE,
-            stellar_diam=self.stellar_intens.diams[0],
+            self.rule, self.leakage_rule, float(self.stellar_intens.diams[0].value)
         )
 
-    def _perf_filename(self) -> str:
-        """Performance cache filename for the current settings.
-
-        The readable prefix gives the aperture mode, realized pixel count,
-        dtype and source signature; the trailing digest identifies the
-        complete calculation (see ``_perf_identity``), so parameters that
-        differ in any bit never share a name. The file's header carries the
-        full digest, which is checked before reuse.
-        """
-        mode = "aper" if self.psf_trunc_ratio is None else "trunc"
+    def _perf_filename(self):
         digest = cache_identity_digest(self._auto_perf_identity())[:16]
         return (
-            f"perf_{mode}_{self.npixels}px_{dtype_tag()}_{self._source_sig}_"
-            f"{digest}.fits"
+            f"perf_{type(self.rule).__name__}_{self.npixels}px_{dtype_tag()}_"
+            f"{self._source_sig}_{digest}.fits"
         )
 
-    def set_psf_trunc_ratio(self, ratio: float) -> None:
-        """Switch PSF truncation ratio and rebuild the performance curves.
-
-        Uses the same settings, cache identity and stored-value definitions as
-        construction with ``psf_trunc_ratio=ratio``, so the resulting curves do
-        not depend on whether a table was produced here or by the constructor.
-        Results are cached to ``yippy_cache/performance/`` for reuse.
-
-        Args:
-            ratio: PSF truncation ratio (e.g. 0.3).
-        """
-        self.psf_trunc_ratio = ratio
+    def set_aperture_rule(self, rule):
+        """Select a static rule, retaining the previously requested records."""
+        self.rule = rule
         self._load_or_compute_performance()
-
-        logger.info(
-            f"Switched to trunc_ratio={ratio:.2f} "
-            f"(IWA={self.IWA:.2f}, OWA={self.OWA:.2f})"
-        )
 
     # ------------------------------------------------------------------
     # Performance curve computation (delegates to yippy.performance)
@@ -892,93 +823,95 @@ class Coronagraph:
 
     def compute_all_performance_curves(
         self,
-        aperture_radius_lod=0.7,
-        stellar_diam=None,
-        fit_gaussian_for_core_area=False,
-        use_phot_aperture_as_min=False,
-        oversample=CORE_OVERSAMPLE,
+        rule=None,
+        stellar_diameter=None,
+        *,
+        separations_lod=None,
+        leakage_rule=None,
         save_to_fits=True,
-        performance_file="coro_perf.fits",
+        performance_file=None,
         load_from_file=None,
         cache_dir=None,
         plot=False,
-        psf_trunc_ratio=None,
-        interp_order: int | None = None,
-        _validated_cache=False,
-        separation_step_lod=None,
-        interpolation="keys",
     ):
-        """Compute all coronagraph performance curves at once.
+        """Build/select one complete record; explicitly imported metadata must match.
 
-        Delegates to :func:`yippy.performance.compute_all_performance_curves`.
-        ``interp_order=None`` (default) uses PCHIP with linear end-segment
-        extrapolation. An integer keeps ``make_interp_spline(k=interp_order)``;
-        ``interp_order=1`` restores the previous linear default.
-        ``interpolation`` selects the spatial reader for core intensity tables.
+        Persistent records store all five quantities on one axis, plus aperture,
+        averaging rule, stellar diameter and frame. Corrupt automatic entries
+        are cache misses. Explicit imports fail clearly instead of silently
+        overriding their physical definitions.
         """
-        return _compute_all_perf(
-            self,
-            aperture_radius_lod=aperture_radius_lod,
-            stellar_diam=stellar_diam,
-            fit_gaussian_for_core_area=fit_gaussian_for_core_area,
-            use_phot_aperture_as_min=use_phot_aperture_as_min,
-            oversample=oversample,
-            save_to_fits=save_to_fits,
-            performance_file=performance_file,
-            load_from_file=load_from_file,
-            cache_dir=cache_dir,
-            plot=plot,
-            psf_trunc_ratio=psf_trunc_ratio,
-            interp_order=interp_order,
-            _validated_cache=_validated_cache,
-            separation_step_lod=separation_step_lod,
-            interpolation=interpolation,
+        rule = self.rule if rule is None else rule
+        leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
+        diameter = (
+            float(self.stellar_intens.diams[0].value)
+            if stellar_diameter is None
+            else float(getattr(stellar_diameter, "value", stellar_diameter))
         )
-
-    def _compute_performance_metrics(
-        self,
-        stellar_diam=0.0 * lod,
-        aperture_radius_lod=0.7,
-        fit_gaussian_for_core_area=False,
-        use_phot_aperture_as_min=False,
-        oversample=CORE_OVERSAMPLE,
-        compute_throughput=True,
-        compute_contrast=True,
-        compute_core_area=True,
-    ):
-        """Compute performance metrics.
-
-        .. deprecated:: Use individual functions in :mod:`yippy.performance`.
-        """
-        result = {}
-        if compute_throughput:
-            sep, vals = compute_throughput_curve(
+        identity = self._perf_identity(rule, leakage_rule, diameter, separations_lod)
+        expected = cache_identity_digest(identity)
+        directory = self._perf_dir if cache_dir is None else Path(cache_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = performance_file or (
+            f"perf_{type(rule).__name__}_{self.npixels}px_{dtype_tag()}_"
+            f"{self._source_sig}_{expected[:16]}.fits"
+        )
+        path = directory / (load_from_file or filename)
+        record = None
+        automatic = load_from_file is None
+        if not automatic or (
+            path.exists() and read_performance_cache_key(path) == expected
+        ):
+            try:
+                record = load_coro_performance_from_fits(path.name, path.parent)
+                if (
+                    record.rule != rule
+                    or record.leakage_rule != leakage_rule
+                    or record.frame != self.grid.frame
+                    or record.stellar_diameter != diameter
+                ):
+                    raise ValueError(
+                        "performance record rule, leakage_rule, frame "
+                        "or stellar diameter mismatch"
+                    )
+                if separations_lod is not None and not np.array_equal(
+                    record.separation_lod, separations_lod
+                ):
+                    raise ValueError("performance record separation axis mismatch")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                if not automatic:
+                    raise ValueError(
+                        f"Cannot import performance record: {exc}"
+                    ) from exc
+                logger.warning(f"Ignoring incompatible performance cache {path}: {exc}")
+                record = None
+        if record is None:
+            record = performance_curves(
                 self,
-                aperture_radius_lod=aperture_radius_lod,
-                oversample=oversample,
+                self.stellar_intens(diameter * lod),
+                rule,
+                separations_lod=separations_lod,
+                leakage_rule=leakage_rule,
+                stellar_diameter=diameter,
             )
-            result["separations"] = sep
-            result["throughput"] = vals
-        if compute_contrast:
-            sep_c, vals_c = compute_raw_contrast_curve(
-                self,
-                stellar_diam=stellar_diam,
-                aperture_radius_lod=aperture_radius_lod,
-                oversample=oversample,
-            )
-            result.setdefault("separations", sep_c)
-            result["raw_contrast"] = vals_c
-        if compute_core_area:
-            sep_a, vals_a = compute_core_area_curve(
-                self,
-                aperture_radius_lod=aperture_radius_lod,
-                fit_gaussian=fit_gaussian_for_core_area,
-                use_phot_aperture_as_min=use_phot_aperture_as_min,
-                oversample=oversample,
-            )
-            result.setdefault("separations", sep_a)
-            result["core_area"] = vals_a
-        return result
+            if save_to_fits:
+                save_coro_performance_to_fits(
+                    record, filename, directory, identity=identity
+                )
+        self.rule, self.leakage_rule = rule, leakage_rule
+        self.performance = record
+        self.curves_by_rule[rule] = record
+        if plot:
+            for name in ("throughput", "core_area_lod2", "raw_contrast"):
+                plot_performance_curve(
+                    record.separation_lod,
+                    getattr(record, name),
+                    title=name,
+                    xlabel="Separation [lod]",
+                    ylabel=name,
+                    log_scale=record.interpolation[name] == "log",
+                )
+        return record
 
     def occulter_transmission_curve(self, plot=True):
         """Compute occulter transmission curve.
@@ -1071,7 +1004,7 @@ class Coronagraph:
             float or numpy.ndarray: The throughput value(s).
         """
         sep_values = self._convert_separation_to_lod(separation)
-        result = self.throughput_interp(sep_values)
+        result = self.performance.evaluate("throughput", sep_values)
         if self._is_scalar_input(sep_values, separation):
             return float(result[0])
         return result
@@ -1086,8 +1019,7 @@ class Coronagraph:
             float or numpy.ndarray: The raw contrast value(s).
         """
         sep_values = self._convert_separation_to_lod(separation)
-        log_result = self._log_contrast_interp(sep_values)
-        result = np.power(10.0, log_result)
+        result = self.performance.evaluate("raw_contrast", sep_values)
         if self.contrast_floor is not None:
             result = np.maximum(result, self.contrast_floor)
         if self._is_scalar_input(sep_values, separation):
@@ -1153,7 +1085,7 @@ class Coronagraph:
             float or numpy.ndarray: The occulter transmission value(s).
         """
         sep_values = self._convert_separation_to_lod(separation)
-        result = self.occ_trans_interp(sep_values)
+        result = self._occultation_record.evaluate("occulter_transmission", sep_values)
         if self._is_scalar_input(sep_values, separation):
             return float(result[0])
         return result
@@ -1168,7 +1100,7 @@ class Coronagraph:
             float or numpy.ndarray: Core area in (lambda/D)^2.
         """
         sep_values = self._convert_separation_to_lod(separation)
-        result = self.core_area_interp(sep_values)
+        result = self.performance.evaluate("core_area_lod2", sep_values)
         if self._is_scalar_input(sep_values, separation):
             return float(result[0])
         return result
@@ -1225,7 +1157,7 @@ class Coronagraph:
                     diam_val, interpolation=interpolation
                 )(sep_values)
         elif diam_val == 0.0 or len(diams) < 2:
-            result = self.core_intensity_interp(sep_values)
+            result = self._intensity_record.evaluate("core_mean_intensity", sep_values)
         elif not diams.min() <= diam_val <= diams.max():
             result = np.full(np.shape(sep_values), np.nan)
         else:
@@ -1245,11 +1177,11 @@ class Coronagraph:
             profile = core_mean_intensity_profile(
                 self, diam_val * lod, interpolation=interpolation
             )
-            interp = _build_curve_interp(
-                self.core_intensity_separations, profile, self.interp_order
+            interp = self._profile_record(
+                self.core_intensity_separations, "core_mean_intensity", profile
             )
             self._core_intensity_cache[key] = interp
-        return interp
+        return lambda separation: interp.evaluate("core_mean_intensity", separation)
 
     # ------------------------------------------------------------------
     # 2D map projections
@@ -1320,166 +1252,74 @@ class Coronagraph:
         """
         return self.core_mean_intensity_map(stellar_diam, interpolation) / ppf
 
-    def throughput_map(self, psf_trunc_ratios=None):
-        """Throughput projected from the 1D curve onto the pixel grid.
+    def throughput_map(self, rules=None):
+        """Project selected throughput, or stack requested rules on the last axis."""
+        radius = self.separation_map()
+        if rules is None:
+            return self.performance.evaluate("throughput", radius)
+        original = self.performance
+        records = [self.compute_all_performance_curves(rule) for rule in rules]
+        self.performance, self.rule, self.leakage_rule = (
+            original,
+            original.rule,
+            original.leakage_rule,
+        )
+        return np.stack([r.evaluate("throughput", radius) for r in records], axis=-1)
 
-        Args:
-            psf_trunc_ratios (array-like or None):
-                If provided, returns a stacked (npix, npix, nratios) array
-                with one slice per truncation ratio. Each ratio triggers a
-                fresh performance computation. If None, uses the current
-                throughput interpolator.
-
-        Returns:
-            numpy.ndarray: (npix, npix) or (npix, npix, nratios) throughput.
-        """
-        r = self.separation_map()
-        r_flat = r.ravel()
-        if psf_trunc_ratios is None:
-            return np.asarray(self.throughput_interp(r_flat)).reshape(r.shape)
-        original_ratio = self.psf_trunc_ratio
-        maps = []
-        for ratio in psf_trunc_ratios:
-            self.set_psf_trunc_ratio(ratio)
-            maps.append(np.asarray(self.throughput_interp(r_flat)).reshape(r.shape))
-        if original_ratio is not None:
-            self.set_psf_trunc_ratio(original_ratio)
-        return np.stack(maps, axis=-1)
-
-    def core_area_map(self, psf_trunc_ratios=None):
-        """Core area (omega) projected from the 1D curve onto the pixel grid.
-
-        Args:
-            psf_trunc_ratios (array-like or None):
-                If provided, returns a stacked (npix, npix, nratios) array.
-                If None, uses the current core_area interpolator.
-
-        Returns:
-            numpy.ndarray: (npix, npix) or (npix, npix, nratios) core area
-                in (lam/D)^2.
-        """
-        r = self.separation_map()
-        r_flat = r.ravel()
-        if psf_trunc_ratios is None:
-            return np.asarray(self.core_area_interp(r_flat)).reshape(r.shape)
-        original_ratio = self.psf_trunc_ratio
-        maps = []
-        for ratio in psf_trunc_ratios:
-            self.set_psf_trunc_ratio(ratio)
-            maps.append(np.asarray(self.core_area_interp(r_flat)).reshape(r.shape))
-        if original_ratio is not None:
-            self.set_psf_trunc_ratio(original_ratio)
-        return np.stack(maps, axis=-1)
-
-    # ------------------------------------------------------------------
-    # Standalone curve methods (for plotting individual curves)
-    # ------------------------------------------------------------------
+    def core_area_map(self, rules=None):
+        """Project selected area, or stack requested rules on the last axis."""
+        radius = self.separation_map()
+        if rules is None:
+            return self.performance.evaluate("core_area_lod2", radius)
+        original = self.performance
+        records = [self.compute_all_performance_curves(rule) for rule in rules]
+        self.performance, self.rule, self.leakage_rule = (
+            original,
+            original.rule,
+            original.leakage_rule,
+        )
+        return np.stack(
+            [r.evaluate("core_area_lod2", radius) for r in records], axis=-1
+        )
 
     def throughput_curve(
-        self, aperture_radius_lod=0.7, oversample=CORE_OVERSAMPLE, plot=True
+        self,
+        rule=Circular(0.7),  # noqa: B008 - frozen rule
+        oversample=CORE_OVERSAMPLE,
+        plot=True,
     ):
-        """Compute and optionally plot the throughput curve.
-
-        Delegates to :func:`yippy.performance.compute_throughput_curve`.
-        """
-        sep, vals = compute_throughput_curve(
-            self,
-            aperture_radius_lod=aperture_radius_lod,
-            oversample=oversample,
-        )
-        if plot:
-            self._plot_performance_curve(
-                sep,
-                vals,
-                title=f"{self.name} Throughput",
-                xlabel="Separation [lam/D]",
-                ylabel="Throughput",
-                ms=6,
-            )
-        return sep, vals
+        """Tabulate the requested rule's throughput."""
+        return compute_throughput_curve(self, rule, oversample)
 
     def raw_contrast_curve(
         self,
         stellar_diam=0 * lod,
-        aperture_radius_lod=0.7,
+        rule=Circular(0.7),  # noqa: B008 - frozen rule
         oversample=CORE_OVERSAMPLE,
         plot=True,
     ):
-        """Compute and optionally plot the raw contrast curve.
-
-        Delegates to :func:`yippy.performance.compute_raw_contrast_curve`.
-        """
-        sep, vals = compute_raw_contrast_curve(
-            self,
-            stellar_diam=stellar_diam,
-            aperture_radius_lod=aperture_radius_lod,
-            oversample=oversample,
-        )
-        if plot:
-            self._plot_performance_curve(
-                sep,
-                vals,
-                title=f"{self.name} Raw Contrast",
-                xlabel="Separation [lam/D]",
-                ylabel="Raw Contrast",
-                log_scale=True,
-            )
-        return sep, vals
+        """Tabulate the requested rule's raw contrast."""
+        return compute_raw_contrast_curve(self, stellar_diam, rule, oversample)
 
     def core_area_curve(
         self,
-        aperture_radius_lod=0.7,
+        rule=Circular(0.7),  # noqa: B008 - frozen rule
         fit_gaussian=False,
-        use_phot_aperture_as_min=False,
         oversample=CORE_OVERSAMPLE,
         plot=True,
     ):
-        """Compute and optionally plot the core area curve.
-
-        Delegates to :func:`yippy.performance.compute_core_area_curve`.
-        """
-        sep, vals = compute_core_area_curve(
-            self,
-            aperture_radius_lod=aperture_radius_lod,
-            fit_gaussian=fit_gaussian,
-            use_phot_aperture_as_min=use_phot_aperture_as_min,
-            oversample=oversample,
-        )
-        if plot:
-            suffix = " (Gaussian fit)" if fit_gaussian else " (fixed aperture)"
-            self._plot_performance_curve(
-                sep,
-                vals,
-                title=f"{self.name} Core Area{suffix}",
-                xlabel="Separation [lam/D]",
-                ylabel="Core Area [(lam/D)**2]",
-            )
-        return sep, vals
+        """Tabulate the requested rule's area."""
+        return compute_core_area_curve(self, rule, fit_gaussian, oversample)
 
     # ------------------------------------------------------------------
     # Export (delegates to yippy.export)
     # ------------------------------------------------------------------
 
-    def to_exosims(
-        self,
-        aperture_radius_lod=0.7,
-        fit_gaussian_for_core_area=False,
-        use_phot_aperture_as_min=False,
-        units="LAMBDA/D",
-    ):
-        """Save performance curves in EXOSIMS format.
-
-        Delegates to :func:`yippy.export.export_exosims`.
-        """
+    def to_exosims(self, units="LAMBDA/D", *, separations_lod=None):
+        """Write the selected record through the common evaluator."""
         from .export import export_exosims
 
-        return export_exosims(
-            self,
-            aperture_radius_lod=aperture_radius_lod,
-            fit_gaussian_for_core_area=fit_gaussian_for_core_area,
-            use_phot_aperture_as_min=use_phot_aperture_as_min,
-            units=units,
-        )
+        return export_exosims(self, units=units, separations_lod=separations_lod)
 
     def dump_ayo_csv(
         self,
@@ -1487,8 +1327,10 @@ class Coronagraph:
         sep_min=0.125,
         sep_max=32.0,
         sep_step=0.25,
-        contrast_floor=1e-10,
+        contrast_floor=None,
         ppf=30.0,
+        *,
+        separations_lod=None,
     ):
         """Export performance curves in AYO-compatible CSV format.
 
@@ -1502,4 +1344,5 @@ class Coronagraph:
             sep_step=sep_step,
             contrast_floor=contrast_floor,
             ppf=ppf,
+            separations_lod=separations_lod,
         )

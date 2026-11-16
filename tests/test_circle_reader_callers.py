@@ -13,7 +13,14 @@ from yippy import Coronagraph, EqxCoronagraph
 from yippy.performance import azimuthal_mean_profile
 
 
-@pytest.fixture(scope="module", params=[(None, False), (1, False), (1, True)])
+@pytest.fixture(
+    scope="module",
+    params=[
+        ("aperture_mean", False),
+        ("azimuthal_ring_mean", False),
+        ("aperture_mean", True),
+    ],
+)
 def reader_coro(request, tmp_path_factory):
     """A small real package with nonconstant stellar maps and both radial readers."""
     package = write_synthetic_yip(
@@ -22,7 +29,7 @@ def reader_coro(request, tmp_path_factory):
         pixscale=0.25,
         max_offset_lod=3.5,
     )
-    order, single_diameter = request.param
+    leakage_rule, single_diameter = request.param
     with fits.open(package.path / "stellar_intens.fits", mode="update") as hdul:
         y, x = np.indices((32, 32)) - 15.5
         z = np.pi * np.hypot(y, x) * 0.25
@@ -34,7 +41,7 @@ def reader_coro(request, tmp_path_factory):
         )
         hdul[0].data[:] = image * levels
     with jax.enable_x64():
-        coro = Coronagraph(package.path, interp_order=order)
+        coro = Coronagraph(package.path, leakage_rule=leakage_rule)
     if single_diameter:
         # Exercise the one-profile fast path with valid spline support. The
         # existing FITS loader requires >=2 diameter knots even for a constant
@@ -110,18 +117,19 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
     with jax.enable_x64():
         diameter = coro.stellar_intens.diams[-1]
         before = coro.core_mean_intensity(separation, diameter).copy()
+        # Opt-in spatial profiles and aperture records have separate meanings.
+        coro.core_mean_intensity_curve(plot=False, interpolation="quintic")
         coro.compute_all_performance_curves(
-            oversample=1,
             save_to_fits=False,
-            interp_order=coro.interp_order,
-            interpolation="quintic",
-            stellar_diam=diameter,
+            stellar_diameter=diameter,
         )
         view = EqxCoronagraph(yippy_coro=coro)
-        actual = np.asarray(eqx.filter_jit(view.core_mean_intensity)(separation))
+        actual = np.asarray(
+            eqx.filter_jit(view.core_mean_intensity)(separation, diameter.to_value(lod))
+        )
         np.testing.assert_allclose(actual, before, rtol=1e-12)
         np.testing.assert_allclose(
-            coro.core_mean_intensity(separation), before, rtol=1e-12
+            coro.core_mean_intensity(separation, diameter), before, rtol=1e-12
         )
         np.testing.assert_allclose(
             coro.core_mean_intensity(separation, interpolation="quintic"),

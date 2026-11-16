@@ -49,6 +49,13 @@ class HeaderData:
         shape, or the header image shape. D is the circumscribed diameter.
         """
         shape = (self.naxis2, self.naxis1) if shape is None else tuple(shape)
+        for key, value in (
+            ("PIXSCALE", self.pixscale),
+            ("LAMBDA", self.lambda0),
+            ("D", self.diameter),
+        ):
+            if value is None:
+                raise ValueError(f"{key} is required to build a pixel grid")
         step = self.pixscale.to_value(lod / u.pix)
         return PixelGrid.from_corner_count(
             shape,
@@ -219,7 +226,9 @@ class HeaderData:
             design=header.get("DESIGN", ""),
             diameter=HeaderData.get_header_value(header, "D", u.meter),
             diameter_inscribed=HeaderData.get_header_value(header, "D_INSC", u.meter),
-            pixscale=header.get("PIXSCALE") * lod / u.pix,
+            pixscale=(
+                None if "PIXSCALE" not in header else header["PIXSCALE"] * lod / u.pix
+            ),
             lambda0=HeaderData.get_header_value(header, "LAMBDA", u.micron),
             minlam=HeaderData.get_header_value(header, "MINLAM", u.micron),
             maxlam=HeaderData.get_header_value(header, "MAXLAM", u.micron),

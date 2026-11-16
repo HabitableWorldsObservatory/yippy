@@ -1,42 +1,33 @@
-"""Coronagraph performance metric computation.
+"""Shared aperture quadrature and frozen, single-axis performance records.
 
-This module provides standalone functions for computing coronagraph performance
-curves: throughput, raw contrast, core area, occulter transmission, and core
-mean intensity. Each metric has its own compute function for clarity, plus a
-``compute_all_performance_curves`` orchestrator.
-
-All functions operate on a Coronagraph instance passed as the first argument,
-keeping the Coronagraph class itself slim while preserving backward-compatible
-delegation methods on it.
+Photometry uses one rule and one separation axis. All public curve interpolation
+passes through PerformanceCurves.evaluate; the low-level band-limited circle
+and level-set kernels remain available for convergence checks.
 """
 
 from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, ClassVar
 
 import astropy.units as u
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import GAUSSIAN_FWHM_FACTOR
+from hwoutils.grids import Frame
 from hwoutils.map_coordinates import map_coordinates
 from hwoutils.radial import radial_profile
 from hwoutils.transforms import resample_flux
 from lod_unit import lod
-from scipy.interpolate import PchipInterpolator, make_interp_spline
+from scipy.interpolate import PchipInterpolator
 from scipy.optimize import root_scalar
 
+from .apertures import ApertureRule, Circular, HalfMaximum
 from .logger import logger
-from .util import (
-    convert_to_pix,
-    load_core_truncation_from_fits,
-    load_coro_performance_from_fits,
-    save_coro_performance_to_fits,
-)
+from .util import convert_to_pix
 
 if TYPE_CHECKING:
     from .coronagraph import Coronagraph
@@ -168,41 +159,6 @@ def _threshold_mask(psf_os: np.ndarray, trunc_ratio: float) -> np.ndarray:
     return mask
 
 
-def _compute_iwa_owa(
-    coro: Coronagraph, sep: np.ndarray, throughput: np.ndarray
-) -> None:
-    """Compute IWA and OWA from throughput curve, storing on *coro*."""
-    valid_mask = throughput > 0
-    half_max_throughput = max(throughput[valid_mask]) / 2
-
-    def iwa_func(x):
-        return coro.throughput_interp(x) - half_max_throughput
-
-    iwa_bracket = None
-    for i in range(1, len(sep)):
-        if iwa_func(sep[i - 1]) * iwa_func(sep[i]) < 0:
-            iwa_bracket = [sep[i - 1], sep[i]]
-            break
-
-    if iwa_bracket is not None:
-        coro.IWA = root_scalar(iwa_func, bracket=iwa_bracket).root * lod
-    else:
-        first_valid_idx = np.argmax(valid_mask)
-        coro.IWA = sep[first_valid_idx] * lod
-        logger.warning(f"Could not find IWA bracket, using first valid sep: {coro.IWA}")
-
-    if hasattr(coro.offax, "max_offset_in_image"):
-        coro.OWA = coro.offax.max_offset_in_image
-        logger.info(
-            f"OWA set to max_offset_in_image: {coro.OWA.to(lod).value:.2f} lam/D"
-        )
-    else:
-        coro.OWA = np.max(sep) * lod
-        logger.warning(
-            "max_offset_in_image not available, using maximum separation as OWA"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Public utility
 # ---------------------------------------------------------------------------
@@ -268,235 +224,46 @@ def plot_performance_curve(
 # ---------------------------------------------------------------------------
 
 
-def compute_throughput_curve(
-    coro: Coronagraph,
-    aperture_radius_lod: float = 0.7,
-    oversample: int = CORE_OVERSAMPLE,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute coronagraph throughput vs separation.
-
-    Throughput is the fraction of the total flux (planet PSF normalized to 1)
-    that lands inside a photometric aperture at each off-axis position.
-    The circle is centered on the interpolated peak within
-    :data:`PEAK_SEARCH_RADIUS_LOD` of the nominal source. Boundary subpixels
-    carry exact circle-square overlap fractions (:func:`circular_aperture`).
-
-    Args:
-        coro: Coronagraph instance.
-        aperture_radius_lod: Aperture radius in lam/D.
-        oversample: Oversampling factor.
-
-    Returns:
-        ``(separations, throughputs)`` - sorted 1-D arrays.
-    """
-    separations, throughputs = [], []
-    radius_pix = aperture_radius_lod / coro.pixel_scale_arcsec.value
-
-    for pos in _iter_xaxis_positions(coro):
-        if not _point_source_in_image(pos):
-            separations.append(pos.separation)
-            throughputs.append(0.0)
-            continue
-        flux, _, _ = _measure_circular_aperture(
-            pos.psf,
-            radius_pix,
-            coro.pixel_scale_arcsec.value,
-            oversample=oversample,
-            half_width_pix=int(
-                np.ceil(
-                    radius_pix + PEAK_SEARCH_RADIUS_LOD / coro.pixel_scale_arcsec.value
-                )
-            )
-            + 1,
-            nominal_center=(pos.py, pos.px),
-        )
-        separations.append(pos.separation)
-        throughputs.append(float(flux))
-
-    return _collect_and_sort(separations, throughputs)
+def compute_throughput_curve(coro, rule=Circular(0.7), oversample=CORE_OVERSAMPLE):  # noqa: B008 - frozen rule
+    """Throughput from the common record builder."""
+    record = _performance_curves(
+        coro,
+        coro.stellar_intens(coro.stellar_intens.diams[0]),
+        rule,
+        oversample=oversample,
+    )
+    return record.separation_lod, record.throughput
 
 
 def compute_raw_contrast_curve(
-    coro: Coronagraph,
+    coro,
     stellar_diam=0.0 * lod,
-    aperture_radius_lod: float = 0.7,
-    oversample: int = CORE_OVERSAMPLE,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute raw contrast curve vs separation.
-
-    Contrast is the ratio of stellar flux to planet flux within the same
-    circle centered on the interpolated planet peak near its nominal
-    position. Both images use identical coordinates and fractional weights
-    (:func:`circular_aperture`).
-
-    Args:
-        coro: Coronagraph instance.
-        stellar_diam: Stellar angular diameter for the on-axis PSF.
-        aperture_radius_lod: Aperture radius in lam/D.
-        oversample: Oversampling factor.
-
-    Returns:
-        ``(separations, contrasts)`` - sorted 1-D arrays.
-    """
-    star_psf = coro.stellar_intens._evaluate_array(stellar_diam)
-    star_frame = None
-    if getattr(coro, "_sinc_delivery", None) is not None:
-        star_cy, star_cx = (
-            coro.stellar_intens.grid.center_y,
-            coro.stellar_intens.grid.center_x,
-        )
-        stellar_frame = coro.stellar_intens.grid.frame
-        planet_frame = coro.grid.frame
-        stellar_angle = stellar_frame.lod_to_arcsec(
-            stellar_frame.reference_wavelength_nm
-        )
-        planet_angle = planet_frame.lod_to_arcsec(planet_frame.reference_wavelength_nm)
-        pitch_ratio = (
-            coro.pixel_scale_arcsec.value
-            * planet_angle
-            / (coro.stellar_pixel_scale_arcsec.value * stellar_angle)
-        )
-        star_frame = (
-            star_cy,
-            star_cx,
-            coro.offax.grid.center_y,
-            coro.offax.grid.center_x,
-            pitch_ratio,
-        )
-    separations, contrasts = [], []
-    radius_pix = aperture_radius_lod / coro.pixel_scale_arcsec.value
-
-    for pos in _iter_xaxis_positions(coro):
-        if not _point_source_in_image(pos):
-            # Raw contrast is undefined outside the image. Use a large finite
-            # sentinel so downstream spline construction stays well-defined;
-            # the point lies beyond OWA (max_offset_in_image) so it will not
-            # be queried in physically meaningful regimes.
-            separations.append(pos.separation)
-            contrasts.append(1e20)
-            continue
-        planet_flux, _, star_flux = _measure_circular_aperture(
-            pos.psf,
-            radius_pix,
-            coro.pixel_scale_arcsec.value,
-            oversample=oversample,
-            half_width_pix=int(
-                np.ceil(
-                    radius_pix + PEAK_SEARCH_RADIUS_LOD / coro.pixel_scale_arcsec.value
-                )
-            )
-            + 1,
-            nominal_center=(pos.py, pos.px),
-            star_psf=star_psf,
-            star_frame=star_frame,
-        )
-        # A zero off-axis PSF (e.g. a source on the optical axis behind an
-        # ideal mask) has undefined contrast; use the same finite sentinel as
-        # out-of-image points so the interpolators stay well-defined.
-        contrast_val = star_flux / planet_flux if planet_flux > 0 else 1e20
-        separations.append(pos.separation)
-        contrasts.append(float(contrast_val))
-
-    return _collect_and_sort(separations, contrasts)
+    rule=Circular(0.7),  # noqa: B008 - frozen rule
+    oversample=CORE_OVERSAMPLE,
+):
+    """Stellar aperture fraction divided by planet aperture throughput."""
+    record = _performance_curves(
+        coro, coro.stellar_intens(stellar_diam), rule, oversample=oversample
+    )
+    return record.separation_lod, record.raw_contrast
 
 
 def compute_core_area_curve(
-    coro: Coronagraph,
-    aperture_radius_lod: float = 0.7,
-    fit_gaussian: bool = False,
-    use_phot_aperture_as_min: bool = False,
-    oversample: int = CORE_OVERSAMPLE,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute core area vs separation.
-
-    If *fit_gaussian* is True a 2-D Gaussian is fitted to each PSF; otherwise
-    exact circle-square overlaps give ``pi * aperture_radius_lod**2`` when
-    the aperture fits inside the image (:func:`circular_aperture`). Apertures
-    crossing an image edge include only their in-image area.
-
-    Args:
-        coro: Coronagraph instance.
-        aperture_radius_lod: Aperture radius in lam/D.
-        fit_gaussian: Whether to fit a 2-D Gaussian.
-        use_phot_aperture_as_min: Use aperture area as a floor when fitting.
-        oversample: Oversampling factor.
-
-    Returns:
-        ``(separations, core_areas)`` - sorted 1-D arrays, area in (lam/D)**2.
-    """
+    coro,
+    rule=Circular(0.7),  # noqa: B008 - frozen rule
+    fit_gaussian=False,
+    oversample=CORE_OVERSAMPLE,
+):
+    """Area from the common record builder; Gaussian fitting is unsupported."""
     if fit_gaussian:
-        from scipy.optimize import curve_fit
-
-        def gaussian_2d(coords, amplitude, x0, y0, sigma_x, sigma_y):
-            x, y = coords
-            return (
-                amplitude
-                * np.exp(-(((x - x0) / sigma_x) ** 2 + ((y - y0) / sigma_y) ** 2) / 2)
-            ).ravel()
-
-    separations, core_areas = [], []
-
-    for pos in _iter_xaxis_positions(coro):
-        if fit_gaussian and not _point_source_in_image(pos):
-            separations.append(pos.separation)
-            core_areas.append(np.pi * aperture_radius_lod**2)
-            continue
-        if fit_gaussian:
-            radius_pix = aperture_radius_lod / coro.pixel_scale_arcsec.value * 3
-            margin = int(np.ceil(radius_pix * 3))
-            ny, nx = pos.psf.shape
-            px, py = int(pos.px), int(pos.py)
-            xmin, xmax = max(0, px - margin), min(nx - 1, px + margin)
-            ymin, ymax = max(0, py - margin), min(ny - 1, py + margin)
-            subarr = np.asarray(pos.psf[ymin : ymax + 1, xmin : xmax + 1])
-            sub_os = np.asarray(
-                resample_flux(
-                    jnp.asarray(np.asarray(subarr, dtype=np.float64)),
-                    1.0,
-                    1.0 / oversample,
-                    tuple(n * oversample for n in subarr.shape),
-                )
-            )
-            px_os, py_os = (pos.px - xmin) * oversample, (pos.py - ymin) * oversample
-            y_grid, x_grid = np.indices(sub_os.shape)
-            amplitude = sub_os.max()
-            sigma_init = 1.0 * oversample
-            popt, _ = curve_fit(
-                gaussian_2d,
-                (x_grid, y_grid),
-                sub_os.ravel(),
-                p0=[amplitude, px_os, py_os, sigma_init, sigma_init],
-            )
-            _, _, _, sigma_x, sigma_y = popt
-            sigma_x_lod = sigma_x / oversample * coro.pixel_scale_arcsec.value
-            sigma_y_lod = sigma_y / oversample * coro.pixel_scale_arcsec.value
-            fwhm_x = GAUSSIAN_FWHM_FACTOR * sigma_x_lod
-            fwhm_y = GAUSSIAN_FWHM_FACTOR * sigma_y_lod
-            area = np.pi * fwhm_x * fwhm_y / 4
-            if use_phot_aperture_as_min:
-                area = max(area, np.pi * aperture_radius_lod**2)
-        else:
-            radius_pix = aperture_radius_lod / coro.pixel_scale_arcsec.value
-            _, area, _ = _measure_circular_aperture(
-                pos.psf,
-                radius_pix,
-                coro.pixel_scale_arcsec.value,
-                oversample=oversample,
-                half_width_pix=int(
-                    np.ceil(
-                        radius_pix
-                        + PEAK_SEARCH_RADIUS_LOD / coro.pixel_scale_arcsec.value
-                    )
-                )
-                + 1,
-                nominal_center=(pos.py, pos.px),
-            )
-            area = float(area)
-
-        separations.append(pos.separation)
-        core_areas.append(area)
-
-    return _collect_and_sort(separations, core_areas)
+        raise ValueError("select an ApertureRule; Gaussian-fit areas are not supported")
+    record = _performance_curves(
+        coro,
+        coro.stellar_intens(coro.stellar_intens.diams[0]),
+        rule,
+        oversample=oversample,
+    )
+    return record.separation_lod, record.core_area_lod2
 
 
 PEAK_SEARCH_RADIUS_LOD = 1.0
@@ -784,7 +551,9 @@ def _measure_circular_aperture(
         return tuple(float(value) for value in values)
 
 
-@functools.partial(jax.jit, static_argnames=("oversample", "half_width_pix"))
+@functools.partial(
+    jax.jit, static_argnames=("oversample", "half_width_pix", "return_samples")
+)
 def circular_aperture(
     psf,
     radius_pix,
@@ -795,6 +564,7 @@ def circular_aperture(
     nominal_center=None,
     fixed_center=None,
     star_frame=None,
+    return_samples=False,
 ):
     """Flux and exact area of a circle on the PSF's trigonometric interpolant.
 
@@ -839,6 +609,11 @@ def circular_aperture(
         fine, start_y, start_x = _subpixel_window_at(
             psf, refined, oversample, half_width_pix
         )
+    # The refined peak can lie across the search disk from the native peak.
+    # Recenter the integration window so its edge cannot clip an interior disk.
+    fine, start_y, start_x = _subpixel_window_at(
+        psf, refined, oversample, half_width_pix
+    )
     rows = (
         start_y
         + (jnp.arange(fine.shape[0])[:, None] + 0.5) / oversample
@@ -852,6 +627,8 @@ def circular_aperture(
         - refined[1]
     ) * oversample
     circle = _circle_square_weights(rows, cols, radius_pix * oversample)
+    if return_samples:
+        return fine, circle, start_y, start_x
     flux = jnp.sum(circle * fine) / oversample**2
     area = jnp.sum(circle) * (pixel_scale_lod / oversample) ** 2
     star_flux = 0.0
@@ -988,9 +765,34 @@ def _global_truncation(psf, threshold, pixel_scale_lod, oversample):
 
 
 @functools.partial(jax.jit, static_argnames=("oversample", "half_width_pix"))
+def _truncation_samples(
+    psf, fraction, pixel_scale_lod, oversample, half_width_pix, nominal_center
+):
+    search_radius = PEAK_SEARCH_RADIUS_LOD / pixel_scale_lod
+    fine, start_y, start_x, grad_y, grad_x = core_subpixel_window(
+        psf,
+        oversample,
+        half_width_pix,
+        nominal_center,
+        search_radius,
+        return_gradient=True,
+    )
+    center = _window_peak(
+        fine, start_y, start_x, oversample, nominal_center, search_radius, psf.shape
+    )
+    _, peak = _refine_peak(psf, center, oversample, nominal_center, search_radius)
+    threshold = fraction * peak
+    core = _level_set_weights(fine, grad_y, grad_x, threshold, oversample)
+    core = jnp.where(
+        jnp.any(fine > threshold), core, (fine == jnp.max(fine)).astype(fine.dtype)
+    )
+    return fine, core, start_y, start_x, threshold
+
+
+@functools.partial(jax.jit, static_argnames=("oversample", "half_width_pix"))
 def truncation_core(
     psf,
-    psf_trunc_ratio,
+    fraction,
     pixel_scale_lod,
     oversample: int = CORE_OVERSAMPLE,
     half_width_pix: int = 12,
@@ -1004,7 +806,7 @@ def truncation_core(
     the DFT basis). Area and throughput use the same weights. This local
     linear boundary approximation is second order in subpixel width.
 
-    The threshold is ``psf_trunc_ratio`` times the refined interpolated peak.
+    The threshold is ``fraction`` times the refined interpolated peak.
     If no subpixel exceeds it, the original ``fine == fine.max()`` safeguard
     selects all tied peak samples across the measurement domain: the local
     window for an in-image source, otherwise the whole image.
@@ -1026,7 +828,7 @@ def truncation_core(
 
     Args:
         psf: 2-D PSF image.
-        psf_trunc_ratio: Fraction of the peak that bounds the core.
+        fraction: Fraction of the peak that bounds the core.
         pixel_scale_lod: Pixel scale in lambda/D per pixel.
         oversample: Subpixels per pixel side.
         half_width_pix: Half-width in pixels of the subpixel window, clipped
@@ -1037,23 +839,13 @@ def truncation_core(
         ``(throughput, area)``: the core throughput in the PSF's flux units
         and the core area in (lambda/D)^2.
     """
-    search_radius = PEAK_SEARCH_RADIUS_LOD / pixel_scale_lod
-    fine, start_y, start_x, grad_y, grad_x = core_subpixel_window(
+    fine, core, _start_y, _start_x, threshold = _truncation_samples(
         psf,
+        fraction,
+        pixel_scale_lod,
         oversample,
         half_width_pix,
         nominal_center,
-        search_radius,
-        return_gradient=True,
-    )
-    center = _window_peak(
-        fine, start_y, start_x, oversample, nominal_center, search_radius, psf.shape
-    )
-    _, peak = _refine_peak(psf, center, oversample, nominal_center, search_radius)
-    threshold = psf_trunc_ratio * peak
-    core = _level_set_weights(fine, grad_y, grad_x, threshold, oversample)
-    core = jnp.where(
-        jnp.any(fine > threshold), core, (fine == jnp.max(fine)).astype(fine.dtype)
     )
     local = (
         jnp.sum(core * fine) / oversample**2,
@@ -1124,140 +916,49 @@ def _xaxis_y_offset(coro: Coronagraph) -> float:
 
 
 def compute_truncation_curves(
-    coro: Coronagraph,
-    psf_trunc_ratio: float = 0.5,
-    oversample: int | None = CORE_OVERSAMPLE,
-    separation_step_lod: float | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Core throughput and core area with a PSF-truncation-ratio aperture.
-
-    The core is the region where the PSF exceeds ``psf_trunc_ratio * peak``;
-    the throughput is the fraction of the source's light inside it (AYO's
-    ``photap_frac``) and the area its solid angle in (lam/D)**2 (AYO's
-    ``omega_lod``), both measured on ``oversample`` subpixels per pixel side
-    (:func:`truncation_core`). By default only the package's own non-negative
-    off-axis offsets are measured. The curves interpolate those measurements
-    between offsets. Passing ``separation_step_lod=CORE_STEP_LOD`` opts into
-    measuring synthesized PSFs on a quarter-lambda/D grid as well
-    (:func:`core_separations`); their optical accuracy between shipped offsets
-    cannot be established from the package alone.
-
-    Args:
-        coro: Coronagraph instance.
-        psf_trunc_ratio: Fraction of PSF peak used as threshold.
-        oversample: Subpixels per pixel side at which the band-limited
-            interpolant is evaluated (:func:`truncation_core`); ``None``
-            selects :data:`CORE_OVERSAMPLE`. This sets the resolution of the
-            core boundary, as for circular apertures.
-        separation_step_lod: Spacing of the separation grid in lambda/D.
-            Defaults to ``None`` for the package's own off-axis offsets.
-            Pass :data:`CORE_STEP_LOD` to opt into synthesized PSFs.
-
-    Returns:
-        ``(separations, throughputs, core_areas)`` - 1-D arrays sorted by
-        separation, area in (lam/D)^2.
-    """
-    pix_lod = float(coro.pixel_scale_arcsec.value)
-    half_width = core_window_half_width_pix(pix_lod)
-    oversample = CORE_OVERSAMPLE if oversample is None else int(oversample)
-
-    def cores_of(psfs, centers):
-        throughputs, areas = jax.lax.map(
-            lambda pair: truncation_core(
-                pair[0],
-                psf_trunc_ratio,
-                pix_lod,
-                oversample=oversample,
-                half_width_pix=half_width,
-                nominal_center=pair[1],
-            ),
-            (jnp.asarray(psfs, dtype=jnp.float64), jnp.asarray(centers)),
-        )
-        return np.column_stack([np.asarray(throughputs), np.asarray(areas)])
-
-    separations, cores = [], []
-    positions = list(_iter_xaxis_positions(coro))
+    coro,
+    rule=HalfMaximum(),  # noqa: B008 - frozen rule
+    oversample=None,
+    separation_step_lod=None,
+):
+    """Throughput and area of a HalfMaximum rule through the common builder."""
+    if not isinstance(rule, HalfMaximum):
+        raise TypeError("compute_truncation_curves requires HalfMaximum")
+    separations = None
     if separation_step_lod is not None:
-        grid = core_separations(coro, separation_step_lod)
-        y0 = _xaxis_y_offset(coro)
-        for start in range(0, len(grid), _PSF_BATCH):
-            chunk = grid[start : start + _PSF_BATCH]
-            # A full batch every call, so the synthesis compiles once.
-            padded = jnp.asarray(np.pad(chunk, (0, _PSF_BATCH - len(chunk)), "edge"))
-            psfs = coro.offax.create_psfs(padded, jnp.full_like(padded, y0)).data
-            separations.extend(chunk.tolist())
-            centers = np.column_stack(
-                [
-                    np.full(
-                        len(padded),
-                        convert_to_pix(
-                            y0 * lod,
-                            coro.offax.grid.center_y * u.pix,
-                            coro.pixel_scale_arcsec,
-                        ).value,
-                    ),
-                    convert_to_pix(
-                        np.asarray(padded) * lod,
-                        coro.offax.grid.center_x * u.pix,
-                        coro.pixel_scale_arcsec,
-                    ).value,
-                ]
-            )
-            with jax.enable_x64():
-                cores.append(cores_of(psfs, centers)[: len(chunk)])
-        positions = [pos for pos in positions if pos.separation > grid[-1]]
-
-    if positions:
-        separations.extend(pos.separation for pos in positions)
-        with jax.enable_x64():
-            cores.append(
-                cores_of(
-                    np.stack([pos.psf for pos in positions]),
-                    np.array([(pos.py, pos.px) for pos in positions]),
-                )
-            )
-
-    cores = np.concatenate(cores)
-    order = np.argsort(separations)
-    return np.asarray(separations)[order], cores[order, 0], cores[order, 1]
+        dense = core_separations(coro, separation_step_lod)
+        native = np.asarray(coro.offax.x_offsets, dtype=float)
+        separations = np.unique(np.r_[dense, native[native > dense[-1]]])
+    record = _performance_curves(
+        coro,
+        coro.stellar_intens(coro.stellar_intens.diams[0]),
+        rule,
+        separations_lod=separations,
+        oversample=CORE_OVERSAMPLE if oversample is None else oversample,
+    )
+    return record.separation_lod, record.throughput, record.core_area_lod2
 
 
 def compute_truncation_throughput_curve(
-    coro: Coronagraph,
-    psf_trunc_ratio: float = 0.5,
-    oversample: int | None = CORE_OVERSAMPLE,
-    separation_step_lod: float | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Core throughput with a PSF-truncation-ratio aperture.
-
-    The throughput half of :func:`compute_truncation_curves`, which documents
-    the arguments.
-
-    Returns:
-        ``(separations, throughputs)`` - sorted 1-D arrays.
-    """
-    sep, throughput, _ = compute_truncation_curves(
-        coro, psf_trunc_ratio, oversample, separation_step_lod
-    )
-    return sep, throughput
+    coro,
+    rule=HalfMaximum(),  # noqa: B008 - frozen rule
+    oversample=None,
+    separation_step_lod=None,
+):
+    """Throughput of the requested half-maximum rule."""
+    sep, tau, _ = compute_truncation_curves(coro, rule, oversample, separation_step_lod)
+    return sep, tau
 
 
 def compute_truncation_core_area_curve(
-    coro: Coronagraph,
-    psf_trunc_ratio: float = 0.5,
-    oversample: int | None = CORE_OVERSAMPLE,
-    separation_step_lod: float | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Core area with a PSF-truncation-ratio aperture.
-
-    The area half of :func:`compute_truncation_curves`, which documents the
-    arguments.
-
-    Returns:
-        ``(separations, core_areas)`` - sorted 1-D arrays, area in (lam/D)^2.
-    """
+    coro,
+    rule=HalfMaximum(),  # noqa: B008 - frozen rule
+    oversample=None,
+    separation_step_lod=None,
+):
+    """Geometric area of the requested half-maximum rule."""
     sep, _, area = compute_truncation_curves(
-        coro, psf_trunc_ratio, oversample, separation_step_lod
+        coro, rule, oversample, separation_step_lod
     )
     return sep, area
 
@@ -1578,311 +1279,505 @@ def compute_core_mean_intensity_curve(
     return separations, intensities
 
 
-# ---------------------------------------------------------------------------
-# Interpolator builder (shared by compute_all_performance_curves and
-# Coronagraph.set_psf_trunc_ratio)
-# ---------------------------------------------------------------------------
-
-
-class _PchipWithLinearTails:
-    """Shape-preserving interior with the legacy end-segment extrapolation."""
-
-    def __init__(self, x, y):
-        """Keep the original nodes and values for the Equinox conversion."""
-        self.pchip = PchipInterpolator(x, y, extrapolate=False)
-        self.linear = make_interp_spline(x, y, k=1)
-
-    def __call__(self, x):
-        """Evaluate PCHIP inside the table and the linear segments outside."""
-        x = np.asarray(x)
-        outside = (x < self.pchip.x[0]) | (x > self.pchip.x[-1])
-        return np.where(outside, self.linear(x), self.pchip(x))
-
-
-def _build_curve_interp(x, y, interp_order):
-    """Use PCHIP by default, retaining explicit B-spline orders unchanged."""
-    if interp_order is None:
-        return _PchipWithLinearTails(x, y)
-    return make_interp_spline(x, y, k=interp_order)
-
-
-def _build_perf_interps(
-    coro, sep_t, throughput, sep, raw_contrast, sep_ca, core_area, interp_order
-):
-    """Assign throughput, contrast, and core area spline interpolators to *coro*."""
-    coro.interp_order = interp_order
-    coro.throughput_interp = _build_curve_interp(sep_t, throughput, interp_order)
-
-    log_contrast = np.log10(np.abs(raw_contrast) + 1e-20)
-    coro._log_contrast_interp = _build_curve_interp(sep, log_contrast, interp_order)
-    coro.raw_contrast_interp = _build_curve_interp(sep, raw_contrast, interp_order)
-
-    coro.core_area_interp = _build_curve_interp(sep_ca, core_area, interp_order)
+def compute_all_performance_curves(coro, rule=None, **kwargs):
+    """Build/select one record through Coronagraph's cache-aware boundary."""
+    return coro.compute_all_performance_curves(rule=rule, **kwargs)
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Aperture records and common photometric integration
 # ---------------------------------------------------------------------------
 
 
-def compute_all_performance_curves(
-    coro: Coronagraph,
-    aperture_radius_lod: float = 0.7,
-    stellar_diam=None,
-    fit_gaussian_for_core_area: bool = False,
-    use_phot_aperture_as_min: bool = False,
-    oversample: int | None = CORE_OVERSAMPLE,
-    save_to_fits: bool = True,
-    performance_file: str = "coro_perf.fits",
-    load_from_file: str | None = None,
-    cache_dir: Path | None = None,
-    plot: bool = False,
-    psf_trunc_ratio: float | None = None,
-    interp_order: int | None = None,
-    _validated_cache: bool = False,
-    separation_step_lod: float | None = None,
-    interpolation: str = "keys",
-) -> dict:
-    """Compute (or load) all coronagraph performance curves.
+def _validate_photometry_image(image):
+    from hwoutils.grids import Image
 
-    Stores interpolators on *coro*. ``interp_order=None`` (the default) uses
-    shape-preserving PCHIP between nodes and linear end-segment extrapolation.
-    An integer uses ``make_interp_spline(k=interp_order)`` unchanged, so
-    ``interp_order=1`` restores the previous linear behavior.
-    This is the main entrypoint called during ``Coronagraph.__init__``.  It
-    delegates to the individual ``compute_*`` helpers above, builds spline
-    interpolators, and computes IWA / OWA.
+    if not isinstance(image, Image) or image.data.ndim != 2:
+        raise ValueError("photometry requires a two-dimensional Image")
+    if image.grid.unit != "lod" or image.measure != "per_pixel":
+        raise ValueError("photometry requires per_pixel flux fractions on a lod grid")
+    # The retained spectral kernels require positive, axis-aligned square pixels.
+    _ = image.grid.step
 
-    ``load_from_file`` is an explicit import: the named table supplies the
-    separation, throughput and raw contrast as-is, whatever settings produced
-    it, and nothing is written. With a truncation ratio the core throughput
-    and core area come from the file's core table as-is (and are computed
-    when it has none); an explicit import in that mode logs a warning,
-    because the file's truncation ratio is not checked. Automatic cache
-    reuse in ``Coronagraph`` validates a table's identity metadata before
-    passing it here (``_validated_cache=True``). A table written with
-    ``save_to_fits`` records the identity of the settings that actually
-    produced it (when *coro* provides ``_perf_identity``), so a table saved
-    under non-default settings is never accepted as an automatic entry for
-    different ones. The stored contrast is always unfloored; the floor is
-    applied after loading.
 
-    Circular fluxes and counted areas use the band-limited interpolant at
-    ``oversample`` subpixels per pixel side (default :data:`CORE_OVERSAMPLE`).
-    Truncation cores use :data:`CORE_OVERSAMPLE` and are stored in the table's
-    core table at the package's own off-axis offsets.
-    ``separation_step_lod=CORE_STEP_LOD`` opts into a grid of synthesized PSFs
-    (:func:`compute_truncation_curves`); the default is ``None``.
-    ``interpolation="quintic"`` opts into the quintic spatial reader for the
-    core intensity tables. Those tables are computed from the maps on every
-    construction, not loaded from or saved to the performance FITS cache.
-    Throughput, raw contrast and their persistent cache identities are unchanged.
+@jax.jit
+def _connected_core(weights, seed_index):
+    """Eight-connected positive-weight component containing the source-local peak."""
+    support = weights > 0
+    seed = jnp.zeros_like(support).at[seed_index[0], seed_index[1]].set(True)
 
-    Returns a dict of all curve data for convenience. ``throughput`` and
-    ``raw_contrast`` are on ``separations``; in truncation mode that
-    throughput is the core curve read at those separations. The curve the
-    throughput interpolator is built from is ``core_throughput`` on
-    ``separations_core_throughput``, which are ``separations`` without a
-    truncation ratio.
-    """
-    if interpolation not in ("keys", "quintic"):
-        raise ValueError("interpolation must be 'keys' or 'quintic'")
-    if stellar_diam is None:
-        stellar_diam = coro.stellar_intens.diams[0]
-    oversample = _resolve_oversample(coro, oversample)
-    truncation = psf_trunc_ratio is not None
-
-    # Resolve the directory for save/load operations
-    io_dir = cache_dir if cache_dir is not None else coro.yip_path
-
-    # ------------------------------------------------------------------
-    # Throughput + contrast (+ truncation core): load from file or compute
-    # ------------------------------------------------------------------
-    loaded = False
-    core = None
-    if load_from_file is not None:
-        logger.info(f"Loading throughput and contrast from {load_from_file}")
-        try:
-            sep, throughput, raw_contrast = load_coro_performance_from_fits(
-                load_from_file, io_dir
-            )
-            if truncation:
-                core = load_core_truncation_from_fits(load_from_file, io_dir)
-            loaded = True
-            logger.info(f"Successfully loaded performance data from {load_from_file}")
-        except Exception as e:
-            logger.warning(f"Error loading from {load_from_file}: {e}")
-            logger.info("Computing throughput and contrast from scratch")
-        if loaded and truncation and not _validated_cache:
-            logger.warning(
-                f"Explicit import of {load_from_file} with psf_trunc_ratio="
-                f"{psf_trunc_ratio}: the core throughput and area are "
-                + (
-                    "taken from the file as-is; its truncation ratio is not checked"
-                    if core is not None
-                    else "not in the file and are computed"
+    def grow(state):
+        old, _ = state
+        padded = jnp.pad(old, 1)
+        neighbors = jnp.zeros_like(old)
+        for row in range(3):
+            for col in range(3):
+                neighbors = (
+                    neighbors
+                    | padded[row : row + old.shape[0], col : col + old.shape[1]]
                 )
-            )
+        new = support & neighbors
+        return new, jnp.any(new != old)
 
-    if truncation and core is None:
-        logger.info(
-            f"Computing core throughput and area (trunc ratio = {psf_trunc_ratio})..."
-        )
-        core = compute_truncation_curves(
-            coro,
-            psf_trunc_ratio=psf_trunc_ratio,
-            separation_step_lod=separation_step_lod,
-        )
+    component, _ = jax.lax.while_loop(lambda state: state[1], grow, (seed, True))
+    return jnp.where(component, weights, 0)
 
-    if not loaded:
-        logger.info("Computing raw contrast curve...")
-        sep, raw_contrast = compute_raw_contrast_curve(
-            coro,
-            stellar_diam=stellar_diam,
-            aperture_radius_lod=aperture_radius_lod,
+
+def _rule_samples(rule, psf, source_position, oversample=CORE_OVERSAMPLE):
+    """Shared quadrature: per-native-pixel samples, weights, window origin, factor."""
+    from .apertures import Circular, HalfMaximum, Matched
+
+    _validate_photometry_image(psf)
+    if not isinstance(oversample, int) or oversample < 1:
+        raise ValueError("oversample must be a positive integer")
+    grid = psf.grid
+    pixel = grid.unit_to_pixel(*source_position)
+    nominal = (pixel.y, pixel.x)
+    data = jnp.asarray(psf.data, dtype=jnp.float64)
+    if isinstance(rule, Circular):
+        half_width = (
+            int(np.ceil((rule.radius_lod + PEAK_SEARCH_RADIUS_LOD) / grid.step)) + 1
+        )
+        fine, weights, sy, sx = circular_aperture(
+            data,
+            rule.radius_lod / grid.step,
+            grid.step,
             oversample=oversample,
+            half_width_pix=half_width,
+            nominal_center=nominal,
+            fixed_center=None
+            if bool(_nominal_in_image(nominal, grid.shape))
+            else nominal,
+            return_samples=True,
         )
-        if truncation:
-            throughput = np.interp(sep, core[0], core[1])
-        else:
-            logger.info("Computing throughput curve...")
-            sep_t, throughput = compute_throughput_curve(
-                coro, aperture_radius_lod=aperture_radius_lod, oversample=oversample
-            )
-            # Both iterate the same positions
-            assert np.allclose(sep, sep_t), "Throughput and contrast separations differ"
-
-        if save_to_fits:
-            identity = None
-            if hasattr(coro, "_perf_identity"):
-                identity = coro._perf_identity(
-                    aperture_radius_lod=aperture_radius_lod,
-                    psf_trunc_ratio=psf_trunc_ratio,
-                    oversample=oversample,
-                    stellar_diam=stellar_diam,
-                    separation_step_lod=separation_step_lod,
-                )
-            save_coro_performance_to_fits(
-                sep,
-                throughput,
-                raw_contrast,
-                performance_file,
-                io_dir,
-                identity=identity,
-                core=core,
-            )
-
-    # Apply contrast floor
-    if coro.contrast_floor is not None:
-        raw_contrast = np.maximum(np.abs(raw_contrast), coro.contrast_floor)
-        logger.info(f"Applied contrast floor of {coro.contrast_floor:.1e}")
-
-    # ------------------------------------------------------------------
-    # Core area (and, with a truncation ratio, core throughput)
-    # ------------------------------------------------------------------
-    if truncation:
-        sep_t, throughput_t, core_area = core
-        sep_ca = sep_t
+    elif isinstance(rule, HalfMaximum):
+        half_width = core_window_half_width_pix(grid.step)
+        if not bool(_nominal_in_image(nominal, grid.shape)):
+            half_width = max(grid.shape)
+        fine, weights, sy, sx, _ = _truncation_samples(
+            data,
+            rule.fraction,
+            grid.step,
+            oversample,
+            half_width,
+            nominal,
+        )
+        center = _window_peak(
+            fine,
+            sy,
+            sx,
+            oversample,
+            nominal,
+            PEAK_SEARCH_RADIUS_LOD / grid.step,
+            grid.shape,
+        )
+        seed = jnp.rint((center - jnp.array([sy, sx]) + 0.5) * oversample - 0.5)
+        weights = _connected_core(weights, seed.astype(jnp.int32))
+        weights = jnp.where(jnp.max(data) > 0, weights, 0)
+    elif isinstance(rule, Matched):
+        return data, rule.weights(psf, source_position), 0, 0, 1
     else:
-        sep_t, throughput_t = sep, throughput
-        logger.info("Computing core area curve...")
-        sep_ca, core_area = compute_core_area_curve(
-            coro,
-            aperture_radius_lod=aperture_radius_lod,
-            fit_gaussian=fit_gaussian_for_core_area,
-            use_phot_aperture_as_min=use_phot_aperture_as_min,
-            oversample=oversample,
-        )
+        raise TypeError("rule must be Circular, HalfMaximum or Matched")
+    return fine, weights, sy, sx, oversample
 
-    _build_perf_interps(
-        coro,
-        sep_t,
-        throughput_t,
-        sep,
+
+def _rule_weights(rule, psf, source_position, oversample):
+    """Aggregate the common subpixel coverage to native fractional pixel weights."""
+    with jax.enable_x64():
+        _, weights, sy, sx, factor = _rule_samples(
+            rule, psf, source_position, oversample
+        )
+        ny, nx = weights.shape[0] // factor, weights.shape[1] // factor
+        native = weights.reshape(ny, factor, nx, factor).mean(axis=(1, 3))
+        return jax.lax.dynamic_update_slice(jnp.zeros(psf.grid.shape), native, (sy, sx))
+
+
+def _stellar_samples(stellar, planet_grid, sy, sx, shape, factor):
+    """Band-limited stellar per-pixel fractions in the planet's pixel units."""
+    sg = stellar.grid
+    sf, pf = sg.frame, planet_grid.frame
+    ratio = (
+        planet_grid.step
+        * pf.lod_to_arcsec(pf.reference_wavelength_nm)
+        / (sg.step * sf.lod_to_arcsec(sf.reference_wavelength_nm))
+    )
+    rows = (
+        sg.center_y
+        + (sy + (jnp.arange(shape[0]) + 0.5) / factor - 0.5 - planet_grid.center_y)
+        * ratio
+    )
+    cols = (
+        sg.center_x
+        + (sx + (jnp.arange(shape[1]) + 0.5) / factor - 0.5 - planet_grid.center_x)
+        * ratio
+    )
+    spectrum = jnp.fft.fft2(jnp.asarray(stellar.data, dtype=jnp.float64))
+    by = (
+        jnp.exp(2j * jnp.pi * rows[:, None] * jnp.fft.fftfreq(sg.shape[0]))
+        / sg.shape[0]
+    )
+    bx = (
+        jnp.exp(2j * jnp.pi * cols[:, None] * jnp.fft.fftfreq(sg.shape[1]))
+        / sg.shape[1]
+    )
+    inside = (
+        (rows[:, None] >= -0.5)
+        & (rows[:, None] < sg.shape[0] - 0.5)
+        & (cols[None, :] >= -0.5)
+        & (cols[None, :] < sg.shape[1] - 0.5)
+    )
+    return jnp.where(inside, jnp.real(by @ spectrum @ bx.T) * ratio**2, 0)
+
+
+class PerformanceCurves(eqx.Module):
+    """Frozen photometry on one separation axis; all fractions are absolute.
+
+    ``separation_lod``: nonnegative increasing sample offsets, shape (S,).
+    ``frame``: wavelength and circumscribed/inscribed diameter defining lambda/D.
+    ``rule``: the static, hashable aperture or matched weighting rule.
+    ``throughput``: weighted fraction of unocculted planet flux, tau.
+    ``core_area_lod2``: geometric area or Matched noise-equivalent area, A.
+    ``leakage_fraction``: stellar per-pixel fractions integrated with the weights.
+    ``leakage_density_lod2``: selected mean, ell/A for aperture_mean; the radial
+    azimuthal mean per unit area for azimuthal_ring_mean. These differ in general.
+    ``raw_contrast``: leakage_density_lod2 * A / tau, with 1e20 when tau <= 0.
+    ``iwa_lod``: first half-maximum-throughput crossing of PCHIP; if no crossing
+    exists, the first positive-throughput separation (NaN for an all-zero curve).
+    ``data_extent_lod``: minimum array half-width, not an outer working angle.
+    ``leakage_rule``: aperture_mean or azimuthal_ring_mean, identifying the density.
+    ``stellar_diameter``: optional provenance, a diameter in the stellar lod frame.
+    ``interpolation``: immutable quantity-to-space mapping. PCHIP within the
+    sampled interval and linear end-segment tails in that same space. Exact
+    zeros use a 1e-300 floor for log interpolation and remain zero at their knots.
+
+    Host NumPy inputs retain float64. JAX inputs use the same stored polynomial
+    coefficients and evaluator, and support jit/vmap/grad. An Equinox consumer
+    can convert the array leaves to its active JAX dtype once at construction.
+    """
+
+    separation_lod: np.ndarray
+    frame: Frame = eqx.field(static=True)
+    rule: ApertureRule = eqx.field(static=True)
+    throughput: np.ndarray
+    core_area_lod2: np.ndarray
+    leakage_fraction: np.ndarray
+    leakage_density_lod2: np.ndarray
+    raw_contrast: np.ndarray
+    iwa_lod: float
+    data_extent_lod: float = eqx.field(static=True)
+    leakage_rule: str = eqx.field(static=True)
+    stellar_diameter: float | None = eqx.field(static=True)
+    _coefficients: dict
+    _tails: dict
+    _extra: dict
+
+    interpolation: ClassVar = MappingProxyType(
+        {
+            "throughput": "linear",
+            "core_area_lod2": "linear",
+            "leakage_fraction": "log",
+            "leakage_density_lod2": "log",
+            "raw_contrast": "log",
+            "occulter_transmission": "linear",
+            "core_mean_intensity": "linear",
+        }
+    )
+
+    def __init__(
+        self,
+        separation_lod,
+        frame,
+        rule,
+        throughput,
+        core_area_lod2,
+        leakage_fraction,
+        leakage_density_lod2,
         raw_contrast,
-        sep_ca,
-        core_area,
-        interp_order,
+        iwa_lod,
+        data_extent_lod,
+        leakage_rule="aperture_mean",
+        stellar_diameter=None,
+        *,
+        extra=None,
+        _coefficients=None,
+        _tails=None,
+        _extra=None,
+    ):
+        """Validate measured arrays and prepare one set of PCHIP coefficients."""
+        from .apertures import Circular, HalfMaximum, Matched
+
+        if not isinstance(rule, (Circular, HalfMaximum, Matched)):
+            raise TypeError("rule must be Circular, HalfMaximum or Matched")
+        if leakage_rule not in ("aperture_mean", "azimuthal_ring_mean"):
+            raise ValueError("unknown leakage_rule")
+        x = np.array(separation_lod, dtype=float, copy=True)
+        if (
+            x.ndim != 1
+            or len(x) < 1
+            or not np.all(np.isfinite(x))
+            or np.any(np.diff(x) <= 0)
+            or x[0] < 0
+        ):
+            raise ValueError(
+                "separation_lod must contain increasing nonnegative finite values"
+            )
+        x.flags.writeable = False
+        self.separation_lod = x
+        self.frame, self.rule = frame, rule
+        self.iwa_lod, self.data_extent_lod = float(iwa_lod), float(data_extent_lod)
+        self.leakage_rule, self.stellar_diameter = leakage_rule, stellar_diameter
+        values = dict(
+            throughput=throughput,
+            core_area_lod2=core_area_lod2,
+            leakage_fraction=leakage_fraction,
+            leakage_density_lod2=leakage_density_lod2,
+            raw_contrast=raw_contrast,
+        )
+        self._extra = {}
+        self._coefficients, self._tails = {}, {}
+        for name, value in (
+            values | (extra if extra is not None else (_extra or {}))
+        ).items():
+            a = np.array(value, dtype=float, copy=True)
+            if a.shape != x.shape or not np.all(np.isfinite(a)):
+                raise ValueError(f"{name} must be finite and have shape {x.shape}")
+            a.flags.writeable = False
+            if name in values:
+                setattr(self, name, a)
+            else:
+                self._extra[name] = a
+            y = (
+                np.log10(np.maximum(a, 1e-300))
+                if self.interpolation[name] == "log"
+                else a
+            )
+            if len(x) == 1:
+                self._coefficients[name] = np.array([[0.0], [0.0], [0.0], [y[0]]])
+                self._tails[name] = np.array([y[0], y[0], 0.0, 0.0])
+                continue
+            self._coefficients[name] = PchipInterpolator(x, y).c
+            self._tails[name] = np.array(
+                [
+                    y[0],
+                    y[-1],
+                    (y[1] - y[0]) / (x[1] - x[0]),
+                    (y[-1] - y[-2]) / (x[-1] - x[-2]),
+                ]
+            )
+
+    def evaluate(self, name, separation_lod):
+        """Evaluate one named quantity using its declared interpolation space."""
+        if name not in self._coefficients:
+            raise ValueError(f"quantity {name!r} is not present in this record")
+        xp = jnp if isinstance(separation_lod, (jax.Array, jax.core.Tracer)) else np
+        q = xp.asarray(separation_lod)
+        x = xp.asarray(self.separation_lod)
+        if len(x) == 1:
+            value = self._extra[name] if name in self._extra else getattr(self, name)
+            return xp.full_like(q, xp.asarray(value)[0], dtype=x.dtype)
+        c = xp.asarray(self._coefficients[name])
+        t = xp.asarray(self._tails[name])
+        i = xp.clip(xp.searchsorted(x, q, side="right") - 1, 0, len(x) - 2)
+        dx = q - x[i]
+        value = ((c[0, i] * dx + c[1, i]) * dx + c[2, i]) * dx + c[3, i]
+        value = xp.where(
+            q < x[0],
+            t[0] + (q - x[0]) * t[2],
+            xp.where(q > x[-1], t[1] + (q - x[-1]) * t[3], value),
+        )
+        if self.interpolation[name] == "log":
+            value = xp.power(10.0, value)
+            values = xp.asarray(getattr(self, name))
+            k = xp.clip(xp.searchsorted(x, q), 0, len(x) - 1)
+            exact = xp.where(q == x[k], values[k], value)
+            # Restore measured knot values without erasing the PCHIP derivative.
+            if xp is jnp:
+                correction = xp.where(q == x[k], values[k] - value, 0)
+                value = value + jax.lax.stop_gradient(correction)
+            else:
+                value = exact
+        return value
+
+
+def _iwa(separation, throughput):
+    positive = throughput > 0
+    if not np.any(positive):
+        return np.nan
+    if len(separation) == 1:
+        return float(separation[0])
+    half = np.max(throughput) / 2
+    f = PchipInterpolator(separation, throughput)
+    for left, right, yl, yr in zip(
+        separation[:-1], separation[1:], throughput[:-1], throughput[1:], strict=True
+    ):
+        if yl == half:
+            return float(left)
+        if (yl - half) * (yr - half) < 0:
+            return root_scalar(lambda s: f(s) - half, bracket=(left, right)).root
+    return float(separation[np.argmax(positive)])
+
+
+def performance_curves(
+    offaxis,
+    stellar,
+    rule,
+    *,
+    separations_lod=None,
+    leakage_rule="aperture_mean",
+    stellar_diameter=None,
+) -> PerformanceCurves:
+    """Tabulate one aperture rule on one axis.
+
+    Minimal protocol: ``offaxis(separation_lod: float) -> Image`` on the +x
+    axis. Supply ``separations_lod`` or an object attribute of that name.
+    Objects with ``create_psf(x_lod, y_lod) -> Image`` are also accepted;
+    Coronagraph implements this interface. Its default axis uses its shipped
+    nonnegative x-offset PSFs at the nearest available y to zero. Circular
+    rules omit native offsets outside the image; explicit axes retain clipped
+    apertures (possibly empty). Explicit
+    separations synthesize PSFs at (s, 0). The returned images must share one
+    positive axis-aligned square lod grid, carrying per-pixel source fractions.
+    Stellar is a per-pixel stellar-flux Image, potentially on a distinct grid
+    and frame; its samples are mapped through the frames' angular scales.
+    Leakage is the native per-pixel stellar map times the rule's fractional
+    native weights; distinct grids use band-limited stellar samples at the
+    planet pixel centers, zero outside the stellar footprint. Planet throughput
+    retains subpixel band-limited integration for encircled-energy accuracy.
+
+    ``stellar_diameter`` records the provenance of the already evaluated map;
+    it does not broaden or reevaluate that map. All integration uses the
+    existing band-limited aperture machinery at CORE_OVERSAMPLE subpixels.
+    """
+    return _performance_curves(
+        offaxis,
+        stellar,
+        rule,
+        separations_lod=separations_lod,
+        leakage_rule=leakage_rule,
+        stellar_diameter=stellar_diameter,
     )
 
-    # ------------------------------------------------------------------
-    # Occulter transmission
-    # ------------------------------------------------------------------
-    logger.info("Computing occulter transmission curve...")
-    sep_occ_trans, occ_trans = compute_occ_trans_curve(coro)
-    coro.occ_trans_interp = _build_curve_interp(sep_occ_trans, occ_trans, interp_order)
 
-    # ------------------------------------------------------------------
-    # Core mean intensity
-    # ------------------------------------------------------------------
-    logger.info("Computing core mean intensity curve...")
-    sep_core_intensity, core_intensities = compute_core_mean_intensity_curve(
-        coro, stellar_diam_values=None, interpolation=interpolation
+def _performance_curves(
+    offaxis,
+    stellar,
+    rule,
+    *,
+    separations_lod=None,
+    leakage_rule="aperture_mean",
+    stellar_diameter=None,
+    oversample=CORE_OVERSAMPLE,
+):
+    from hwoutils.grids import Image
+
+    from .apertures import Matched
+
+    _validate_photometry_image(stellar)
+    if leakage_rule not in ("aperture_mean", "azimuthal_ring_mean"):
+        raise ValueError("unknown leakage_rule")
+    if separations_lod is None and hasattr(offaxis, "offax"):
+        positions = list(_iter_xaxis_positions(offaxis))
+        if isinstance(rule, Circular):
+            # A source outside the detector has no local geometric aperture.
+            # Do not treat a global leakage peak as its photometric center.
+            positions = [p for p in positions if _point_source_in_image(p)]
+        separations = np.array([p.separation for p in positions])
+        images = [
+            Image(p.psf, offaxis.grid, (), "per_pixel", "stellar_flux_fraction")
+            for p in positions
+        ]
+        locations = [
+            (p.px - offaxis.grid.center_x, p.py - offaxis.grid.center_y)
+            for p in positions
+        ]
+        locations = [
+            (x * offaxis.grid.step, y * offaxis.grid.step) for x, y in locations
+        ]
+    else:
+        if separations_lod is None:
+            separations_lod = getattr(offaxis, "separation_lod", None)
+        if separations_lod is None:
+            raise ValueError("separations_lod is required for a callable source")
+        separations = np.asarray(separations_lod, dtype=float)
+        if (
+            separations.ndim != 1
+            or len(separations) < 1
+            or np.any(np.diff(separations) <= 0)
+            or np.any(separations < 0)
+            or not np.all(np.isfinite(separations))
+        ):
+            raise ValueError(
+                "separations_lod must contain increasing nonnegative finite values"
+            )
+        get = (
+            (lambda s: offaxis.create_psf(float(s), 0.0))
+            if hasattr(offaxis, "create_psf")
+            else offaxis
+        )
+        images = [get(float(s)) for s in separations]
+        locations = [(float(s), 0.0) for s in separations]
+    if not images:
+        raise ValueError("no off-axis source positions lie inside the image")
+    grid = images[0].grid
+    tau, area, leakage = [], [], []
+    with jax.enable_x64():
+        for psf, position in zip(images, locations, strict=True):
+            if psf.grid != grid:
+                raise ValueError("off-axis Images must share one grid")
+            fine, weights, sy, sx, factor = _rule_samples(
+                rule, psf, position, oversample
+            )
+            ny, nx = weights.shape[0] // factor, weights.shape[1] // factor
+            native_weights = weights.reshape(ny, factor, nx, factor).mean(axis=(1, 3))
+            if stellar.grid == grid:
+                star = jax.lax.dynamic_slice(
+                    jnp.asarray(stellar.data, dtype=jnp.float64), (sy, sx), (ny, nx)
+                )
+            else:
+                star = _stellar_samples(stellar, grid, sy, sx, (ny, nx), 1)
+            tau.append(float(jnp.sum(fine * weights) / factor**2))
+            leakage.append(float(jnp.sum(star * native_weights)))
+            if isinstance(rule, Matched):
+                w2 = float(jnp.sum(weights**2))
+                area.append(
+                    float(jnp.sum(weights)) ** 2 / w2 * grid.pixel_area
+                    if w2 > 0
+                    else 0.0
+                )
+            else:
+                area.append(float(jnp.sum(weights)) * grid.pixel_area / factor**2)
+        tau, area, leakage = map(np.asarray, (tau, area, leakage))
+        density = np.divide(leakage, area, out=np.zeros_like(leakage), where=area > 0)
+        if leakage_rule == "azimuthal_ring_mean":
+            sf, pf = stellar.grid.frame, grid.frame
+            angular_ratio = pf.lod_to_arcsec(
+                pf.reference_wavelength_nm
+            ) / sf.lod_to_arcsec(sf.reference_wavelength_nm)
+            density = (
+                np.asarray(
+                    azimuthal_mean_profile(
+                        jnp.asarray(stellar.data, dtype=jnp.float64),
+                        (stellar.grid.center_y, stellar.grid.center_x),
+                        jnp.asarray(separations * angular_ratio / stellar.grid.step),
+                    )
+                )
+                / stellar.grid.pixel_area
+                * angular_ratio**2
+            )
+    contrast = np.divide(
+        density * area, tau, out=np.full_like(tau, 1e20), where=tau > 0
     )
-    coro.core_intensity_dict = core_intensities
-    coro.core_intensity_separations = sep_core_intensity
-    # Profiles at other diameters are computed from the interpolated map on
-    # first use, so they always agree with it (Coronagraph.core_mean_intensity).
-    coro._core_intensity_cache = {}
-    coro._core_intensity_interpolation = interpolation
-    coro._core_intensity_diameter = float(stellar_diam.value)
-
-    # 1D spline for the default stellar diameter (backward compatibility
-    # and fast path for the common single-diameter case)
-    coro.core_intensity_interp = _build_curve_interp(
-        sep_core_intensity,
-        core_intensities[stellar_diam],
-        interp_order,
+    return PerformanceCurves(
+        separations,
+        grid.frame,
+        rule,
+        tau,
+        area,
+        leakage,
+        density,
+        contrast,
+        _iwa(separations, tau),
+        min(grid.shape) * grid.step / 2,
+        leakage_rule,
+        stellar_diameter,
     )
-
-    # ------------------------------------------------------------------
-    # IWA / OWA
-    # ------------------------------------------------------------------
-    _compute_iwa_owa(coro, sep_t, throughput_t)
-
-    # ------------------------------------------------------------------
-    # Optional plots
-    # ------------------------------------------------------------------
-    if plot:
-        plot_performance_curve(
-            sep_t,
-            throughput_t,
-            title=f"{coro.name} Throughput",
-            xlabel="Separation [lam/D]",
-            ylabel="Throughput",
-            ms=6,
-        )
-        plot_performance_curve(
-            sep,
-            raw_contrast,
-            title=f"{coro.name} Raw Contrast",
-            xlabel="Separation [lam/D]",
-            ylabel="Raw Contrast",
-            log_scale=True,
-        )
-        suffix = (
-            " (Gaussian fit)" if fit_gaussian_for_core_area else " (fixed aperture)"
-        )
-        plot_performance_curve(
-            sep_ca,
-            core_area,
-            title=f"{coro.name} Core Area{suffix}",
-            xlabel="Separation [lam/D]",
-            ylabel="Core Area [(lam/D)**2]",
-        )
-
-    return {
-        "separations": sep,
-        "throughput": throughput,
-        "separations_core_throughput": sep_t,
-        "core_throughput": throughput_t,
-        "raw_contrast": raw_contrast,
-        "separations_occ_trans": sep_occ_trans,
-        "occ_trans": occ_trans,
-        "separations_core_area": sep_ca,
-        "core_area": core_area,
-        "separations_core_intensity": sep_core_intensity,
-        "core_intensities": core_intensities,
-        "IWA": coro.IWA,
-        "OWA": coro.OWA,
-    }
