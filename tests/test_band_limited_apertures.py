@@ -24,6 +24,7 @@ from scipy.special import j0, j1, jvp
 
 from yippy import Circular
 from yippy.performance import (
+    _circle_square_weights,
     _iter_xaxis_positions,
     circular_aperture,
     compute_core_area_curve,
@@ -138,6 +139,27 @@ def test_circle_fractional_boundary_has_analytic_area():
     # Boundary fractions must tile the analytic disk, including axial cells.
     area = compute_core_area_curve(coro)[1][0]
     assert area == pytest.approx(np.pi * 0.7**2, rel=1e-6)
+
+
+@pytest.mark.parametrize("radius_lod", [0.7 * 575 / 553.4715922101486, 0.7, 1.3])
+@pytest.mark.parametrize("centre", [(0.0, 0.0), (0.5, 0.5), (0.3, -0.1)])
+def test_circle_weights_tile_the_disk_to_float64_rounding(radius_lod, centre):
+    """Exact overlap weights sum to pi r^2 at float64 rounding (64 eps).
+
+    Basis: floating-point. The previous arcsin(z / r) form lost about
+    sqrt(eps) relative (5e-9) where a chord meets the radius; this test
+    fails it by a factor of about 3e5.
+    """
+    step = 0.05
+    radius_pix = radius_lod / step
+    n = 2 * int(radius_pix) + 8
+    with jax.enable_x64(True):
+        rows, cols = np.indices((n, n), dtype=np.float64) - (n - 1) / 2
+        weights = _circle_square_weights(
+            jnp.asarray(rows - centre[1]), jnp.asarray(cols - centre[0]), radius_pix
+        )
+        area = float(jnp.sum(weights)) * step**2
+    assert area == pytest.approx(np.pi * radius_lod**2, rel=64 * np.finfo(float).eps)
 
 
 @pytest.mark.parametrize("pixel_lod", [0.25, 0.5])

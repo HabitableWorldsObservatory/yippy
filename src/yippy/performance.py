@@ -494,20 +494,29 @@ def _circle_square_weights(rows, cols, radius):
 
     Integrate sqrt(radius**2 - x**2) analytically in each quadrant,
     then difference its rectangle primitive at the four square corners.
+    The angle is atan2(z, w) with w = sqrt(radius**2 - z**2) supplied by the
+    caller where it is known exactly: arcsin(z / radius) loses about
+    sqrt(eps) relative near z = radius, where its slope diverges.
     """
 
     def primitive(x, y):
         a = jnp.minimum(jnp.abs(x), radius)
         b = jnp.minimum(jnp.abs(y), radius)
-        split = jnp.minimum(a, jnp.sqrt(jnp.maximum(radius**2 - b**2, 0.0)))
+        w_a = jnp.sqrt(jnp.maximum(radius**2 - a**2, 0.0))
+        chord = jnp.sqrt(jnp.maximum(radius**2 - b**2, 0.0))
+        clipped = chord < a
+        split = jnp.where(clipped, chord, a)
+        # At split = chord the complementary leg is b exactly.
+        w_split = jnp.where(clipped, b, w_a)
 
-        def integral(z):
-            return 0.5 * (
-                z * jnp.sqrt(jnp.maximum(radius**2 - z**2, 0.0))
-                + radius**2 * jnp.arcsin(jnp.clip(z / radius, 0, 1))
-            )
+        def integral(z, w):
+            return 0.5 * (z * w + radius**2 * jnp.arctan2(z, w))
 
-        return jnp.sign(x) * jnp.sign(y) * (b * split + integral(a) - integral(split))
+        return (
+            jnp.sign(x)
+            * jnp.sign(y)
+            * (b * split + integral(a, w_a) - integral(split, w_split))
+        )
 
     fraction = (
         primitive(cols + 0.5, rows + 0.5)
