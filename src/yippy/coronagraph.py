@@ -296,6 +296,7 @@ class Coronagraph:
                 (),
                 "per_pixel",
                 "stellar_flux_fraction",
+                reconstruction="band_limited",
             )
         return self.offax.create_psf(x_lod, y_lod)
 
@@ -308,6 +309,7 @@ class Coronagraph:
                 ("source",),
                 "per_pixel",
                 "stellar_flux_fraction",
+                reconstruction="band_limited",
             )
         return self.offax.create_psfs(x, y)
 

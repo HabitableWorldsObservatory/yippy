@@ -220,6 +220,7 @@ class OffJAX(OffAx):
             ("source",),
             "per_pixel",
             "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def create_psfs_parallel(self, x_vals, y_vals):
@@ -277,4 +278,11 @@ class OffJAX(OffAx):
         else:
             psfs = psfs_padded
 
-        return Image(psfs, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")
+        return Image(
+            psfs,
+            self.grid,
+            ("source",),
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
+        )

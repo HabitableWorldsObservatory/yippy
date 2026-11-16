@@ -1694,7 +1694,14 @@ def _performance_curves(
             positions = [p for p in positions if _point_source_in_image(p)]
         separations = np.array([p.separation for p in positions])
         images = [
-            Image(p.psf, offaxis.grid, (), "per_pixel", "stellar_flux_fraction")
+            Image(
+                p.psf,
+                offaxis.grid,
+                (),
+                "per_pixel",
+                "stellar_flux_fraction",
+                reconstruction="band_limited",
+            )
             for p in positions
         ]
         locations = [

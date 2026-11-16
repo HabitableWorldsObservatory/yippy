@@ -201,12 +201,14 @@ def test_header_grid_corner_counts(syn_coro_1d):
     assert grid.frame.diameter_convention == "circumscribed"
 
 
-def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
-    """Fails if a public image drops geometry, measure, axes or array shape.
+def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d, monkeypatch):
+    """Fails if a public image drops geometry, reconstruction, measure or axes.
 
     Metadata are exact; the node image is checked at the float32 FFT floor
     (2e-7 of peak).
     """
+    from multiprocessing.pool import ThreadPool
+
     import equinox as eqx
     import jax.numpy as jnp
     from hwoutils.grids import Image
@@ -238,9 +240,17 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         numpy_single = numpy_reader.create_psf(1.0, 0.0)
     with pytest.warns(DeprecationWarning):
         numpy_stack = numpy_reader.create_psfs([1.0], [0.0])
+    # Exercise the cube product without charging process startup to metadata.
+    monkeypatch.setattr("yippy.offax.Pool", ThreadPool)
+    with pytest.warns(DeprecationWarning):
+        numpy_cube = numpy_reader.create_psfs_parallel(
+            np.array([1.0]), np.array([0.0]), workers=1
+        )
     images = [
         numpy_single,
         numpy_stack,
+        numpy_cube,
+        numpy_reader.get_psf_by_offset_idx(2, 0),
         coro.create_psf(1.0, 0.0),
         coro.offax(1.0 * lod, 0.0 * lod),
         coro.offax.get_psf_by_offset_idx(2, 0),
@@ -251,6 +261,7 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         eqx.filter_jit(view.create_psf)(1.0, 0.0),
         view.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
         eqx.filter_jit(view.stellar_intens)(0.1),
+        view.stellar_intens(jnp.array([0.0, 0.1])),
         view.source_psfs(
             500,
             jnp.array([1.0]),
@@ -266,6 +277,7 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         assert image.data.shape[-2:] == grid.shape
         assert len(image.leading_axes) == image.data.ndim - 2
         assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
+        assert image.reconstruction == "band_limited"
     for image in (
         coro.sky_trans(),
         view.sky_trans,
@@ -274,12 +286,72 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         assert isinstance(image, Image) and image.grid == grid
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == ("per_unit_area", "transmission")
+        assert image.reconstruction == "linear"
+    # A coarser detector cannot promise to reconstruct the native bandwidth.
+    for image in (
+        view.source_psfs(
+            500,
+            jnp.array([1.0]),
+            jnp.array([0.0]),
+            pixel_scale_lod=0.5,
+            shape=(32, 32),
+        ),
+        view.stellar_map(500, 0.1, pixel_scale_lod=0.5, shape=(32, 32)),
+    ):
+        assert image.reconstruction == "linear"
     np.testing.assert_allclose(
         numpy_single.data,
-        images[2].data,
+        coro.create_psf(1.0, 0.0).data,
         rtol=0,
         atol=float(numpy_single.data.max()) * 2e-7,
     )
+
+
+def test_detector_aperture_converges_to_performance(syn_coro_1d, syn_eqx_1d):
+    """Fails if detector rendering silently uses linear PSF reconstruction.
+
+    Solution verification: refine detector pitch by two at fixed angular extent.
+    Pixel-box integration and fractional aperture coverage give second-order
+    error against the performance code's subpixel intensity integral. Spike
+    basis: the synthetic Gaussian's error/pitch**2 is below 0.16; allow 0.18.
+    The observed-order band permits aperture-edge phase and reference quadrature
+    error, while rejecting the nonvanishing linear-reconstruction bias.
+    """
+    from dataclasses import replace
+
+    import jax
+
+    from yippy import Circular, performance_curves
+
+    with jax.enable_x64():
+        rule, separation = Circular(0.7), 2.0
+        record = performance_curves(
+            syn_coro_1d,
+            syn_eqx_1d.stellar_intens(0.0),
+            rule,
+            separations_lod=[separation],
+        )
+        expected = record.evaluate("throughput", separation)
+        errors, sums = [], []
+        pitches = (0.24, 0.12, 0.06)
+        for pitch, size in zip(pitches, (32, 64, 128), strict=True):
+            stack = syn_eqx_1d.source_psfs(
+                500.0,
+                np.array([separation]),
+                np.array([0.0]),
+                pixel_scale_lod=pitch,
+                shape=(size, size),
+            )
+            psf = replace(stack, data=stack.data[0], leading_axes=())
+            assert psf.reconstruction == "band_limited"
+            weights = rule.weights(psf, (separation, 0.0))
+            sums.append(float(np.sum(np.asarray(psf.data) * np.asarray(weights))))
+            errors.append(abs(sums[-1] - expected))
+            assert errors[-1] < 0.18 * pitch**2
+        orders = np.log2(np.array(errors[:-1]) / errors[1:])
+        assert np.all((orders > 1.7) & (orders < 2.3))
+        print(f"detector sums={sums}; throughput={expected}; errors={errors}")
+        print(f"observed orders={orders.tolist()}")
 
 
 def test_public_package_optical_axis_evidence(shipped_coro):

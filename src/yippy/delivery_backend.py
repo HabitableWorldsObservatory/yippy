@@ -92,6 +92,7 @@ class DeliveryBackend(eqx.Module):
             (),
             "per_pixel",
             "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def _blend_image(self, query):
@@ -255,6 +256,7 @@ class DeliveryBackend(eqx.Module):
             (),
             "per_pixel",
             "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def create_psfs(self, x_lod, y_lod):
@@ -265,6 +267,7 @@ class DeliveryBackend(eqx.Module):
             ("source",),
             "per_pixel",
             "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def create_psfs_parallel(self, x_vals, y_vals):

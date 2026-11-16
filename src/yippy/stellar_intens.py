@@ -106,7 +106,14 @@ class StellarIntens:
         """
         data = self._evaluate_array(stellar_diam, lam, D)
         axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))
-        return Image(data, self.grid, axes, "per_pixel", "stellar_flux_fraction")
+        return Image(
+            data,
+            self.grid,
+            axes,
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
+        )
 
     def _evaluate_array(self, stellar_diam, lam=None, D=None):
         """Host spline values, retaining FITS precision for performance tables."""

@@ -285,13 +285,19 @@ class OffAx:
                 (),
                 "per_pixel",
                 "stellar_flux_fraction",
+                reconstruction="band_limited",
             )
         return None
 
     def create_psf(self, x: float, y: float) -> Image:
         """Return a per-pixel fraction of unocculted source flux at (x, y) lod."""
         return Image(
-            self._create_psf(x, y), self.grid, (), "per_pixel", "stellar_flux_fraction"
+            self._create_psf(x, y),
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def _create_psf(self, x: float, y: float):
@@ -459,7 +465,14 @@ class OffAx:
         psfs = np.empty((len(x), *self.flat_psfs.shape[1:]))
         for i in range(len(x)):
             psfs[i] = self._create_psf(x[i], y[i])
-        return Image(psfs, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")
+        return Image(
+            psfs,
+            self.grid,
+            ("source",),
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
+        )
 
     def create_psfs_parallel(
         self,
@@ -530,6 +543,7 @@ class OffAx:
             ("source_x", "source_y"),
             "per_pixel",
             "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def __call__(self, x: Quantity, y: Quantity, lam=None, D=None, dist=None) -> Image:

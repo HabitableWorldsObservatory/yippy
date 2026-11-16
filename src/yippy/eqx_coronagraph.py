@@ -359,7 +359,8 @@ class EqxCoronagraph(eqx.Module):
             shape: Requested detector shape (row, column).
 
         Returns:
-            Photon fraction per target pixel for each source.
+            Photon fraction per target pixel for each source, using the PSF's
+            declared reconstruction. Coarsening can downgrade the declaration.
         """
         target = PixelGrid.regular(shape, pixel_scale_lod, "lod", frame=self.grid.frame)
         return resample(self.create_psfs(x_lod, y_lod), target)
@@ -374,7 +375,8 @@ class EqxCoronagraph(eqx.Module):
             shape: Requested detector shape (row, column).
 
         Returns:
-            Stellar photon fractions per target pixel.
+            Stellar photon fractions per target pixel, using the intensity's
+            declared reconstruction. Coarsening can downgrade the declaration.
         """
         target = PixelGrid.regular(
             shape, pixel_scale_lod, "lod", frame=self.stellar_grid.frame
@@ -390,7 +392,7 @@ class EqxCoronagraph(eqx.Module):
             shape: Requested detector shape (row, column).
 
         Returns:
-            Dimensionless transmission per target pixel.
+            Dimensionless transmission using the delivered map's reconstruction.
         """
         target = PixelGrid.regular(
             shape, pixel_scale_lod, "lod", frame=self.sky_grid.frame
@@ -409,7 +411,12 @@ class EqxCoronagraph(eqx.Module):
         data = jnp.exp(self._stellar_ln_interp(stellar_diam_lod))
         axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))
         return Image(
-            data, self.stellar_grid, axes, "per_pixel", "stellar_flux_fraction"
+            data,
+            self.stellar_grid,
+            axes,
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
         )
 
     def throughput(self, separation_lod: float) -> Array:

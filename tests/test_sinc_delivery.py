@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.grids import resample
 from lod_unit import lod
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
@@ -67,6 +68,11 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
     auto = Coronagraph(synthetic_1d.path, interpolation="auto")
     np.testing.assert_array_equal(
         blend.create_psf(0.3, 0.2).data, auto.create_psf(0.3, 0.2).data
+    )
+    assert auto.create_psf(0.3, 0.2).reconstruction == "band_limited"
+    assert (
+        auto.create_psfs(jnp.array([0.3]), jnp.array([0.2])).reconstruction
+        == "band_limited"
     )
     assert not auto.create_psf_with_info(np.nan, 0.0).accepted
     assert np.isnan(auto.create_psf(np.nan, 0.0).data).all()
@@ -172,6 +178,7 @@ def test_quadrant_native_intake(admitted):
     assert grid.intensity.dtype == jnp.float32
     assert grid.intensity.shape == (1, 18, 18, 4, 4)
     np.testing.assert_array_equal(grid.products.pixels.center_xy_pix, [1.5, 1.5])
+    assert admitted.offax.get_psf_by_offset_idx(0, 0).reconstruction == "band_limited"
 
 
 def test_reads_units_refusals(admitted):
@@ -234,28 +241,37 @@ def test_reads_units_refusals(admitted):
     )
     np.testing.assert_array_equal(batch.accepted, [True, False])
     assert admitted.create_psfs(jnp.empty(0), jnp.empty(0)).data.shape == (0, 4, 4)
+    assert admitted.create_psf(0.07, -0.04).reconstruction == "band_limited"
+    assert (
+        admitted.create_psfs(jnp.array([0.07]), jnp.array([-0.04])).reconstruction
+        == "band_limited"
+    )
 
 
 def test_stellar_frame_and_eqx(admitted):
     """Fails if stellar pitch is overwritten or reader tables hide in closures."""
     view = EqxCoronagraph(yippy_coro=admitted)
     assert np.ptp(view.stellar_intens(0.0).data) > 0
-    # Linear interpolation at target pixel centers, times the pixel-area ratio.
-    # The fixture has identical rows. This oracle detects use of off-axis pitch
-    # or a corner count in place of the stellar grid center.
-    row = np.asarray(view.stellar_intens(0.0).data[0])
-    target_columns = (np.arange(4) - 1.5) * (0.3 / 0.4) + 1.5
-    expected = np.tile(np.interp(target_columns, np.arange(4), row), (4, 1))
-    expected *= (0.3 / 0.4) ** 2
-    wrong = np.tile(np.interp(target_columns, np.arange(4), row), (4, 1))
-    wrong *= (0.3 / 0.25) ** 2
-    np.testing.assert_allclose(
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.3, shape=(4, 4)).data,
-        expected,
-        rtol=2e-15,
-        atol=0,
-    )
-    assert not np.allclose(expected, wrong, atol=0.0, rtol=1e-3)
+    # Independent NumPy Fourier series integrated over target pixel boxes.
+    # Default padding doubles each axis; the real Nyquist mode is a cosine
+    # separately on each axis. Even equal-pitch boxes smooth density samples.
+    # The 1e-14 bound allows float64 DFT summation and exponential roundoff.
+    stellar = view.stellar_intens(0.0)
+    spectrum = np.fft.fft2(np.pad(np.asarray(stellar.data), 2))
+    frequencies = np.fft.fftfreq(8)
+    for pitch in (0.3, 0.4):
+        ratio = pitch / 0.4
+        positions = (np.arange(4) - 1.5) * ratio + 1.5 + 2
+        phase = 2 * np.pi * positions[:, None] * frequencies
+        basis = np.exp(1j * phase)
+        basis[:, 4] = np.cos(phase[:, 4])
+        basis *= np.sinc(frequencies * ratio)
+        expected = (basis @ spectrum @ basis.T).real / 8**2 * ratio**2
+        sampled = view.stellar_map(500.0, 0.0, pixel_scale_lod=pitch, shape=(4, 4))
+        assert sampled.reconstruction == "band_limited"
+        np.testing.assert_allclose(sampled.data, expected, rtol=1e-14, atol=0)
+        wrong = expected * (0.4 / 0.25) ** 2
+        assert not np.allclose(expected, wrong, atol=0.0, rtol=1e-3)
     assert view.stellar_pixel_scale_lod == 0.4
     assert view.stellar_frame == (400.0, 6.0)
     assert admitted.offaxis_header.lambda0.to_value("nm") == pytest.approx(500.0)
@@ -264,11 +280,6 @@ def test_stellar_frame_and_eqx(admitted):
     np.testing.assert_allclose(admitted.core_intensity_separations[1], 0.1)
     np.testing.assert_allclose(
         view.stellar_intens(0.0).data,
-        admitted.stellar_intens(0.0 * lod).data,
-        rtol=1e-14,
-    )
-    np.testing.assert_allclose(
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
         admitted.stellar_intens(0.0 * lod).data,
         rtol=1e-14,
     )
@@ -423,7 +434,9 @@ def test_table_consumer(admitted):
         view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
     )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
-    expected = admitted.create_psfs(x, y).data
+    # The table boundary integrates the declared density over target pixels,
+    # including at equal pitch; the native samples themselves are not boxes.
+    expected = resample(admitted.create_psfs(x, y), view.grid).data
     result = consumer.source_psfs(500.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)).data
     np.testing.assert_allclose(result, expected, atol=1e-18)
     np.testing.assert_array_equal(
@@ -537,7 +550,7 @@ def test_public_delivery(tmp_path):
                     pixel_scale_lod=view.stellar_pixel_scale_lod,
                     shape=view.stellar_intens(0.0).data.shape,
                 ).data,
-                view.stellar_intens(0.0).data,
+                resample(coro.stellar_intens(0.0 * lod), view.stellar_grid).data,
                 atol=1e-14,
             )
             x, y = jnp.array([4.0]), jnp.array([5.5])
@@ -549,7 +562,7 @@ def test_public_delivery(tmp_path):
                     pixel_scale_lod=view.pixel_scale_lod,
                     shape=view.psf_shape,
                 ).data,
-                coro.create_psfs(x, y).data,
+                resample(coro.create_psfs(x, y), view.grid).data,
                 rtol=1e-14,
             )
         metadata = json.loads((root / "sinc-delivery.json").read_text())

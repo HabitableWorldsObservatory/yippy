@@ -12,8 +12,10 @@ from .header import HeaderData
 class SkyTrans:
     """Simple class that holds the sky transmission map data.
 
-    This is essentially a placeholder class until I have a better idea of how
-    the sky transmission map will be used in the pipeline.
+    The delivered map is the dimensionless transmission of the occulting mask
+    and Lyot stop to an infinitely extended source. Its provenance does not
+    guarantee band-limited detector-intensity samples; use linear reconstruction
+    of this sampled throughput field.
 
     Attributes:
         data:
@@ -44,4 +46,5 @@ class SkyTrans:
             (),
             "per_unit_area",
             "transmission",
+            reconstruction="linear",
         )
