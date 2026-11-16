@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.grids import resample
+from hwoutils.grids import PixelGrid, resample
 from lod_unit import lod
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
@@ -253,15 +253,20 @@ def test_stellar_frame_and_eqx(admitted):
     view = EqxCoronagraph(yippy_coro=admitted)
     assert np.ptp(view.stellar_intens(0.0).data) > 0
     # Independent NumPy Fourier series integrated over target pixel boxes.
-    # Default padding doubles each axis; the real Nyquist mode is a cosine
-    # separately on each axis. Even equal-pitch boxes smooth density samples.
-    # The 1e-14 bound allows float64 DFT summation and exponential roundoff.
+    # Even equal-pitch boxes smooth density samples. The 1e-14 bound allows
+    # float64 DFT summation and exponential roundoff.
+    # The stellar map declares outside="reflect": the series is that of the
+    # even extension [d, d[::-1]] on each axis (period 8, zero Nyquist mode).
     stellar = view.stellar_intens(0.0)
-    spectrum = np.fft.fft2(np.pad(np.asarray(stellar.data), 2))
+    assert stellar.outside == "reflect"
+    data = np.asarray(stellar.data)
+    even = np.concatenate([data, data[::-1]], axis=0)
+    even = np.concatenate([even, even[:, ::-1]], axis=1)
+    spectrum = np.fft.fft2(even)
     frequencies = np.fft.fftfreq(8)
     for pitch in (0.3, 0.4):
         ratio = pitch / 0.4
-        positions = (np.arange(4) - 1.5) * ratio + 1.5 + 2
+        positions = (np.arange(4) - 1.5) * ratio + 1.5
         phase = 2 * np.pi * positions[:, None] * frequencies
         basis = np.exp(1j * phase)
         basis[:, 4] = np.cos(phase[:, 4])
@@ -409,39 +414,38 @@ def test_auto_fallback_and_bounded(tmp_path):
 
 
 def test_table_consumer(admitted):
-    """Fails if the table consumer rescales integrals or uses a stellar pitch."""
+    """Fails if the table consumer rescales densities or resamples off its frame."""
     pytest.importorskip("optixstuff")
     from optixstuff.yippy_coronagraph import YippyCoronagraph
 
     view = EqxCoronagraph(yippy_coro=admitted)
     consumer = YippyCoronagraph(backend=view)
-    np.testing.assert_allclose(
-        consumer.core_mean_intensity(0.0, 500.0),
-        view.core_mean_intensity(0.0) / 0.4**2,
-        rtol=1e-14,
-    )
-    np.testing.assert_allclose(
-        consumer.noise_floor_ayo(0.0),
-        (view.core_mean_intensity(0.0) / 30.0) / 0.4**2,
-        rtol=1e-14,
-    )
-    np.testing.assert_array_equal(
-        consumer.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
-        view.stellar_map(500.0, 0.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
-    )
-    np.testing.assert_array_equal(
-        consumer.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
-        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
-    )
+    # The record already stores a density per (lambda/D)^2: no pitch factor.
+    density = view.performance.evaluate("leakage_density_lod2", 0.0)
+    np.testing.assert_allclose(consumer.noise_floor_ayo(0.0), density / 30.0, rtol=0)
     x, y = jnp.array([0.07]), jnp.array([-0.04])
-    # The table boundary integrates the declared density over target pixels,
-    # including at equal pitch; the native samples themselves are not boxes.
-    expected = resample(admitted.create_psfs(x, y), view.grid).data
-    result = consumer.source_psfs(500.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)).data
-    np.testing.assert_allclose(result, expected, atol=1e-18)
-    np.testing.assert_array_equal(
-        view.source_psfs(600.0, x, y, pixel_scale_lod=0.25, shape=(4, 4)).data, result
-    )
+    for pitch in (0.25, 0.4):
+        # Each product keeps its own frame; targets share it.
+        stellar = view.stellar_intens(0.0)
+        grid = PixelGrid.focal(4, pitch, stellar.grid.frame)
+        np.testing.assert_array_equal(
+            consumer.stellar_map(500.0, 0.0, grid=grid).data,
+            resample(stellar, grid).data,
+        )
+        grid = PixelGrid.focal(4, pitch, view.sky_trans.grid.frame)
+        np.testing.assert_array_equal(
+            consumer.background_transmission(500.0, grid=grid).data,
+            resample(view.sky_trans, grid).data,
+        )
+        grid = PixelGrid.focal(4, pitch, view.grid.frame)
+        # The table boundary integrates the declared density over target
+        # pixels, including at equal pitch; native lod is wavelength-free.
+        expected = resample(admitted.create_psfs(x, y), grid).data
+        result = consumer.source_psfs(500.0, x, y, grid=grid).data
+        np.testing.assert_allclose(result, expected, atol=1e-18)
+        np.testing.assert_array_equal(
+            consumer.source_psfs(600.0, x, y, grid=grid).data, result
+        )
 
 
 def test_cache_identity_and_selections(admitted, monkeypatch):
