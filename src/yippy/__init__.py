@@ -37,7 +37,6 @@ __all__ = [
     "lod_inscribed_to_circumscribed",
     "logger",
     "performance_curves",
-    "plot_performance_curve",
     "profile_radii",
     "truncation_core",
     "yip_exists",
@@ -81,7 +80,6 @@ from .performance import (
     core_subpixel_window,
     core_window_half_width_pix,
     performance_curves,
-    plot_performance_curve,
     profile_radii,
     truncation_core,
 )

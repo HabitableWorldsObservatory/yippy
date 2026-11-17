@@ -8,7 +8,6 @@ authors = [{ name = "Corey Spohn", email = "corey.a.spohn@nasa.gov" }]
 description = "A Python and JAX wrapper to create a coronagraph object from a yield input package"
 dependencies = [
   "astropy>=6.1",
-  "matplotlib>=3.9",
   "numpy>=2.0",
   "scipy>=1.13",
   "hwoutils>=1.10.0",
@@ -51,7 +50,9 @@ path = "README.md"
 
 [project.optional-dependencies]
 sinc = ["sinchole>=0.1.0"]
+viz = ["eyepiece>=0.17.0"]
 docs = [
+  "eyepiece>=0.17.0",
   "sphinx>=7.2.6",
   "myst-nb>=1.0.0",
   "sphinx-book-theme>=1.1.0",
@@ -59,6 +60,7 @@ docs = [
   "ipython>=8.18.1",
 ]
 test = [
+  "eyepiece>=0.17.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",
   # The budget plugin needs psutil where process-list commands are unavailable.

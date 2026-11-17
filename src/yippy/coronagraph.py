@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from ._precision import dtype_tag, float_dtype
 from ._version import __version__
-from .apertures import Circular
+from .apertures import DEFAULT_APERTURE_RULE
 from .export import export_ayo_csv
 from .header import HeaderData
 from .interpolation import SincOptions, blend_read
@@ -31,7 +31,6 @@ from .performance import (
     compute_throughput_curve,
     core_mean_intensity_profile,
     performance_curves,
-    plot_performance_curve,
 )
 from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
@@ -109,7 +108,7 @@ class Coronagraph:
         y_symmetric: bool = True,
         use_quarter_psf_datacube: bool = True,
         downsample_shape: tuple[int, int] | None = None,
-        rule=Circular(0.7),  # noqa: B008 - frozen rule
+        rule=DEFAULT_APERTURE_RULE,
         contrast_floor: float | None = None,
         leakage_rule: str = "aperture_mean",
         *,
@@ -812,7 +811,6 @@ class Coronagraph:
         performance_file=None,
         load_from_file=None,
         cache_dir=None,
-        plot=False,
     ):
         """Build/select one complete record; explicitly imported metadata must match.
 
@@ -881,37 +879,17 @@ class Coronagraph:
         self.rule, self.leakage_rule = rule, leakage_rule
         self.performance = record
         self.curves_by_rule[rule] = record
-        if plot:
-            for name in ("throughput", "core_area_lod2", "raw_contrast"):
-                plot_performance_curve(
-                    record.separation_lod,
-                    getattr(record, name),
-                    title=name,
-                    xlabel="Separation [lod]",
-                    ylabel=name,
-                    log_scale=record.interpolation[name] == "log",
-                )
         return record
 
-    def occulter_transmission_curve(self, plot=True):
+    def occulter_transmission_curve(self):
         """Compute occulter transmission curve.
 
         Delegates to :func:`yippy.performance.compute_occ_trans_curve`.
         """
         sep, occ = compute_occ_trans_curve(self)
-        if plot:
-            self._plot_performance_curve(
-                sep,
-                occ,
-                title=f"{self.name} Occulter Transmission",
-                xlabel="Separation [lam/D]",
-                ylabel="Occulter Transmission",
-            )
         return sep, occ
 
-    def core_mean_intensity_curve(
-        self, stellar_diam_values=None, plot=True, interpolation="keys"
-    ):
+    def core_mean_intensity_curve(self, stellar_diam_values=None, interpolation="keys"):
         """Compute core mean intensity curves.
 
         Delegates to :func:`yippy.performance.compute_core_mean_intensity_curve`.
@@ -922,19 +900,6 @@ class Coronagraph:
             stellar_diam_values=stellar_diam_values,
             interpolation=interpolation,
         )
-        if plot:
-            import matplotlib.pyplot as plt
-
-            plt.figure(figsize=(8, 6))
-            for diam, profile in intensities.items():
-                plt.plot(sep, profile, "-", label=f"Diam = {diam.value:.1f} lam/D")
-            plt.xlabel("Separation [lam/D]")
-            plt.ylabel("Core Mean Intensity")
-            plt.title(f"{self.name} Core Mean Intensity")
-            plt.yscale("log")
-            plt.grid(True)
-            plt.legend()
-            plt.show()
         return sep, intensities
 
     # ------------------------------------------------------------------
@@ -1264,9 +1229,8 @@ class Coronagraph:
 
     def throughput_curve(
         self,
-        rule=Circular(0.7),  # noqa: B008 - frozen rule
+        rule=DEFAULT_APERTURE_RULE,
         oversample=CORE_OVERSAMPLE,
-        plot=True,
     ):
         """Tabulate the requested rule's throughput."""
         return compute_throughput_curve(self, rule, oversample)
@@ -1274,19 +1238,17 @@ class Coronagraph:
     def raw_contrast_curve(
         self,
         stellar_diam=0 * lod,
-        rule=Circular(0.7),  # noqa: B008 - frozen rule
+        rule=DEFAULT_APERTURE_RULE,
         oversample=CORE_OVERSAMPLE,
-        plot=True,
     ):
         """Tabulate the requested rule's raw contrast."""
         return compute_raw_contrast_curve(self, stellar_diam, rule, oversample)
 
     def core_area_curve(
         self,
-        rule=Circular(0.7),  # noqa: B008 - frozen rule
+        rule=DEFAULT_APERTURE_RULE,
         fit_gaussian=False,
         oversample=CORE_OVERSAMPLE,
-        plot=True,
     ):
         """Tabulate the requested rule's area."""
         return compute_core_area_curve(self, rule, fit_gaussian, oversample)

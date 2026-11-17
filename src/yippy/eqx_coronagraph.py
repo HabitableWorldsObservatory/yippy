@@ -42,7 +42,7 @@ from hwoutils.grids import Image, PixelGrid, resample
 from jaxtyping import Array
 
 from ._precision import float_dtype
-from .apertures import ApertureRule, Circular
+from .apertures import DEFAULT_APERTURE_RULE, ApertureRule
 from .coronagraph import Coronagraph
 from .performance import (
     PerformanceCurves,
@@ -125,7 +125,7 @@ class EqxCoronagraph(eqx.Module):
         ensure_psf_datacube: bool = False,
         # Forwarded to yippy.Coronagraph when building from yip_path
         downsample_shape: tuple[int, int] | None = None,
-        rule: ApertureRule = Circular(0.7),  # noqa: B008 - frozen rule
+        rule: ApertureRule = DEFAULT_APERTURE_RULE,
         contrast_floor: float | None = None,
         # Extra Coronagraph kwargs
         x_symmetric: bool = True,

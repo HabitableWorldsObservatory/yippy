@@ -19,12 +19,12 @@ import numpy as np
 from hwoutils.grids import Frame
 from hwoutils.map_coordinates import map_coordinates
 from hwoutils.radial import radial_profile
-from hwoutils.transforms import resample_flux
+from hwoutils.transforms import downsample_psf, resample_flux
 from lod_unit import lod
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import root_scalar
 
-from .apertures import ApertureRule, Circular, HalfMaximum
+from .apertures import DEFAULT_APERTURE_RULE, ApertureRule, Circular, HalfMaximum
 from .logger import logger
 
 if TYPE_CHECKING:
@@ -155,33 +155,13 @@ def _threshold_mask(psf_os: np.ndarray, trunc_ratio: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Public utility
-# ---------------------------------------------------------------------------
-
-
-def plot_performance_curve(
-    x, y, title, xlabel, ylabel, marker="o-", log_scale=False, ms=4
-):
-    """Plot a single performance curve."""
-    import matplotlib.pyplot as plt
-
-    plt.figure()
-    plt.plot(x, y, marker, ms=ms)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title(title)
-    if log_scale:
-        plt.yscale("log")
-    plt.grid(True)
-    plt.show()
-
-
-# ---------------------------------------------------------------------------
 # Individual metric functions
 # ---------------------------------------------------------------------------
 
 
-def compute_throughput_curve(coro, rule=Circular(0.7), oversample=CORE_OVERSAMPLE):  # noqa: B008 - frozen rule
+def compute_throughput_curve(
+    coro, rule=DEFAULT_APERTURE_RULE, oversample=CORE_OVERSAMPLE
+):
     """Throughput from the common record builder."""
     record = _performance_curves(
         coro,
@@ -195,7 +175,7 @@ def compute_throughput_curve(coro, rule=Circular(0.7), oversample=CORE_OVERSAMPL
 def compute_raw_contrast_curve(
     coro,
     stellar_diam=0.0 * lod,
-    rule=Circular(0.7),  # noqa: B008 - frozen rule
+    rule=DEFAULT_APERTURE_RULE,
     oversample=CORE_OVERSAMPLE,
 ):
     """Stellar aperture fraction divided by planet aperture throughput."""
@@ -207,7 +187,7 @@ def compute_raw_contrast_curve(
 
 def compute_core_area_curve(
     coro,
-    rule=Circular(0.7),  # noqa: B008 - frozen rule
+    rule=DEFAULT_APERTURE_RULE,
     fit_gaussian=False,
     oversample=CORE_OVERSAMPLE,
 ):
@@ -1357,7 +1337,9 @@ def _rule_weights(rule, psf, source_position, oversample):
             rule, psf, source_position, oversample
         )
         ny, nx = weights.shape[0] // factor, weights.shape[1] // factor
-        native = weights.reshape(ny, factor, nx, factor).mean(axis=(1, 3))
+        # Coverage is a fraction, so convert integrated subpixel weights to a mean.
+        native, _ = downsample_psf(weights, 1.0, (ny, nx))
+        native = native / factor**2
         return jax.lax.dynamic_update_slice(jnp.zeros(psf.grid.shape), native, (sy, sx))
 
 
@@ -1706,7 +1688,9 @@ def _performance_curves(
                 rule, psf, position, oversample
             )
             ny, nx = weights.shape[0] // factor, weights.shape[1] // factor
-            native_weights = weights.reshape(ny, factor, nx, factor).mean(axis=(1, 3))
+            # Coverage is a fraction, not the integrated weight of a detector bin.
+            native_weights, _ = downsample_psf(weights, 1.0, (ny, nx))
+            native_weights = native_weights / factor**2
             if stellar.grid == grid:
                 star = jax.lax.dynamic_slice(
                     jnp.asarray(stellar.data, dtype=jnp.float64), (sy, sx), (ny, nx)

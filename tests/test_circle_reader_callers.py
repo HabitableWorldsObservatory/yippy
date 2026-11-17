@@ -85,9 +85,7 @@ def test_curve_and_noise_callers_forward_reader(reader_coro):
     """Curve, map and noise helpers propagate the opt-in spatial reader."""
     coro = reader_coro
     with jax.enable_x64():
-        sep, curves = coro.core_mean_intensity_curve(
-            plot=False, interpolation="quintic"
-        )
+        sep, curves = coro.core_mean_intensity_curve(interpolation="quintic")
         diameter = coro.stellar_intens.diams[0]
         np.testing.assert_allclose(
             coro.core_mean_intensity(sep, diameter, interpolation="quintic"),
@@ -118,7 +116,7 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
         diameter = coro.stellar_intens.diams[-1]
         before = coro.core_mean_intensity(separation, diameter).copy()
         # Opt-in spatial profiles and aperture records have separate meanings.
-        coro.core_mean_intensity_curve(plot=False, interpolation="quintic")
+        coro.core_mean_intensity_curve(interpolation="quintic")
         coro.compute_all_performance_curves(
             save_to_fits=False,
             stellar_diameter=diameter,

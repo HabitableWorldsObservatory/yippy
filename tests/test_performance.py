@@ -188,7 +188,7 @@ class TestComputeAllPerformanceCurves:
 
     def test_iwa_within_range(self, coro):
         """IWA should be within the separation range."""
-        result = compute_all_performance_curves(coro, save_to_fits=False, plot=False)
+        result = compute_all_performance_curves(coro, save_to_fits=False)
         iwa = result.iwa_lod
         sep = result.separation_lod
         assert iwa >= sep[0]
@@ -198,7 +198,7 @@ class TestComputeAllPerformanceCurves:
         """When contrast_floor is set, contrast should respect it."""
         floor = 1e-9
         coro.contrast_floor = floor
-        result = compute_all_performance_curves(coro, save_to_fits=False, plot=False)
+        result = compute_all_performance_curves(coro, save_to_fits=False)
         assert np.all(coro.raw_contrast(result.separation_lod) >= floor)
         assert np.any(result.raw_contrast < floor)
         coro.contrast_floor = None  # clean up
