@@ -8,7 +8,7 @@ import astropy.io.fits as fits
 import numpy as np
 from hwoutils.grids import Frame
 
-PERFORMANCE_VERSION = 6
+PERFORMANCE_VERSION = 7
 PERFORMANCE_FIELDS = (
     "throughput",
     "throughput_variance",
@@ -110,7 +110,7 @@ def read_performance_cache_key(path: Path) -> str | None:
 
 def load_coro_performance_from_fits(filename: str, indir: Path):
     """Read a complete record; legacy partial tables are not supported."""
-    from optixstuff.apertures import Circular, HalfMaximum, Matched
+    from optixstuff.apertures import Circular, HalfMaximum
     from optixstuff.performance import PerformanceCurves
 
     with fits.open(Path(indir) / filename) as hdus:
@@ -122,7 +122,6 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
         rule_type = {
             "Circular": Circular,
             "HalfMaximum": HalfMaximum,
-            "Matched": Matched,
         }[header["APERRULE"]]
         rule = rule_type(**json.loads(header["RULEJSON"]))
         fields = {

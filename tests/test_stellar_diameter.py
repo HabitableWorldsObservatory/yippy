@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.grids import resample
 from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
-from optixstuff.apertures import Circular, HalfMaximum, Matched
+from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.performance import performance_curves
 from synthetic_yip import (
     replace_stellar_tables,
@@ -93,7 +93,7 @@ def finite_coro(request, tmp_path_factory):
     """Nonuniform finite-star images, optionally in a distinct stellar frame."""
     from dataclasses import replace
 
-    rules = (Circular(0.7), HalfMaximum(), Matched())
+    rules = (Circular(0.7), HalfMaximum())
     with jax.enable_x64():
         if isinstance(request.param, str):
             return tuple(
@@ -127,7 +127,7 @@ def finite_coro(request, tmp_path_factory):
         )
 
 
-@pytest.mark.parametrize("rule", [Circular(0.7), HalfMaximum(), Matched()])
+@pytest.mark.parametrize("rule", [Circular(0.7), HalfMaximum()])
 @pytest.mark.parametrize("leakage_rule", ["aperture_mean", "azimuthal_ring_mean"])
 def test_finite_leakage_record_reference(finite_coro, rule, leakage_rule):
     """Finite stellar leakage agrees with independently remeasured native maps.

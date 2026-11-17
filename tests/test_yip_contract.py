@@ -222,6 +222,12 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     native_star = coro.stellar_map(None, 0.1, grid=None)
     native_source = coro.off_axis_psf(None, 1.0, None)
     batch_source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]))
+    aperture_samples = coro.aperture_psfs(None, coro.curves().separation_lod)
+    knot = np.flatnonzero(np.asarray(coro.curves().separation_lod) == 1.0)[0]
+    np.testing.assert_array_equal(
+        aperture_samples.data[knot],
+        coro._offaxis_backend.get_psf_by_offset_idx(2, 0).data,
+    )
     batch_star = coro.stellar_map(None, jnp.array([0.0, 0.1]))
     for product in (
         coro,
@@ -243,6 +249,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         coro._offaxis_backend(1.0 * lod, 0.0 * lod),
         coro._offaxis_backend.get_psf_by_offset_idx(2, 0),
         batch_source,
+        aperture_samples,
         coro._offaxis_backend.create_psfs_parallel(jnp.array([1.0]), jnp.array([0.0])),
         native_star,
         batch_star,
@@ -351,39 +358,6 @@ def test_public_package_optical_axis_evidence(shipped_coro):
         a, b, c = np.log(psf[row, col - 1 : col + 2])
         peak_x = col + 0.5 * (a - c) / (a - 2 * b + c)
         assert abs(peak_x - (127.5 + separation / 0.25)) < 0.1
-
-
-@pytest.mark.parametrize("fixture", ["syn_coro_1d", "syn_coro_2d", "shipped_coro"])
-def test_matched_background_limited_exposure(request, fixture):
-    """Matched saves 10-30 percent outside the inner working angle.
-
-    For unit QE, independent photons and zero residual floor, the live time
-    to a common S/N is proportional to variance rate / planet rate squared.
-    Incident rates per second are 0.01 planet, 1e8 stellar and 0.1 diffuse
-    per square lambda/D after transmission.
-    """
-    from optixstuff.apertures import Circular, Matched
-
-    circular, matched = Circular(0.7), Matched()
-    coro = request.getfixturevalue(fixture).with_rules((circular, matched))
-    public = fixture == "shipped_coro"
-    separations = np.array([2.0, 3.0, 5.0, 10.0] if public else [2.0, 3.0, 5.0])
-    durations = []
-    for rule in (circular, matched):
-        record = coro.curves(rule)
-        signal = 0.01 * record.evaluate("throughput", separations)
-        variance = (
-            0.01 * record.evaluate("throughput_variance", separations)
-            + 1e8 * record.evaluate("leakage_fraction_variance", separations)
-            + 0.1 * record.evaluate("core_area_variance_lod2", separations)
-        )
-        durations.append(np.ceil(7**2 * variance / signal**2))
-    savings = 1 - durations[1] / durations[0]
-    if public:
-        # The AAVC PSF inside the IWA gives larger improvements at 2 and 3 lod.
-        np.testing.assert_allclose(savings[:2], [0.5313, 0.4052], atol=0.001)
-        savings = savings[2:]
-    assert np.all((0.10 < savings) & (savings < 0.30))
 
 
 def test_public_geometric_leakage_change(shipped_coro):

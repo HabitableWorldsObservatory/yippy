@@ -1,5 +1,6 @@
 """Immutable YIP tables implementing the shared coronagraph contract."""
 
+from dataclasses import replace
 from math import pi
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.spectral import Band
-from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
 from optixstuff.coronagraph import AbstractTableCoronagraph
 from optixstuff.performance import PerformanceCurves, leakage_weights
 from optixstuff.primary import SimplePrimary
@@ -34,22 +35,24 @@ def _jax_record(record):
     )
 
 
-def _native_samples(host, record):
+def _native_samples(offaxis, separations_lod, synthesize):
     """Retain the shipped PSFs and nearest-to-zero YIP row for native weights."""
-    offaxis = host.offax
+    separations_lod = np.asarray(separations_lod)
     y_offsets = np.asarray(offaxis.y_offsets)
     iy = int(np.argmin(np.abs(y_offsets)))
-    offsets = np.asarray(offaxis.x_offsets, dtype=record.separation_lod.dtype)
-    indices = {float(x): ix for ix, x in enumerate(offsets)}
-    return tuple(
-        (
-            offaxis.get_psf_by_offset_idx(indices[float(s)], iy),
-            (float(s), float(y_offsets[iy])),
-        )
-        if float(s) in indices
-        else (host.create_psf(float(s), 0.0), (float(s), 0.0))
-        for s in np.asarray(record.separation_lod)
+    offsets = np.asarray(
+        offaxis.x_offsets, dtype=np.result_type(separations_lod.dtype, np.float32)
     )
+    indices = {float(x): ix for ix, x in enumerate(offsets)}
+    samples = []
+    for separation in map(float, separations_lod):
+        ix = indices.get(separation)
+        image = None if ix is None else offaxis.get_psf_by_offset_idx(ix, iy)
+        if image is None:
+            samples.append((synthesize(separation, 0.0), (separation, 0.0)))
+        else:
+            samples.append((image, (separation, float(y_offsets[iy]))))
+    return tuple(samples)
 
 
 class Coronagraph(AbstractTableCoronagraph):
@@ -159,7 +162,9 @@ class Coronagraph(AbstractTableCoronagraph):
                     lambda s: host.create_psf(s, 0.0),
                     self._native_stellar_map(0.0),
                     record,
-                    samples=_native_samples(host, record),
+                    samples=_native_samples(
+                        host.offax, record.separation_lod, host.create_psf
+                    ),
                 ),
             )
             for record in self._records
@@ -191,7 +196,7 @@ class Coronagraph(AbstractTableCoronagraph):
         return record
 
     def prepared(
-        self, rule: ApertureRule, *, leakage_rule="aperture_mean"
+        self, rule: RecordRule, *, leakage_rule="aperture_mean"
     ) -> tuple["Coronagraph", PerformanceCurves]:
         """Return this model if ready, or prepare the requested record on the host."""
         record = self._find_record(rule, leakage_rule)
@@ -240,6 +245,17 @@ class Coronagraph(AbstractTableCoronagraph):
             "stellar_flux_fraction",
             reconstruction="band_limited",
             outside="reflect",
+        )
+
+    def aperture_psfs(self, wavelength_nm, separations_lod) -> Image:
+        """Stack the shipped PSFs on the native record row for host preparation."""
+        samples = _native_samples(
+            self._offaxis_backend, separations_lod, self._offaxis_backend.create_psf
+        )
+        return replace(
+            samples[0][0],
+            data=jnp.stack([image.data for image, _ in samples]),
+            leading_axes=("source",),
         )
 
     def _native_source_psfs(self, x_lod, y_lod):
@@ -315,7 +331,9 @@ class Coronagraph(AbstractTableCoronagraph):
                     lambda s: host.create_psf(s, 0.0),
                     self._native_stellar_map(0.0),
                     record,
-                    samples=_native_samples(host, record),
+                    samples=_native_samples(
+                        host.offax, record.separation_lod, host.create_psf
+                    ),
                 ),
             )
             for record in records

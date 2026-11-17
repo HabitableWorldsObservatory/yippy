@@ -123,10 +123,8 @@ knots: contrast = leakage_density * core_area / throughput.
 source position. `centre="peak"` follows the local PSF peak. `HalfMaximum(f)`
 selects the connected core above fraction `f` of its peak. Both integrate
 planet and stellar intensity over the same region and have identical mean
-and variance moments. `Matched()` uses native PSF samples divided by the
-band-limited subpixel peak. Mean collecting area is pixel area times
-`sum(w)`, and variance area is pixel area times `sum(w**2)`. The same weight
-powers select the corresponding planet and stellar moments.
+and variance moments. For inverse-variance photometry, pass `Matched()` to
+`optixstuff.prepare_aperture` and supply the scene rates at the exposure query.
 
 Default records measure the shipped non-negative off-axis samples. For
 standalone aperture measurements on another separation axis, use
@@ -162,9 +160,7 @@ coro.dump_ayo_csv("output.csv")
 
 `jaxedith.PostProcessing.speckle_residual_fraction` owns the residual fraction
 `1 / ppf`. Exports use the first prepared record and only apply a floor when
-explicitly requested. For `Matched()`, the AYO core throughput column gives
-`sum(w*p)` and the default aperture-mean point-source contrast gives
-`sum(w*s)/sum(w*p)` at measured knots. The noise-floor column gives the
+explicitly requested. The noise-floor column gives the
 exported contrast divided by `ppf`. Sky transmission is independent of the aperture.
 
 ## Example data

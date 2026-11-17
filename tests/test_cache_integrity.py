@@ -61,11 +61,11 @@ def test_circular_centres_have_distinct_complete_cache_records(
         path = obj._perf_dir / obj._perf_filename()
         paths.append(path)
         header = fits.getheader(path)
-        assert header["PERFVER"] == 6
+        assert header["PERFVER"] == 7
         assert json.loads(header["RULEJSON"])["centre"] == centre
         identity = json.loads(header["CACHEID"])
         assert identity["rule"]["centre"] == centre
-        assert float.fromhex(identity["performance_record"]) == 6
+        assert float.fromhex(identity["performance_record"]) == 7
         assert record.rule.centre == centre
     assert paths[0] != paths[1]
     assert all(p.exists() for p in paths)
@@ -98,10 +98,10 @@ def test_circular_centres_have_distinct_complete_cache_records(
             assert getattr(loaded, name) == getattr(original, name)
     legacy = tmp_path / "legacy.fits"
     with fits.open(paths[0]) as hdus:
-        hdus[0].header["PERFVER"] = 5
+        hdus[0].header["PERFVER"] = 6
         hdus.writeto(legacy)
     assert read_performance_cache_key(legacy) is None
-    with pytest.raises(ValueError, match="PERFVER=6"):
+    with pytest.raises(ValueError, match="PERFVER=7"):
         load_coro_performance_from_fits(legacy.name, legacy.parent)
 
 

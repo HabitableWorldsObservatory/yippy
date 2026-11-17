@@ -12,7 +12,7 @@ import numpy as np
 from hwoutils.grids import Image
 from hwoutils.radial import radial_profile
 from lod_unit import lod
-from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, RecordRule
 from optixstuff.performance import (
     CORE_OVERSAMPLE,
     PerformanceCurves,
@@ -143,7 +143,7 @@ class _YIPData:
                 conserving total flux. The pixel_scale_arcsec will be updated
                 accordingly.
                 Default is None (no downsampling).
-            rule: Static Circular, HalfMaximum or Matched photometric rule.
+            rule: Static Circular or HalfMaximum photometric rule.
             leakage_rule: aperture_mean or azimuthal_ring_mean for the density.
             interpolation (str):
                 Off-axis backend: blend (default), legacy_blend, auto, or strict
@@ -791,6 +791,8 @@ class _YIPData:
         overriding their physical definitions.
         """
         rule = self.rule if rule is None else rule
+        if not isinstance(rule, RecordRule):
+            raise TypeError("Performance records require Circular or HalfMaximum")
         leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
         diameter = (
             float(self.stellar_intens.diams[0].value)

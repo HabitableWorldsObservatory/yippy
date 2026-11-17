@@ -7,7 +7,6 @@ import astropy.units as u
 import equinox as eqx
 import numpy as np
 from hwoutils.grids import Image
-from optixstuff.apertures import Matched
 from optixstuff.performance import performance_curves
 
 from yippy.export import export_ayo_csv, export_exosims
@@ -143,20 +142,19 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
     coro = eqx.tree_at(lambda c: c.yip_path, syn_coro_1d, tmp_path)
     updated = replace(
         coro.curves(),
-        rule=Matched(),
         separation_lod=np.array([1.0, 3.0]),
         throughput=np.array([0.2, 0.6]),
-        throughput_variance=np.array([0.1, 0.3]),
+        throughput_variance=np.array([0.2, 0.6]),
         core_area_lod2=np.array([1.0, 1.0]),
-        core_area_variance_lod2=np.array([0.5, 0.5]),
+        core_area_variance_lod2=np.array([1.0, 1.0]),
         leakage_fraction=np.array([1e-08, 1e-10]),
-        leakage_fraction_variance=np.array([2e-09, 2e-11]),
+        leakage_fraction_variance=np.array([1e-08, 1e-10]),
         leakage_density_lod2=np.array([1e-08, 1e-10]),
-        leakage_density_variance_lod2=np.array([4e-09, 4e-11]),
+        leakage_density_variance_lod2=np.array([1e-08, 1e-10]),
         raw_contrast=np.array([1e-11, 1e-13]),
     )
     coro = eqx.tree_at(lambda c: c._records, coro, (updated,))
-    record = coro.curves(Matched())
+    record = coro.curves()
     separations = np.array([2.0])
     tolerance = 16 * np.finfo(np.float64).eps
     np.testing.assert_allclose(
