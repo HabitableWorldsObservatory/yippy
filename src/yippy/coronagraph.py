@@ -8,9 +8,9 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image, PixelGrid
+from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.spectral import Band
-from optixstuff.apertures import DEFAULT_APERTURE_RULE
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule
 from optixstuff.coronagraph import AbstractTableCoronagraph
 from optixstuff.performance import PerformanceCurves, leakage_weights
 from optixstuff.primary import SimplePrimary
@@ -183,11 +183,31 @@ class Coronagraph(AbstractTableCoronagraph):
 
     def curves(self, rule=DEFAULT_APERTURE_RULE, *, leakage_rule="aperture_mean"):
         """Select one prepared record; requesting an unprepared rule raises."""
-        for record in self._records:
-            if record.rule == rule and record.leakage_rule == leakage_rule:
-                return record
-        raise ValueError(
-            "No prepared record; supply rules and leakage_rule at construction"
+        record = self._find_record(rule, leakage_rule)
+        if record is None:
+            raise ValueError(
+                "No prepared record; supply rules and leakage_rule at construction"
+            )
+        return record
+
+    def prepared(
+        self, rule: ApertureRule, *, leakage_rule="aperture_mean"
+    ) -> tuple["Coronagraph", PerformanceCurves]:
+        """Return this model if ready, or prepare the requested record on the host."""
+        record = self._find_record(rule, leakage_rule)
+        if record is not None:
+            return self, record
+        model = self.with_rules((rule,), leakage_rule=leakage_rule)
+        return model, model.curves(rule, leakage_rule=leakage_rule)
+
+    def _find_record(self, rule, leakage_rule):
+        return next(
+            (
+                record
+                for record in self._records
+                if record.rule == rule and record.leakage_rule == leakage_rule
+            ),
+            None,
         )
 
     def _prepared_leakage_weights(self, rule, leakage_rule):
@@ -203,6 +223,10 @@ class Coronagraph(AbstractTableCoronagraph):
         return self._occultation_record.evaluate(
             "occulter_transmission", separation_lod
         )
+
+    def stellar_frame(self, wavelength_nm) -> Frame:
+        """Return the frame of the native stellar intensity product."""
+        return self.stellar_grid.frame
 
     def _native_stellar_map(self, stellar_diam_lod):
         if hasattr(stellar_diam_lod, "unit"):

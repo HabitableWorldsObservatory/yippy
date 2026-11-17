@@ -39,6 +39,11 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
     other_frame = replace(
         backend.grid.frame, diameter_m=4.0, reference_wavelength_nm=600.0
     )
+    separate_stellar = eqx.tree_at(
+        lambda b: b.stellar_grid, coro, replace(sg, frame=other_frame)
+    )
+    assert separate_stellar.stellar_frame(500.0) == other_frame
+    assert separate_stellar.stellar_frame(500.0) != separate_stellar.grid.frame
     other_grid = replace(target, frame=other_frame)
     np.testing.assert_array_equal(
         coro.stellar_map(500.0, 0.1, grid=other_grid).data,
