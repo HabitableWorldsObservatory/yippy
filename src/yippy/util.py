@@ -101,8 +101,8 @@ def read_performance_cache_key(path: Path) -> str | None:
 
 def load_coro_performance_from_fits(filename: str, indir: Path):
     """Read a complete record; legacy partial tables are not supported."""
-    from .apertures import Circular, HalfMaximum, Matched
-    from .performance import PerformanceCurves
+    from optixstuff.apertures import Circular, HalfMaximum, Matched
+    from optixstuff.performance import PerformanceCurves
 
     with fits.open(Path(indir) / filename) as hdus:
         header = hdus[0].header

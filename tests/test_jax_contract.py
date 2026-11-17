@@ -1,7 +1,6 @@
 """The transformations a caller is entitled to apply to a coronagraph.
 
-``Coronagraph`` is the loader: it holds scipy interpolants and is evaluated
-eagerly. ``EqxCoronagraph`` is the array-only view a consumer calls from inside
+``Coronagraph`` is the immutable table model a consumer calls from inside
 ``jit``, ``vmap`` or ``grad``, and it is the object these transformation tests
 target. Synthesis through ``Coronagraph.offax`` is already JAX-backed, so the
 batching tests use it directly.
@@ -24,7 +23,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from lod_unit import lod
-from optixstuff import YippyCoronagraph
 
 from yippy.performance import stellar_intensity_curves
 
@@ -44,11 +42,11 @@ def test_single_and_batched_synthesis_agree(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.offax.create_psfs(xs, ys).data)
+    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).data)
     assert batched.shape[0] == len(POSITIONS), "the batch lost positions"
 
     for index, (x, y) in enumerate(POSITIONS):
-        single = np.asarray(coro.offax(x * lod, y * lod).data)
+        single = np.asarray(coro._offaxis_backend(x * lod, y * lod).data)
         assert np.allclose(single, batched[index], atol=1e-6 * single.max()), (
             f"batched synthesis disagrees with the single call at ({x}, {y})"
         )
@@ -60,8 +58,8 @@ def test_the_parallel_path_agrees_with_the_batched_one(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.offax.create_psfs(xs, ys).data)
-    parallel = np.asarray(coro.offax.create_psfs_parallel(xs, ys).data)
+    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).data)
+    parallel = np.asarray(coro._offaxis_backend.create_psfs_parallel(xs, ys).data)
     assert np.allclose(batched, parallel, atol=1e-6 * batched.max()), (
         "the parallel path returns different PSFs from the batched path"
     )
@@ -96,7 +94,7 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
 def test_a_traced_separation_runs_and_matches_eager(syn_eqx_1d):
     """The performance curves stay correct when the separation is traced."""
     for name in ("throughput", "raw_contrast", "core_area", "occulter_transmission"):
-        method = getattr(YippyCoronagraph(backend=syn_eqx_1d), name)
+        method = getattr(syn_eqx_1d, name)
         eager = float(method(3.0))
         traced = float(eqx.filter_jit(lambda s: method(s))(jnp.asarray(3.0)))  # noqa: B023
         assert traced == pytest.approx(eager, rel=1e-6), f"{name} under filter_jit"
@@ -113,14 +111,12 @@ def test_vmap_over_separations_equals_a_loop(syn_eqx_1d):
 
     looped = np.array(
         [
-            float(syn_eqx_1d.performance.evaluate("throughput", float(s)))
+            float(syn_eqx_1d.curves().evaluate("throughput", float(s)))
             for s in separations
         ]
     )
     mapped = np.asarray(
-        jax.vmap(lambda s: syn_eqx_1d.performance.evaluate("throughput", s))(
-            separations
-        )
+        jax.vmap(lambda s: syn_eqx_1d.curves().evaluate("throughput", s))(separations)
     )
 
     assert np.allclose(looped, mapped, rtol=1e-6), (
@@ -155,7 +151,7 @@ def test_gradients_agree_with_a_central_difference(syn_eqx_1d, name):
     shape of test this suite exists to avoid; the constancy itself is checked
     separately below.
     """
-    method = getattr(YippyCoronagraph(backend=syn_eqx_1d), name)
+    method = getattr(syn_eqx_1d, name)
 
     for separation in (2.25, 3.25, 4.25):
         analytic = float(
@@ -185,7 +181,7 @@ def test_core_area_is_constant_when_every_psf_has_the_same_shape(syn_eqx_1d):
     """
     areas = np.array(
         [
-            float(syn_eqx_1d.performance.evaluate("core_area_lod2", s))
+            float(syn_eqx_1d.curves().evaluate("core_area_lod2", s))
             for s in (1.5, 2.5, 3.5, 4.5)
         ]
     )
@@ -207,8 +203,8 @@ def test_the_same_position_gives_identical_psfs_to_roundoff(syn_coro_1d):
     margin for that while any stateful error is far larger.
     """
     coro = syn_coro_1d
-    first = np.asarray(coro.offax(2.0 * lod, 1.0 * lod).data)
-    second = np.asarray(coro.offax(2.0 * lod, 1.0 * lod).data)
+    first = np.asarray(coro._offaxis_backend(2.0 * lod, 1.0 * lod).data)
+    second = np.asarray(coro._offaxis_backend(2.0 * lod, 1.0 * lod).data)
     assert np.allclose(first, second, rtol=0, atol=1e-6 * first.max()), (
         "repeated synthesis differs beyond floating-point roundoff"
     )

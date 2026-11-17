@@ -7,6 +7,7 @@ import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -16,11 +17,12 @@ import pytest
 from astropy.io import fits
 from hwoutils.grids import PixelGrid, resample
 from lod_unit import lod
-from optixstuff import YippyCoronagraph
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 
-from yippy import Coronagraph, EqxCoronagraph, SincOptions
+from yippy import Coronagraph, SincOptions
+from yippy._yip import _YIPData
+from yippy.performance import stellar_intensity_curves
 from yippy.sinc_delivery import detect_delivery, file_sha256, load_delivery
 from yippy.sinc_routing import SincExtraMissing, route_interpolation
 from yippy.util import cache_identity_digest
@@ -46,14 +48,18 @@ def admitted(tmp_path_factory):
             raise AssertionError("versioned delivery entered legacy OffJAX intake")
 
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr("yippy.coronagraph.OffJAX", reject_legacy)
+            patch.setattr("yippy._yip.OffJAX", reject_legacy)
             coro = Coronagraph(root, interpolation="sinc")
         yield coro
     jax.clear_caches()
 
 
 def test_default_and_missing_extra(tmp_path, monkeypatch):
-    """Fails if default blend imports sinc or missing-extra auto changes images."""
+    """Fails if explicit blends import sinc, lose provenance, or accept bounds.
+
+    Exact-algebra basis: both blend selectors and missing-extra auto render
+    identical samples; bounded requests must reject before optional imports.
+    """
     synthetic_1d = write_synthetic_yip(
         tmp_path / "legacy", npix=4, max_offset_lod=1.0, offset_step_lod=0.5
     )
@@ -67,18 +73,29 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(importlib, "import_module", unavailable)
     blend = Coronagraph(synthetic_1d.path)
     auto = Coronagraph(synthetic_1d.path, interpolation="auto")
+    explicit = Coronagraph(synthetic_1d.path, interpolation="legacy_blend")
     np.testing.assert_array_equal(
-        blend.create_psf(0.3, 0.2).data, auto.create_psf(0.3, 0.2).data
+        explicit.source_psfs(None, 0.3, 0.2).data,
+        blend.source_psfs(None, 0.3, 0.2).data,
     )
-    assert auto.create_psf(0.3, 0.2).reconstruction == "band_limited"
+    assert explicit.interpolation_info.requested == "legacy_blend"
+    assert explicit.interpolation_info.effective == "blend"
+    bounded = SincOptions(policy=SimpleNamespace(mode="bounded"))
+    for selector in ("blend", "legacy_blend"):
+        with pytest.raises(ValueError, match="Bounded policies require sinc"):
+            route_interpolation(synthetic_1d.path, selector, bounded, None)
+    np.testing.assert_array_equal(
+        blend.source_psfs(None, 0.3, 0.2).data, auto.source_psfs(None, 0.3, 0.2).data
+    )
+    assert auto.source_psfs(None, 0.3, 0.2).reconstruction == "band_limited"
     assert (
-        auto.create_psfs(jnp.array([0.3]), jnp.array([0.2])).reconstruction
+        auto.source_psfs(None, jnp.array([0.3]), jnp.array([0.2])).reconstruction
         == "band_limited"
     )
-    assert not auto.create_psf_with_info(np.nan, 0.0).accepted
-    assert np.isnan(auto.create_psf(np.nan, 0.0).data).all()
+    assert not auto.source_psfs_with_info(np.nan, 0.0).accepted[0]
+    assert np.isnan(auto.source_psfs(None, np.nan, 0.0).data).all()
     assert auto.interpolation_info.reasons == ("EXTRA_MISSING",)
-    assert "interpolation" not in blend._datacube_identity()
+    assert "interpolation" not in _YIPData(synthetic_1d.path)._datacube_identity()
     with pytest.raises(SincExtraMissing, match=r"yippy\[sinc\]"):
         Coronagraph(synthetic_1d.path, interpolation="sinc")
 
@@ -137,6 +154,14 @@ def test_full_blend_extra_isolation(tmp_path, monkeypatch):
     monkeypatch.setattr(importlib, "import_module", unavailable)
     delivery, blend, _ = route_interpolation(tmp_path, "blend", None, None)
     _, fallback, info = route_interpolation(tmp_path, "auto", None, None)
+    _, explicit, explicit_info = route_interpolation(
+        tmp_path, "legacy_blend", None, None
+    )
+    assert explicit_info.requested == "legacy_blend"
+    assert explicit_info.effective == "blend"
+    np.testing.assert_array_equal(
+        explicit.create_psf(0.0, 0.0).data, blend.create_psf(0.0, 0.0).data
+    )
     assert info.reasons == ("EXTRA_MISSING",)
     expected = delivery.nodes[16 * 33 + 16] * (2.0 * 0.25**2)
     np.testing.assert_allclose(blend.create_psf(0.0, 0.0).data, expected, rtol=2e-7)
@@ -175,21 +200,27 @@ def test_product_selection(tmp_path):
 
 def test_quadrant_native_intake(admitted):
     """Fails if manifest intake applies legacy center, mirrors or float casting."""
-    grid = admitted.offax.reader.grid
+    grid = admitted._offaxis_backend.reader.grid
+    assert admitted.bandpass is None
     assert grid.intensity.dtype == jnp.float32
     assert grid.intensity.shape == (1, 18, 18, 4, 4)
     np.testing.assert_array_equal(
         (grid.products.pixels.center_x, grid.products.pixels.center_y), [1.5, 1.5]
     )
-    assert admitted.offax.get_psf_by_offset_idx(0, 0).reconstruction == "band_limited"
+    assert (
+        admitted._offaxis_backend.get_psf_by_offset_idx(0, 0).reconstruction
+        == "band_limited"
+    )
 
 
 def test_reads_units_refusals(admitted):
     """Fails on integral/mean conversion, clipped sinc output or NaN acceptance."""
     sc = pytest.importorskip("sinchole")
-    reader = admitted.offax.reader
+    reader = admitted._offaxis_backend.reader
     direct = reader.read(jnp.array([0.07, -0.04]), jnp.int32(0))
-    actual = admitted.create_psf_with_info(0.07, -0.04)
+    actual = jax.tree.map(
+        lambda value: value[0], admitted.source_psfs_with_info(0.07, -0.04)
+    )
     np.testing.assert_allclose(actual.intensity, direct.intensity, atol=1e-18)
     assert actual.selected_backend == 1
     assert actual.ledger.target_id.endswith(
@@ -200,14 +231,16 @@ def test_reads_units_refusals(admitted):
     # requires fresh admission and evidence for changed samples.
     signed_backend = eqx.tree_at(
         lambda b: b.reader.grid.intensity,
-        admitted.offax,
-        -admitted.offax.reader.grid.intensity,
+        admitted._offaxis_backend,
+        -admitted._offaxis_backend.reader.grid.intensity,
     )
     np.testing.assert_allclose(
         signed_backend.create_psf(0.07, -0.04).data, -direct.intensity, atol=1e-18
     )
     for measure, conversion in (("integral", 2.0), ("mean", 2.0 * 0.25**2)):
-        d = admitted._sinc_delivery
+        d = load_delivery(
+            admitted.yip_path, detect_delivery(admitted.yip_path), SincOptions()
+        )
         metadata = copy.deepcopy(d.manifest)
         metadata["sample_kind"] = measure
         metadata["normalization"]["kind"] = "unocculted_peak"
@@ -233,34 +266,39 @@ def test_reads_units_refusals(admitted):
             direct.intensity * conversion,
             atol=1e-18,
         )
-    refused = admitted.create_psf_with_info(np.nan, 0.0)
+    refused = jax.tree.map(
+        lambda value: value[0], admitted.source_psfs_with_info(np.nan, 0.0)
+    )
     assert not refused.accepted
     assert int(refused.reason_bits) & int(sc.Reason.NONFINITE_QUERY)
     with pytest.raises(sc.ReadRefused):
-        admitted.create_psf(np.nan, 0.0)
-    assert np.isnan(jax.jit(admitted.create_psf)(np.nan, 0.0).data).all()
-    batch = admitted.create_psfs_with_info(
+        admitted.source_psfs(None, np.nan, 0.0)
+    assert np.isnan(eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).data).all()
+    batch = admitted.source_psfs_with_info(
         jnp.array([0.07, np.nan]), jnp.array([-0.04, 0.0])
     )
     np.testing.assert_array_equal(batch.accepted, [True, False])
-    assert admitted.create_psfs(jnp.empty(0), jnp.empty(0)).data.shape == (0, 4, 4)
-    assert admitted.create_psf(0.07, -0.04).reconstruction == "band_limited"
+    assert admitted.source_psfs(None, jnp.empty(0), jnp.empty(0)).data.shape == (
+        0,
+        4,
+        4,
+    )
+    assert admitted.source_psfs(None, 0.07, -0.04).reconstruction == "band_limited"
     assert (
-        admitted.create_psfs(jnp.array([0.07]), jnp.array([-0.04])).reconstruction
+        admitted.source_psfs(None, jnp.array([0.07]), jnp.array([-0.04])).reconstruction
         == "band_limited"
     )
 
 
 def test_stellar_frame_and_eqx(admitted):
     """Fails if stellar pitch is overwritten or reader tables hide in closures."""
-    view = EqxCoronagraph(yippy_coro=admitted)
-    assert np.ptp(view.stellar_intens(0.0).data) > 0
-    # Independent NumPy Fourier series integrated over target pixel boxes.
-    # Even equal-pitch boxes smooth density samples. The 1e-14 bound allows
-    # float64 DFT summation and exponential roundoff.
-    # The stellar map declares outside="reflect": the series is that of the
-    # even extension [d, d[::-1]] on each axis (period 8, zero Nyquist mode).
-    stellar = view.stellar_intens(0.0)
+    view = admitted
+    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    assert np.ptp(view.stellar_map(None, 0.0).data) > 0
+    # Independent Fourier series integrated over target pixel boxes.
+    # The 1e-14 bound allows float64 DFT and exponential roundoff.
+    # Reflect extension doubles each axis (period 8, zero Nyquist mode).
+    stellar = view.stellar_map(None, 0.0)
     assert stellar.outside == "reflect"
     data = np.asarray(stellar.data)
     even = np.concatenate([data, data[::-1]], axis=0)
@@ -275,7 +313,7 @@ def test_stellar_frame_and_eqx(admitted):
         basis[:, 4] = np.cos(phase[:, 4])
         basis *= np.sinc(frequencies * ratio)
         expected = (basis @ spectrum @ basis.T).real / 8**2 * ratio**2
-        sampled = YippyCoronagraph(backend=view).stellar_map(
+        sampled = view.stellar_map(
             500.0,
             0.0,
             grid=PixelGrid.regular((4, 4), pitch, "lod", frame=view.stellar_grid.frame),
@@ -284,47 +322,43 @@ def test_stellar_frame_and_eqx(admitted):
         np.testing.assert_allclose(sampled.data, expected, rtol=1e-14, atol=0)
         wrong = expected * (0.4 / 0.25) ** 2
         assert not np.allclose(expected, wrong, atol=0.0, rtol=1e-3)
-    assert view.stellar_pixel_scale_lod == 0.4
-    assert view.stellar_frame == (400.0, 6.0)
-    assert admitted.offaxis_header.lambda0.to_value("nm") == pytest.approx(500.0)
-    assert view.pixel_scale_lod == 0.25
-    assert admitted.header.pixscale.value == 0.4
-    np.testing.assert_allclose(admitted.core_intensity_separations[1], 0.1)
+    assert view.stellar_grid.step == 0.4
+    assert view.stellar_grid.frame.reference_wavelength_nm == 400.0
+    assert view.stellar_grid.frame.diameter_m == 6.0
+    assert view.grid.frame.reference_wavelength_nm == pytest.approx(500.0)
+    assert view.grid.step == 0.25
+    assert view.header.pixscale.value == 0.4
+    np.testing.assert_allclose(stellar_intensity_curves(view).separation_lod[1], 0.1)
     np.testing.assert_allclose(
-        view.stellar_intens(0.0).data,
-        admitted.stellar_intens(0.0 * lod).data,
+        view.stellar_map(None, 0.0).data,
+        host.stellar_intens(0.0 * lod).data,
         rtol=1e-14,
     )
+    sky_grid = PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_trans.grid.frame)
     np.testing.assert_allclose(
-        YippyCoronagraph(backend=view)
-        .background_transmission(
-            500.0, grid=PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_grid.frame)
-        )
-        .data,
-        admitted.sky_trans().data,
+        view.background_transmission(500.0, grid=sky_grid).data,
+        resample(host.sky_trans(), sky_grid).data,
         atol=1e-14,
     )
     assert any(
-        leaf is admitted.offax.reader.grid.intensity for leaf in jax.tree.leaves(view)
+        leaf is view._offaxis_backend.reader.grid.intensity
+        for leaf in jax.tree.leaves(view)
     )
-
     traces = []
 
     @eqx.filter_jit
     def read(module):
         traces.append(None)
-        return module.create_psf(0.07, -0.04).data
+        return module.source_psfs(None, 0.07, -0.04).data
 
     expected = read(view)
     changed = eqx.tree_at(
         lambda m: m._offaxis_backend.reader.grid.intensity,
         view,
-        admitted.offax.reader.grid.intensity * 2,
+        view._offaxis_backend.reader.grid.intensity * 2,
     )
     np.testing.assert_allclose(read(changed), expected * 2, atol=1e-18)
     assert len(traces) == 1
-    with pytest.raises(ValueError, match="Conflicting"):
-        EqxCoronagraph(yippy_coro=admitted, interpolation="blend")
 
 
 @pytest.mark.parametrize("defect", ["missing", "failed", "declaration", "center"])
@@ -360,8 +394,9 @@ def test_quadrant_precedence(tmp_path, defect):
         assert not caught.value.reason_bits & int(
             sc.Reason.PRECISION_UNAVAILABLE | sc.Reason.FALLBACK_USED
         )
-    with pytest.raises(ValueError, match="midpoint-aware"):
-        route_interpolation(tmp_path, "blend", None, None)
+    for selector in ("blend", "legacy_blend"):
+        with pytest.raises(ValueError, match="midpoint-aware"):
+            route_interpolation(tmp_path, selector, None, None)
 
 
 def test_independent_checks(admitted, tmp_path):
@@ -426,47 +461,42 @@ def test_auto_fallback_and_bounded(tmp_path):
 
 def test_table_consumer(admitted):
     """Fails if the table consumer rescales densities or resamples off its frame."""
-    pytest.importorskip("optixstuff")
-
-    view = EqxCoronagraph(yippy_coro=admitted)
-    consumer = YippyCoronagraph(backend=view)
-    # The record already stores a density per (lambda/D)^2: no pitch factor.
-    density = view.performance.evaluate("leakage_density_lod2", 0.0)
+    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    # The record stores density per (lambda/D)^2: no pitch factor.
+    density = host.performance.evaluate("leakage_density_lod2", 0.0)
     np.testing.assert_allclose(
-        consumer.curves().evaluate("leakage_density_lod2", 0.0) / 30.0,
+        admitted.curves().evaluate("leakage_density_lod2", 0.0) / 30.0,
         density / 30.0,
         rtol=0,
     )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
     for pitch in (0.25, 0.4):
-        # Each product keeps its own frame; targets share it.
-        stellar = view.stellar_intens(0.0)
+        stellar = admitted.stellar_map(None, 0.0)
         grid = PixelGrid.focal(4, pitch, stellar.grid.frame)
         np.testing.assert_array_equal(
-            consumer.stellar_map(500.0, 0.0, grid=grid).data,
+            admitted.stellar_map(500.0, 0.0, grid=grid).data,
             resample(stellar, grid).data,
         )
-        grid = PixelGrid.focal(4, pitch, view.sky_trans.grid.frame)
+        grid = PixelGrid.focal(4, pitch, admitted.sky_trans.grid.frame)
         np.testing.assert_array_equal(
-            consumer.background_transmission(500.0, grid=grid).data,
-            resample(view.sky_trans, grid).data,
+            admitted.background_transmission(500.0, grid=grid).data,
+            resample(admitted.sky_trans, grid).data,
         )
-        grid = PixelGrid.focal(4, pitch, view.grid.frame)
-        # The table boundary integrates the declared density over target
-        # pixels, including at equal pitch; native lod is wavelength-free.
-        expected = resample(admitted.create_psfs(x, y), grid).data
-        result = consumer.source_psfs(500.0, x, y, grid=grid).data
+        grid = PixelGrid.focal(4, pitch, admitted.grid.frame)
+        expected = resample(admitted._offaxis_backend.create_psfs(x, y), grid).data
+        result = admitted.source_psfs(500.0, x, y, grid=grid).data
         np.testing.assert_allclose(result, expected, atol=1e-18)
         np.testing.assert_array_equal(
-            consumer.source_psfs(600.0, x, y, grid=grid).data, result
+            admitted.source_psfs(600.0, x, y, grid=grid).data, result
         )
 
 
 def test_cache_identity_and_selections(admitted, monkeypatch):
     """Fails if route provenance collides or cube cache loses refusal selections."""
-    original = admitted.interpolation_info
-    base_cube = admitted._datacube_cache_path
-    base_perf = admitted._perf_filename()
+    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    original = host.interpolation_info
+    base_cube = host._datacube_cache_path
+    base_perf = host._perf_filename()
     for key in (
         "manifest_sha256",
         "product_id",
@@ -476,7 +506,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         "kernel_profile",
         "receipt_id",
     ):
-        changed = copy.copy(admitted)
+        changed = copy.copy(host)
         changed.interpolation_info = replace(original, **{key: "changed"})
         assert changed._datacube_cache_path != base_cube
         assert changed._perf_filename() != base_perf
@@ -484,7 +514,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         assert not (changed._perf_dir / changed._perf_filename()).exists()
         assert cache_identity_digest(
             changed._auto_perf_identity()
-        ) != cache_identity_digest(admitted._auto_perf_identity())
+        ) != cache_identity_digest(host._auto_perf_identity())
         changed._load_or_compute_performance()
         assert (changed._perf_dir / changed._perf_filename()).exists()
         changed.create_psf_datacube(batch_size=4)
@@ -501,26 +531,28 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         stamp = perf_path.stat().st_mtime_ns
         changed._load_or_compute_performance()
         assert perf_path.stat().st_mtime_ns == stamp
-    admitted.create_psf_datacube(batch_size=4)
-    before = np.asarray(admitted.psf_datacube)
-    selected = admitted.psf_datacube_info["selected_backend"].copy()
-    admitted._create_psf_datacube_gpu(batch_size=4)
-    np.testing.assert_array_equal(admitted.psf_datacube, before)
+    host.create_psf_datacube(batch_size=4)
+    before = np.asarray(host.psf_datacube)
+    selected = host.psf_datacube_info["selected_backend"].copy()
+    host._create_psf_datacube_gpu(batch_size=4)
+    np.testing.assert_array_equal(host.psf_datacube, before)
+    np.testing.assert_array_equal(host.psf_datacube_info["selected_backend"], selected)
     np.testing.assert_array_equal(
-        admitted.psf_datacube_info["selected_backend"], selected
-    )
-    np.testing.assert_array_equal(
-        admitted.psf_datacube_info["accepted"], [[True, False], [True, False]]
+        host.psf_datacube_info["accepted"], [[True, False], [True, False]]
     )
     for row, y in enumerate((0.125, 0.375)):
         np.testing.assert_allclose(
-            before[row, 0], admitted.create_psf(0.125, y).data, rtol=1e-14
+            before[row, 0], host.offax.create_psf(0.125, y).data, rtol=1e-14
         )
         assert np.isfinite(before[row, 0]).all()
         assert np.isnan(before[row, 1]).all()
     base_cube.with_suffix(".status.npz").unlink()
-    admitted.create_psf_datacube(batch_size=4)
+    host.create_psf_datacube(batch_size=4)
     assert base_cube.with_suffix(".status.npz").exists()
+
+    frozen = admitted.create_psf_datacube(batch_size=4)
+    assert admitted.psf_datacube is None
+    np.testing.assert_array_equal(frozen.psf_datacube, host.psf_datacube)
 
 
 @pytest.mark.slow
@@ -534,67 +566,34 @@ def test_public_delivery(tmp_path):
         root = tmp_path / "delivery"
         shutil.copytree(configured, root, ignore=shutil.ignore_patterns("yippy_cache"))
         coro = Coronagraph(root, interpolation="sinc")
-        view = EqxCoronagraph(yippy_coro=coro)
+        host = _YIPData(root, interpolation="sinc")
         np.testing.assert_allclose(
-            view.create_psf(4.0, 5.5).data, coro.create_psf(4.0, 5.5).data, rtol=1e-14
-        )
-        np.testing.assert_allclose(
-            view.stellar_intens(0.0).data,
-            coro.stellar_intens(0.0 * lod).data,
+            coro.source_psfs(None, 4.0, 5.5).data[0],
+            host.offax.create_psf(4.0, 5.5).data,
             rtol=1e-14,
         )
         np.testing.assert_allclose(
-            YippyCoronagraph(backend=view)
-            .background_transmission(
-                500.0,
-                grid=PixelGrid.regular(
-                    view.sky_trans.data.shape,
-                    view.sky_pixel_scale_lod,
-                    "lod",
-                    frame=view.sky_grid.frame,
-                ),
-            )
-            .data,
-            coro.sky_trans().data,
+            coro.stellar_map(None, 0.0).data,
+            host.stellar_intens(0.0 * lod).data,
+            rtol=1e-14,
+        )
+        assert coro.stellar_grid.frame != coro.grid.frame
+        np.testing.assert_allclose(
+            coro.background_transmission(500.0, grid=coro.sky_trans.grid).data,
+            resample(host.sky_trans(), coro.sky_trans.grid).data,
             atol=1e-14,
         )
-        offaxis_frame = (
-            float(coro.offaxis_header.lambda0.to_value("nm")),
-            float(coro.offaxis_header.diameter.to_value("m")),
+        np.testing.assert_allclose(
+            coro.stellar_map(500.0, 0.0, grid=coro.stellar_grid).data,
+            resample(host.stellar_intens(0.0 * lod), coro.stellar_grid).data,
+            atol=1e-14,
         )
-        assert view.stellar_frame != offaxis_frame
-        if importlib.util.find_spec("optixstuff") is not None:
-            consumer = YippyCoronagraph(backend=view)
-            np.testing.assert_allclose(
-                consumer.stellar_map(
-                    500.0,
-                    0.0,
-                    grid=PixelGrid.regular(
-                        view.stellar_intens(0.0).data.shape,
-                        view.stellar_pixel_scale_lod,
-                        "lod",
-                        frame=view.stellar_grid.frame,
-                    ),
-                ).data,
-                resample(coro.stellar_intens(0.0 * lod), view.stellar_grid).data,
-                atol=1e-14,
-            )
-            x, y = jnp.array([4.0]), jnp.array([5.5])
-            np.testing.assert_allclose(
-                consumer.source_psfs(
-                    500.0,
-                    x,
-                    y,
-                    grid=PixelGrid.regular(
-                        view.psf_shape,
-                        view.pixel_scale_lod,
-                        "lod",
-                        frame=consumer.grid.frame,
-                    ),
-                ).data,
-                resample(coro.create_psfs(x, y), view.grid).data,
-                rtol=1e-14,
-            )
+        x, y = jnp.array([4.0]), jnp.array([5.5])
+        np.testing.assert_allclose(
+            coro.source_psfs(500.0, x, y, grid=coro.grid).data,
+            resample(host.offax.create_psfs(x, y), coro.grid).data,
+            rtol=1e-14,
+        )
         metadata = json.loads((root / "sinc-delivery.json").read_text())
         coords = np.genfromtxt(root / "starter_checks.csv", names=True, delimiter=",")
         points = np.column_stack((coords["x_lod"], coords["y_lod"]))
@@ -613,7 +612,7 @@ def test_public_delivery(tmp_path):
             peak = image[region].max()
             assert peak > 0
             assert (
-                np.max(np.abs(np.asarray(coro.create_psf(*q).data) - image))
+                np.max(np.abs(np.asarray(coro.source_psfs(None, *q).data[0]) - image))
                 <= 1e-5 * peak
             )
 
@@ -822,7 +821,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
         )
         with jax.enable_x64(gate != "precision"):
             objects = [
-                Coronagraph(tmp_path, interpolation="auto", sinc_options=o)
+                _YIPData(tmp_path, interpolation="auto", sinc_options=o)
                 for o in requests
             ]
             assert all(c.interpolation_info.effective == "blend" for c in objects)
@@ -850,7 +849,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
                 # Reconstructing the same request also reuses its performance entry.
                 perf_path = coro._perf_dir / coro._perf_filename()
                 stamp = perf_path.stat().st_mtime_ns
-                again = Coronagraph(
+                again = _YIPData(
                     tmp_path, interpolation="auto", sinc_options=requests[i]
                 )
                 assert again._perf_filename() == coro._perf_filename()
@@ -890,9 +889,8 @@ def test_intake_finite_error_units(tmp_path, measure, factor):
 
 def test_spatial_cross_frame_aperture():
     """The stellar aperture maps pitch and wavelength before integrating density."""
+    from optixstuff.performance import circular_aperture
     from scipy.special import j1
-
-    from yippy.performance import circular_aperture
 
     with jax.enable_x64():
         n, radius, level = 12, 2.0, 1e-10
@@ -929,14 +927,15 @@ def test_spatial_cross_frame_aperture():
 def test_policy_cache_generation(admitted, budget):
     """Bounded policies identify generated cubes and reloaded performance separately."""
     sc = pytest.importorskip("sinchole")
-    changed = copy.copy(admitted)
+    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    changed = copy.copy(host)
     changed.offax = eqx.tree_at(
         lambda b: b.reader.policy,
-        admitted.offax,
+        host.offax,
         sc.ReadPolicy("bounded", jnp.asarray(budget)),
     )
-    assert changed._datacube_cache_path != admitted._datacube_cache_path
-    assert changed._perf_filename() != admitted._perf_filename()
+    assert changed._datacube_cache_path != host._datacube_cache_path
+    assert changed._perf_filename() != host._perf_filename()
     changed._load_or_compute_performance()
     changed._create_psf_datacube_gpu(batch_size=4)
     before = np.asarray(changed.psf_datacube)

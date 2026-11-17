@@ -1,87 +1,21 @@
-"""yippy allows for a coronagraph object to be created from a yield input package."""
+"""Yield Input Packages as immutable coronagraph models."""
+
+from ._version import __version__
+from .coronagraph import Coronagraph
+from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
+from .header import lod_inscribed_to_circumscribed
+from .interpolation import SincOptions
+from .logger import logger
 
 __all__ = [
-    "CORE_OVERSAMPLE",
-    "CORE_STEP_LOD",
-    "CORE_WINDOW_LOD",
-    "DEFAULT_APERTURE_RULE",
-    "PEAK_SEARCH_RADIUS_LOD",
-    "PROFILE_STEP_PIX",
-    "ApertureRule",
-    "Circular",
     "Coronagraph",
-    "EqxCoronagraph",
-    "HalfMaximum",
-    "Matched",
-    "PerformanceCurves",
     "SincOptions",
     "__version__",
-    "azimuthal_mean_profile",
     "cache_dir",
-    "circular_aperture",
-    "compute_all_performance_curves",
-    "compute_core_area_curve",
-    "compute_core_mean_intensity_curve",
-    "compute_occ_trans_curve",
-    "compute_raw_contrast_curve",
-    "compute_throughput_curve",
-    "compute_truncation_core_area_curve",
-    "compute_truncation_curves",
-    "compute_truncation_throughput_curve",
-    "core_mean_intensity_profile",
-    "core_separations",
-    "core_subpixel_window",
-    "core_window_half_width_pix",
     "fetch_yip",
     "list_yips",
     "lod_inscribed_to_circumscribed",
     "logger",
-    "performance_curves",
-    "profile_radii",
-    "stellar_intensity_curves",
-    "truncation_core",
     "yip_exists",
     "yip_info",
 ]
-
-from ._version import __version__
-from .apertures import (
-    DEFAULT_APERTURE_RULE,
-    ApertureRule,
-    Circular,
-    HalfMaximum,
-    Matched,
-)
-from .coronagraph import Coronagraph
-from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
-from .eqx_coronagraph import EqxCoronagraph
-from .header import lod_inscribed_to_circumscribed
-from .interpolation import SincOptions
-from .logger import logger
-from .performance import (
-    CORE_OVERSAMPLE,
-    CORE_STEP_LOD,
-    CORE_WINDOW_LOD,
-    PEAK_SEARCH_RADIUS_LOD,
-    PROFILE_STEP_PIX,
-    PerformanceCurves,
-    azimuthal_mean_profile,
-    circular_aperture,
-    compute_all_performance_curves,
-    compute_core_area_curve,
-    compute_core_mean_intensity_curve,
-    compute_occ_trans_curve,
-    compute_raw_contrast_curve,
-    compute_throughput_curve,
-    compute_truncation_core_area_curve,
-    compute_truncation_curves,
-    compute_truncation_throughput_curve,
-    core_mean_intensity_profile,
-    core_separations,
-    core_subpixel_window,
-    core_window_half_width_pix,
-    performance_curves,
-    profile_radii,
-    stellar_intensity_curves,
-    truncation_core,
-)

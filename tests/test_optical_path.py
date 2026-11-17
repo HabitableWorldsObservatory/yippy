@@ -1,0 +1,131 @@
+"""YIP table models compose with the shared optical hardware path."""
+
+import equinox as eqx
+import jax.numpy as jnp
+import optixstuff as ox
+import pytest
+
+
+@pytest.fixture(scope="session")
+def optical_path(cached_diameter_coro):
+    """Full OpticalPath with primary, coronagraph, detector, and a filter."""
+    # The primary takes the coronagraph's diameter: its tables fix lambda/D.
+    primary = ox.SimplePrimary(
+        circumscribed_diameter_m=cached_diameter_coro.grid.frame.diameter_m,
+        collecting_area_m2=3.141592653589793 * 9 * (1 - 0.14**2),
+    )
+    detector = ox.Detector(
+        pixel_scale_arcsec=0.010,
+        shape=(100, 100),
+        qe=0.9,
+        dark_current_e_per_pixel_s=3e-5,
+        read_noise_e_rms=0.0,
+        clock_induced_charge_e_per_pixel_frame=1.3e-3,
+        read_time_s=1000.0,
+        survival_fraction=1.0,
+    )
+    optics_filter = ox.ConstantThroughput(throughput=0.5, name="optics")
+    return ox.OpticalPath(
+        primary=primary,
+        coronagraph=cached_diameter_coro,
+        attenuating_elements=(optics_filter,),
+        detector=detector,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coronagraph tests
+# ---------------------------------------------------------------------------
+
+
+class TestCoronagraph:
+    """Verify sampled Coronagraph implements the abstract table contract."""
+
+    def test_is_abstract_coronagraph(self, cached_diameter_coro):
+        """The loaded table satisfies the shared coronagraph contract."""
+        assert isinstance(cached_diameter_coro, ox.AbstractCoronagraph)
+
+    def test_is_equinox_module(self, cached_diameter_coro):
+        """The loaded table can participate in Equinox transformations."""
+        assert isinstance(cached_diameter_coro, eqx.Module)
+
+    def test_pixel_scale_positive(self, cached_diameter_coro):
+        """Native angular sampling preserves its positive FITS pitch."""
+        assert cached_diameter_coro.grid.step > 0
+
+    def test_iwa_owa_ordering(self, cached_diameter_coro):
+        """The measured inner working angle lies inside the sampled extent."""
+        assert (
+            cached_diameter_coro.curves().iwa_lod
+            < cached_diameter_coro.curves().data_extent_lod
+        )
+
+    def test_throughput_in_range(self, cached_diameter_coro):
+        """The synthetic aperture passes a physical flux fraction."""
+        t = cached_diameter_coro.throughput(5.0, 500.0)
+        assert 0.0 <= float(t) <= 1.0
+
+    def test_core_area_positive(self, cached_diameter_coro):
+        """The source aperture retains positive angular area."""
+        a = cached_diameter_coro.core_area(5.0, 500.0)
+        assert float(a) > 0
+
+    def test_leakage_density_lod2_nonnegative(self, cached_diameter_coro):
+        """The stellar density remains nonnegative."""
+        cmi = cached_diameter_coro.leakage_density_lod2(5.0, 500.0)
+        assert float(cmi) >= 0
+
+    def test_occulter_transmission_in_range(self, cached_diameter_coro):
+        """The native sky map retains dimensionless transmission."""
+        st = cached_diameter_coro.occulter_transmission(5.0, 500.0)
+        assert 0.0 <= float(st) <= 1.0
+
+    @pytest.mark.parametrize("separation_lod", [6.0, 10.0, 16.0])
+    def test_leakage_density_lod2_is_per_lod_squared(
+        self, cached_diameter_coro, separation_lod
+    ):
+        """Exact delegation to the aperture-density record, without pixel scaling."""
+        coro = cached_diameter_coro
+        record = coro.curves()
+        # The record is an aperture mean, not the old azimuthal per-pixel profile.
+        expected = record.evaluate("leakage_density_lod2", separation_lod)
+        assert coro.leakage_density_lod2(separation_lod) == expected
+
+    @pytest.mark.parametrize("separation_lod", [6.0, 10.0])
+    def test_noise_floor_ayo_matches_leakage_density_lod2(
+        self, cached_diameter_coro, separation_lod
+    ):
+        """The AYO noise floor is the core mean intensity over the ppf.
+
+        Both are per (lambda/D)^2 on the same object, so a caller can multiply
+        either by the core area. A floor left per pixel would come back low by
+        the pixel area in (lambda/D)^2.
+        """
+        coro = cached_diameter_coro
+        ppf = 30.0
+        floor = float(
+            coro.curves().evaluate("leakage_density_lod2", separation_lod) / ppf
+        )
+        cmi = float(coro.leakage_density_lod2(separation_lod, 500.0))
+        assert floor == pytest.approx(cmi / ppf, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# OpticalPath integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestOpticalPathIntegration:
+    """Verify a table-backed OpticalPath computes system throughput."""
+
+    def test_system_throughput_value(self, optical_path):
+        """Exact algebra: the path retains the explicit 50 percent filter."""
+        t = optical_path.system_throughput(500.0)
+        assert t == pytest.approx(0.5)
+
+    def test_primary_area(self, optical_path):
+        """Floating-point: the explicit collecting area equals the annular area."""
+        expected = jnp.pi * 3.0**2 * (1.0 - 0.14**2)
+        assert optical_path.primary.collecting_area_m2 == pytest.approx(
+            float(expected), rel=1e-6
+        )

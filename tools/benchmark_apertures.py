@@ -17,12 +17,14 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from optixstuff import performance as perf
 from scipy.optimize import brentq
 from scipy.special import j0, j1
 
-from yippy import Coronagraph, __version__, fetch_yip
-from yippy import performance as perf
+from yippy import __version__, fetch_yip
+from yippy._yip import _YIPData
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
+from yippy.performance import _iter_xaxis_positions
 
 
 def write_table(directory, name, header, rows):
@@ -145,10 +147,11 @@ def main(directory, airy_only=False):
         print(f"Wrote analytic Airy evidence to {directory}.")
         return
 
-    coro = Coronagraph(fetch_yip("eac1_aavc_2d"))
-    positions = list(perf._iter_xaxis_positions(coro))
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    inside = [pos for pos in positions if perf._point_source_in_image(pos)]
+    coro = _YIPData(fetch_yip("eac1_aavc_2d"))
+    positions = list(_iter_xaxis_positions(coro))
+    pixel_lod = float(coro.grid.step)
+    ny, nx = coro.grid.shape
+    inside = [pos for pos in positions if 0 <= pos.py < ny and 0 <= pos.px < nx]
     shipped = min(inside, key=lambda pos: abs(pos.separation - 20))
     convergence = []
     for name, psf, scale, ratio, center in (

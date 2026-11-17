@@ -17,11 +17,14 @@ from conftest import assert_eqx_arrays_match_active_dtype
 
 def test_datacube_cache_path_is_f64_keyed(coro):
     """The PSF datacube cache filename carries the 'f64' tag under x64."""
-    p = coro._datacube_cache_path
-    assert p.name.startswith(f"psf_datacube_quarter_f64_{coro.npixels}px_")
+    from yippy._yip import _YIPData
+
+    host = _YIPData(coro.yip_path)
+    p = host._datacube_cache_path
+    assert p.name.startswith(f"psf_datacube_quarter_f64_{coro.grid.shape[0]}px_")
     assert p.suffix == ".npy"
 
 
 def test_eqx_stored_arrays_are_f64(eqx_coro):
-    """Every stored/forward EqxCoronagraph float array is float64 under x64."""
+    """Every stored/forward Coronagraph float array is float64 under x64."""
     assert_eqx_arrays_match_active_dtype(eqx_coro)

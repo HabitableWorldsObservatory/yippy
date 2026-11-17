@@ -24,29 +24,24 @@ class SincExtraMissing(ImportError):
 
 def route_interpolation(path, requested, options, downsample_shape):
     """Select and validate the off-axis route before legacy data loading."""
-    if requested not in ("blend", "auto", "sinc"):
-        raise ValueError("interpolation must be 'blend', 'auto', or 'sinc'")
+    if requested not in ("blend", "legacy_blend", "auto", "sinc"):
+        raise ValueError(
+            "interpolation must be 'blend', 'legacy_blend', 'auto', or 'sinc'"
+        )
+    is_blend = requested in ("blend", "legacy_blend")
     if options is None:
         options = SincOptions()
     if not isinstance(options, SincOptions):
         raise TypeError("sinc_options must be SincOptions")
-    if (
-        requested == "blend"
-        and options.policy is not None
-        and options.policy.mode == "bounded"
-    ):
+    if is_blend and options.policy is not None and options.policy.mode == "bounded":
         raise ValueError("Bounded policies require sinc; blend has no error bound")
     manifest = detect_delivery(path)
-    if (
-        manifest is not None
-        and requested == "blend"
-        and manifest["layout"] == "quadrant_rectangle"
-    ):
+    if manifest is not None and is_blend and manifest["layout"] == "quadrant_rectangle":
         raise ValueError(
             "blend is unavailable for a quadrant delivery: "
             "no midpoint-aware blend representation exists"
         )
-    if manifest is None and requested == "blend":
+    if manifest is None and is_blend:
         return None, None, InterpolationInfo(requested, "blend")
     canonical_options = _options_identity(options)
     # Complete all file, declaration and integrity checks before any route gate.
@@ -61,7 +56,7 @@ def route_interpolation(path, requested, options, downsample_shape):
             )
     sc = None
     missing = False
-    if requested != "blend":
+    if not is_blend:
         try:
             sc = importlib.import_module("sinchole")
         except ModuleNotFoundError as error:
@@ -121,7 +116,7 @@ def route_interpolation(path, requested, options, downsample_shape):
             InterpolationInfo(requested, "blend", reasons, **base),
         )
 
-    if requested == "blend" or missing:
+    if is_blend or missing:
         return blend_result(
             ("EXTRA_MISSING",) if missing else (), (1 << 21) if missing else 0
         )

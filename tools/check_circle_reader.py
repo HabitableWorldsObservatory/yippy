@@ -13,10 +13,9 @@ from time import perf_counter
 import jax
 import numpy as np
 from hwoutils.map_coordinates import map_coordinates
+from optixstuff.performance import azimuthal_mean_profile
 from scipy.interpolate import RectBivariateSpline
 from scipy.special import i0, j1
-
-from yippy.performance import azimuthal_mean_profile
 
 RADII = np.array(
     [

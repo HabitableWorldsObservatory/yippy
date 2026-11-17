@@ -43,7 +43,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import astropy.io.fits as pyfits
+import equinox as eqx
+import interpax
+import jax.numpy as jnp
 import numpy as np
+from optixstuff.apertures import DEFAULT_APERTURE_RULE
+from optixstuff.performance import leakage_weights, performance_curves
+
+from yippy import Coronagraph
 
 # A package small enough to write and load inside a test, and coarse enough
 # that a pixel-membership aperture is a visible error source rather than a
@@ -284,4 +291,110 @@ def write_synthetic_yip(
         occulter_floor=occulter_floor,
         offsets=offsets,
         kind=kind,
+    )
+
+
+def synthetic_coronagraph(path, n=24, *, rules=()):
+    """Write an analytic quadrant YIP and return its immutable table model."""
+    path.mkdir(exist_ok=True)
+    scale, center, sigma = 0.5, (n - 1) / 2, 0.7
+    yy, xx = np.indices((n, n))
+    xx, yy = (xx - center) * scale, (yy - center) * scale
+    offsets = np.array(
+        [(x, y) for x in (0.0, 1.0, 2.0, 3.0) for y in (0.0, 1.0, 2.0, 3.0)]
+    )
+    psfs = np.array(
+        [
+            0.6
+            * (1 - 0.9 * np.exp(-(x * x + y * y) / 4))
+            * scale**2
+            / (2 * np.pi * sigma**2)
+            * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sigma**2))
+            for x, y in offsets
+        ]
+    )
+    header = pyfits.Header(
+        {
+            "D": 6.0,
+            "D_INSC": 4.7,
+            "OBSCURED": 0.2,
+            "PIXSCALE": scale,
+            "LAMBDA": 500.0,
+            "MINLAM": 450.0,
+            "MAXLAM": 550.0,
+            "XCENTER": center + 0.5,
+            "YCENTER": center + 0.5,
+            "N_LAM": 1,
+            "N_STAR": 3,
+        }
+    )
+    for key, unit in (
+        ("D", "m"),
+        ("D_INSC", "m"),
+        ("LAMBDA", "nm"),
+        ("MINLAM", "nm"),
+        ("MAXLAM", "nm"),
+    ):
+        header.comments[key] = f"value in {unit}"
+    for filename, data in (
+        ("offax_psf", psfs),
+        ("offax_psf_offset_list", offsets),
+        (
+            "stellar_intens",
+            np.stack([np.full((n, n), 1e-8 * (1 + d * d)) for d in (0.0, 0.1, 0.2)]),
+        ),
+        ("stellar_intens_diam_list", np.array([0.0, 0.1, 0.2])),
+        ("sky_trans", 1 - np.exp(-(xx * xx + yy * yy) / 4)),
+    ):
+        pyfits.PrimaryHDU(data, header).writeto(
+            path / f"{filename}.fits", overwrite=True
+        )
+    return Coronagraph(
+        path, rules=rules or (DEFAULT_APERTURE_RULE,)
+    ).create_psf_datacube()
+
+
+def replace_stellar_tables(coro, grid, diameters_lod, maps):
+    """Prepare consistent native records and stellar operators for changed maps."""
+    coro = eqx.tree_at(
+        lambda c: (c.stellar_grid, c._stellar_ln_interp),
+        coro,
+        (grid, interpax.CubicSpline(diameters_lod, jnp.log(maps))),
+    )
+    backend = coro._offaxis_backend
+    xs, ys = np.asarray(backend.x_offsets), np.asarray(backend.y_offsets)
+    iy = int(np.argmin(np.abs(ys)))
+    native = {
+        float(x): (backend.get_psf_by_offset_idx(ix, iy), (float(x), float(ys[iy])))
+        for ix, x in enumerate(xs)
+    }
+    records, operators = [], []
+    for previous in coro._records:
+        axis = previous.separation_lod
+        samples = [native[float(s)] for s in axis]
+        by_separation = {
+            float(s): image for s, (image, _) in zip(axis, samples, strict=True)
+        }
+        record = performance_curves(
+            by_separation.__getitem__,
+            coro.stellar_map(None, 0.0),
+            previous.rule,
+            separations_lod=axis,
+            source_positions_lod=[position for _, position in samples],
+            leakage_rule=previous.leakage_rule,
+            stellar_diameter=0.0,
+        )
+        records.append(record)
+        operators.append(
+            leakage_weights(
+                by_separation.__getitem__,
+                coro.stellar_map(None, 0.0),
+                record,
+                samples=samples,
+            )
+        )
+    return eqx.tree_at(
+        lambda c: (c._records, c._leakage_operators),
+        coro,
+        (tuple(records), tuple(operators)),
     )

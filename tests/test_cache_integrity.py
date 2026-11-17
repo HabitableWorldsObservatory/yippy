@@ -21,15 +21,17 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import optixstuff.performance as perf
 import pytest
 from hwoutils.grids import Frame
 from numpy.testing import assert_allclose
+from optixstuff.apertures import Circular, HalfMaximum
 from synthetic_yip import write_synthetic_yip
 from test_band_limited_apertures import reference_circle_weights
 
-import yippy.coronagraph as coronagraph_module
-import yippy.performance as perf
-from yippy import Circular, Coronagraph, HalfMaximum
+import yippy._yip as yip_module
+from yippy import Coronagraph
+from yippy._yip import _YIPData
 from yippy.util import (
     load_coro_performance_from_fits,
     read_performance_cache_key,
@@ -50,10 +52,10 @@ def test_circular_centres_have_distinct_complete_cache_records(
     """
     from astropy.io import fits
 
-    obj = Coronagraph(synthetic_1d.path)
+    obj = _YIPData(synthetic_1d.path)
     records, paths = [], []
     for centre in ("source", "peak"):
-        obj.set_aperture_rule(Circular(0.7, centre=centre))
+        obj._prepare_record(Circular(0.7, centre=centre))
         record = obj.performance
         records.append(record)
         path = obj._perf_dir / obj._perf_filename()
@@ -69,7 +71,7 @@ def test_circular_centres_have_distinct_complete_cache_records(
     assert all(p.exists() for p in paths)
     _forbid_persisted_computation(monkeypatch)
     for original in records:
-        loaded = Coronagraph(synthetic_1d.path, rule=original.rule).performance
+        loaded = _YIPData(synthetic_1d.path, rule=original.rule).performance
         assert loaded.rule == original.rule
         for name in (
             "separation_lod",
@@ -119,7 +121,7 @@ def _assert_same_metrics(warm, cold, names=("throughput", "core_area", "raw_cont
 
 def _patch_everywhere(monkeypatch, name, replacement):
     """Replace a performance function in every module that imported it."""
-    for module in (perf, coronagraph_module):
+    for module in (perf, yip_module):
         if hasattr(module, name):
             monkeypatch.setattr(module, name, replacement)
 
@@ -142,50 +144,50 @@ def _bump_mtime(directory):
 
 
 # ---------------------------------------------------------------------------
-# Truncation setter and constructor
+# Prepared truncation records and construction
 # ---------------------------------------------------------------------------
 
 
-def test_setter_then_constructor_matches_cold(tmp_path):
-    """A cache written by the setter reproduces a cold truncation construction."""
+def test_prepared_record_then_constructor_matches_cold(tmp_path):
+    """Prepared truncation caches reproduce independently constructed records."""
     path = _yip(tmp_path, "warm")
-    seed = Coronagraph(path)
-    seed.set_aperture_rule(HalfMaximum(0.3))
+    seed = _YIPData(path)
+    seed._prepare_record(HalfMaximum(0.3))
     assert seed.rule == HalfMaximum(0.3)
     assert seed.performance is seed.curves_by_rule[HalfMaximum(0.3)]
-    warm = Coronagraph(path, rule=HalfMaximum(0.3))
-    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
+    warm = _YIPData(path, rule=HalfMaximum(0.3))
+    cold = _YIPData(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold)
-    # The setter object itself must also match
+    # The record preparation object itself must also match
     _assert_same_metrics(seed, cold)
 
 
-def test_constructor_then_setter_matches_cold(tmp_path):
-    """Reaching truncation mode through the setter after a cache hit matches cold."""
+def test_constructor_then_prepared_record_matches_cold(tmp_path):
+    """Preparing truncation after a cache hit matches a cold construction."""
     path = _yip(tmp_path, "warm")
-    Coronagraph(path, rule=HalfMaximum(0.3))
-    warm = Coronagraph(path)
-    warm.set_aperture_rule(HalfMaximum(0.3))
-    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
+    _YIPData(path, rule=HalfMaximum(0.3))
+    warm = _YIPData(path)
+    warm._prepare_record(HalfMaximum(0.3))
+    cold = _YIPData(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold)
 
 
 def test_truncation_core_is_read_from_the_cache(tmp_path, monkeypatch, caplog):
     """A cache hit in truncation mode recomputes nothing and warns of nothing."""
     path = _yip(tmp_path, "warm")
-    cold = Coronagraph(path, rule=HalfMaximum(0.3))
+    cold = _YIPData(path, rule=HalfMaximum(0.3))
     _forbid_persisted_computation(monkeypatch)
     with caplog.at_level("WARNING", logger="yippy"):
-        warm = Coronagraph(path, rule=HalfMaximum(0.3))
+        warm = _YIPData(path, rule=HalfMaximum(0.3))
     assert not any("not checked" in r.getMessage() for r in caplog.records)
     _assert_same_metrics(warm, cold)
 
 
 def test_explicit_import_checks_rule_and_leakage(tmp_path):
     """Fails if an explicit import accepts different aperture or leakage metadata."""
-    coro = Coronagraph(_yip(tmp_path, "warm"), rule=HalfMaximum(0.3))
+    coro = _YIPData(_yip(tmp_path, "warm"), rule=HalfMaximum(0.3))
     filename = coro._perf_filename()
-    loaded = coro.compute_all_performance_curves(
+    loaded = coro._prepare_record(
         rule=HalfMaximum(0.3),
         save_to_fits=False,
         load_from_file=filename,
@@ -197,7 +199,7 @@ def test_explicit_import_checks_rule_and_leakage(tmp_path):
         {"rule": HalfMaximum(0.3), "leakage_rule": "azimuthal_ring_mean"},
     ):
         with pytest.raises(ValueError, match=r"rule|leakage"):
-            coro.compute_all_performance_curves(
+            coro._prepare_record(
                 **kwargs,
                 save_to_fits=False,
                 load_from_file=filename,
@@ -206,13 +208,13 @@ def test_explicit_import_checks_rule_and_leakage(tmp_path):
 
 
 def test_explicit_floor_does_not_change_cached_contrast(tmp_path):
-    """The setter stores unfloored contrast, as the constructor does."""
+    """The record preparation stores unfloored contrast, as the constructor does."""
     path = _yip(tmp_path, "warm")
     contrast_floor = 1e-6
-    seed = Coronagraph(path)
-    seed.set_aperture_rule(HalfMaximum(0.3))
-    warm = Coronagraph(path, rule=HalfMaximum(0.3))
-    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
+    seed = _YIPData(path)
+    seed._prepare_record(HalfMaximum(0.3))
+    warm = _YIPData(path, rule=HalfMaximum(0.3))
+    cold = _YIPData(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     assert np.all(cold.performance.evaluate("raw_contrast", SEPS) < contrast_floor), (
         "floor must bind"
     )
@@ -224,19 +226,19 @@ def test_explicit_floor_does_not_change_cached_contrast(tmp_path):
 
 
 def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
-    """The setter stores contrast on the package's separation grid."""
+    """The record preparation stores contrast on the package's separation grid."""
     path = _yip(tmp_path, "warm")
     from yippy import lod_inscribed_to_circumscribed
 
-    seed = Coronagraph(path)
+    seed = _YIPData(path)
     before = seed._perf_filename()
     seed.performance.evaluate(
         "throughput", lod_inscribed_to_circumscribed(5.0, seed.grid.frame, 5.0)
     )
     assert seed._perf_filename() == before
-    seed.set_aperture_rule(HalfMaximum(0.3))
-    warm = Coronagraph(path, rule=HalfMaximum(0.3))
-    cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
+    seed._prepare_record(HalfMaximum(0.3))
+    warm = _YIPData(path, rule=HalfMaximum(0.3))
+    cold = _YIPData(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
 
 
@@ -248,9 +250,9 @@ def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
 def test_truncation_cache_distinguishes_leakage_rule(tmp_path):
     """Fails if aperture-mean and azimuthal-ring records alias in the cache."""
     path = _yip(tmp_path, "warm")
-    aperture = Coronagraph(path, rule=HalfMaximum(0.3))
-    warm = Coronagraph(path, rule=HalfMaximum(0.3), leakage_rule="azimuthal_ring_mean")
-    cold = Coronagraph(
+    aperture = _YIPData(path, rule=HalfMaximum(0.3))
+    warm = _YIPData(path, rule=HalfMaximum(0.3), leakage_rule="azimuthal_ring_mean")
+    cold = _YIPData(
         _yip(tmp_path, "cold"),
         rule=HalfMaximum(0.3),
         leakage_rule="azimuthal_ring_mean",
@@ -267,9 +269,9 @@ def test_fine_radius_difference_does_not_alias(tmp_path):
     even though their rounded two-decimal filename tokens would coincide.
     """
     path = _yip(tmp_path, "warm")
-    first = Coronagraph(path, rule=Circular(0.706))
-    warm = Coronagraph(path, rule=Circular(0.708))
-    cold = Coronagraph(_yip(tmp_path, "cold"), rule=Circular(0.708))
+    first = _YIPData(path, rule=Circular(0.706))
+    warm = _YIPData(path, rule=Circular(0.708))
+    cold = _YIPData(_yip(tmp_path, "cold"), rule=Circular(0.708))
     assert not np.allclose(
         first.performance.evaluate("throughput", SEPS),
         cold.performance.evaluate("throughput", SEPS),
@@ -281,18 +283,18 @@ def test_fine_radius_difference_does_not_alias(tmp_path):
 
 def test_fine_threshold_difference_has_distinct_identity(tmp_path):
     """Thresholds 0.301 and 0.304 get distinct performance identities."""
-    coro = Coronagraph(_yip(tmp_path, "yip"))
-    coro.set_aperture_rule(HalfMaximum(0.301))
+    coro = _YIPData(_yip(tmp_path, "yip"))
+    coro._prepare_record(HalfMaximum(0.301))
     first = coro._perf_filename()
-    coro.set_aperture_rule(HalfMaximum(0.304))
+    coro._prepare_record(HalfMaximum(0.304))
     assert coro._perf_filename() != first
 
 
 def test_equivalent_scalar_types_share_identity(tmp_path):
     """An integer-valued radius and the equal float resolve to one entry."""
     path = _yip(tmp_path, "yip")
-    a = Coronagraph(path, rule=Circular(1))
-    b = Coronagraph(path, rule=Circular(np.float64(1.0)))
+    a = _YIPData(path, rule=Circular(1))
+    b = _YIPData(path, rule=Circular(np.float64(1.0)))
     assert a._perf_filename() == b._perf_filename()
 
 
@@ -304,38 +306,37 @@ def test_equivalent_scalar_types_share_identity(tmp_path):
 def test_explicit_separations_do_not_feed_automatic_cache(tmp_path, monkeypatch):
     """Fails if a custom separation grid overwrites the automatic cache identity."""
     path = _yip(tmp_path, "warm")
-    obj = Coronagraph(path)
+    obj = _YIPData(path)
     filename = obj._perf_filename()
-    obj.compute_all_performance_curves(
+    obj._prepare_record(
         rule=Circular(0.7),
         separations_lod=np.array([0.5, 2.5, 4.5]),
         save_to_fits=True,
         performance_file=filename,
         cache_dir=obj._perf_dir,
     )
-    warm = Coronagraph(path)
-    cold = Coronagraph(_yip(tmp_path, "cold"))
+    warm = _YIPData(path)
+    cold = _YIPData(_yip(tmp_path, "cold"))
     np.testing.assert_array_equal(
         warm.performance.separation_lod, cold.performance.separation_lod
     )
     _assert_same_metrics(warm, cold)
     _forbid_persisted_computation(monkeypatch)
-    _assert_same_metrics(Coronagraph(path), cold)
+    _assert_same_metrics(_YIPData(path), cold)
 
 
-@pytest.mark.parametrize("mode", ["circle", "truncation", "setter"])
+@pytest.mark.parametrize("mode", ["circle", "truncation", "prepared"])
 def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
-    """Fails if constructor or setter contrast uses an unrelated circular aperture.
+    """Fails if prepared contrast uses an unrelated circular aperture.
 
     Circular quadrature has a 1e-5 sampling bound from the analytic Gaussian;
     half-maximum area/flux ratios use 1e-6 for independently rounded stored fields.
     """
     package = write_synthetic_yip(tmp_path / "yip")
-    coro = Coronagraph(
-        package.path, rule=HalfMaximum(0.3) if mode == "truncation" else Circular(0.7)
-    )
-    if mode == "setter":
-        coro.set_aperture_rule(HalfMaximum(0.5))
+    rule = HalfMaximum(0.3) if mode == "truncation" else Circular(0.7)
+    rules = (rule, HalfMaximum(0.5)) if mode == "prepared" else (rule,)
+    coro = Coronagraph(package.path, rules=rules)
+    record = coro.curves(HalfMaximum(0.5) if mode == "prepared" else rule)
     sep = 3.0
     if mode == "circle":
         rows, cols = np.mgrid[-29:29, -29:29] + 0.5
@@ -343,20 +344,18 @@ def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
         intensity = np.exp(-(rows**2 + cols**2) / (2 * 20**2)) / (2 * np.pi * 2**2)
         planet_flux = (weights * intensity).sum() / 10**2 * package.occulter(sep)
         area_pixels = np.pi * 2.8**2
-        assert coro.performance.evaluate("throughput", sep) == pytest.approx(
+        assert record.evaluate("throughput", sep) == pytest.approx(
             planet_flux, rel=1e-5
         )
-        assert coro.performance.evaluate("core_area_lod2", sep) == pytest.approx(
+        assert record.evaluate("core_area_lod2", sep) == pytest.approx(
             area_pixels * package.pixscale**2
         )
     else:
         # Uniform stellar light makes the numerator exactly level times area.
-        planet_flux = coro.performance.evaluate("throughput", sep)
-        area_pixels = (
-            coro.performance.evaluate("core_area_lod2", sep) / package.pixscale**2
-        )
+        planet_flux = record.evaluate("throughput", sep)
+        area_pixels = record.evaluate("core_area_lod2", sep) / package.pixscale**2
         assert not np.isclose(area_pixels, np.pi * 2.8**2, rtol=1e-3)
-    assert coro.performance.evaluate("raw_contrast", sep) == pytest.approx(
+    assert record.evaluate("raw_contrast", sep) == pytest.approx(
         package.stellar_level * area_pixels / planet_flux, rel=1e-5
     )
 
@@ -370,23 +369,19 @@ def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
 def test_unchanged_request_is_a_real_cache_hit(tmp_path, monkeypatch, trunc):
     """A repeated request loads the stored table instead of recomputing it."""
     path = _yip(tmp_path, "yip")
-    first = Coronagraph(
-        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
-    )
+    first = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     _forbid_persisted_computation(monkeypatch)
-    second = Coronagraph(
-        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
-    )
+    second = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     _assert_same_metrics(second, first)
 
 
-def test_setter_repeat_is_a_real_cache_hit(tmp_path, monkeypatch):
+def test_prepared_record_repeat_is_a_real_cache_hit(tmp_path, monkeypatch):
     """Switching back to a ratio already computed loads the stored table."""
-    coro = Coronagraph(_yip(tmp_path, "yip"))
-    coro.set_aperture_rule(HalfMaximum(0.3))
+    coro = _YIPData(_yip(tmp_path, "yip"))
+    coro._prepare_record(HalfMaximum(0.3))
     expected = _metrics(coro)
     _forbid_persisted_computation(monkeypatch)
-    coro.set_aperture_rule(HalfMaximum(0.3))
+    coro._prepare_record(HalfMaximum(0.3))
     for name, values in _metrics(coro).items():
         assert_allclose(values, expected[name], rtol=RTOL, err_msg=name)
 
@@ -394,15 +389,15 @@ def test_setter_repeat_is_a_real_cache_hit(tmp_path, monkeypatch):
 def test_entry_without_identity_metadata_is_ignored(tmp_path):
     """A table lacking identity metadata at the automatic path is a miss."""
     path = _yip(tmp_path, "warm")
-    probe = Coronagraph(path)
+    probe = _YIPData(path)
     poisoned = replace(
         probe.performance,
         throughput=np.full_like(probe.performance.throughput, 0.5),
         raw_contrast=np.full_like(probe.performance.raw_contrast, 1e-3),
     )
     save_coro_performance_to_fits(poisoned, probe._perf_filename(), probe._perf_dir)
-    warm = Coronagraph(path)
-    cold = Coronagraph(_yip(tmp_path, "cold"))
+    warm = _YIPData(path)
+    cold = _YIPData(_yip(tmp_path, "cold"))
     _assert_same_metrics(warm, cold)
 
 
@@ -412,7 +407,7 @@ def test_legacy_named_entry_is_ignored(tmp_path):
     from yippy._version import __version__
 
     path = _yip(tmp_path, "warm")
-    probe = Coronagraph(path)
+    probe = _YIPData(path)
     legacy = (
         f"aper_0.70_v{__version__}_{probe._source_signature()}_"
         f"{probe.npixels}px_{dtype_tag()}_sampling1.fits"
@@ -425,19 +420,19 @@ def test_legacy_named_entry_is_ignored(tmp_path):
         legacy,
         probe._perf_dir,
     )
-    warm = Coronagraph(path)
+    warm = _YIPData(path)
     assert warm._perf_filename() != legacy
-    _assert_same_metrics(warm, Coronagraph(_yip(tmp_path, "cold")))
+    _assert_same_metrics(warm, _YIPData(_yip(tmp_path, "cold")))
 
 
 def test_source_overwrite_invalidates_performance(tmp_path):
     """An in-place package rewrite is recomputed, not served from cache."""
     path = _yip(tmp_path, "warm")
-    Coronagraph(path)
+    _YIPData(path)
     write_synthetic_yip(path, psf_flux=0.5)
     _bump_mtime(path)
-    warm = Coronagraph(path)
-    cold = Coronagraph(_yip(tmp_path, "cold", psf_flux=0.5))
+    warm = _YIPData(path)
+    cold = _YIPData(_yip(tmp_path, "cold", psf_flux=0.5))
     _assert_same_metrics(warm, cold)
 
 
@@ -446,18 +441,18 @@ def test_source_selection_does_not_alias(tmp_path):
     path = _yip(tmp_path, "warm")
     alt_source = _yip(tmp_path, "alt", psf_sigma_lod=0.7)
     (path / "offax_alt.fits").write_bytes((alt_source / "offax_psf.fits").read_bytes())
-    Coronagraph(path)
-    warm = Coronagraph(path, offax_data_file="offax_alt.fits")
-    cold = Coronagraph(alt_source)
+    _YIPData(path)
+    warm = _YIPData(path, offax_data_file="offax_alt.fits")
+    cold = _YIPData(alt_source)
     _assert_same_metrics(warm, cold)
 
 
 def test_downsampled_resolution_does_not_alias(tmp_path):
     """A downsampled construction does not reuse the native-resolution table."""
     path = _yip(tmp_path, "warm")
-    native = Coronagraph(path)
-    warm = Coronagraph(path, downsample_shape=(32, 32))
-    cold = Coronagraph(_yip(tmp_path, "cold"), downsample_shape=(32, 32))
+    native = _YIPData(path)
+    warm = _YIPData(path, downsample_shape=(32, 32))
+    cold = _YIPData(_yip(tmp_path, "cold"), downsample_shape=(32, 32))
     assert native._perf_filename() != warm._perf_filename()
     _assert_same_metrics(warm, cold)
 
@@ -465,7 +460,7 @@ def test_downsampled_resolution_does_not_alias(tmp_path):
 def test_float64_process_uses_separate_entries(tmp_path):
     """A float64 process neither reads nor overwrites the float32 entry."""
     path = _yip(tmp_path, "yip")
-    f32 = Coronagraph(path)
+    f32 = _YIPData(path)
     f32_file = f32._perf_dir / f32._perf_filename()
     f32_bytes = f32_file.read_bytes()
     script = (
@@ -474,8 +469,8 @@ def test_float64_process_uses_separate_entries(tmp_path):
         "import jax\n"
         "assert jax.config.jax_enable_x64\n"
         "import numpy as np\n"
-        "from yippy import Coronagraph\n"
-        "c = Coronagraph(sys.argv[1])\n"
+        "from yippy._yip import _YIPData\n"
+        "c = _YIPData(sys.argv[1])\n"
         "seps = np.array([float(a) for a in sys.argv[2:]])\n"
         "print(json.dumps({'name': c._perf_filename(),"
         " 'thr': [float(v) for v in c.performance.evaluate('throughput', seps)]}))\n"
@@ -515,7 +510,7 @@ def _cube(coro):
 def test_datacube_warning_names_1d_sampling_only(tmp_path, caplog, kind, warned):
     """Fails if a 1D datacube stops reporting that its PSFs are not rotated."""
     path = _yip(tmp_path, f"warn_{kind}", kind=kind, npix=16, max_offset_lod=2.0)
-    coro = Coronagraph(path)
+    coro = _YIPData(path)
     with caplog.at_level("WARNING", logger="yippy"):
         coro.create_psf_datacube()
     assert any("not rotated" in r.getMessage() for r in caplog.records) is warned
@@ -537,9 +532,9 @@ def _assert_same_cube(warm, cold):
 def test_datacube_identity_includes_physical_symmetry(tmp_path):
     """Full cubes built with different x symmetry do not alias."""
     path = _small_2dq(tmp_path, "warm")
-    _cube(Coronagraph(path, use_quarter_psf_datacube=False))
-    warm = Coronagraph(path, use_quarter_psf_datacube=False, x_symmetric=False)
-    cold = Coronagraph(
+    _cube(_YIPData(path, use_quarter_psf_datacube=False))
+    warm = _YIPData(path, use_quarter_psf_datacube=False, x_symmetric=False)
+    cold = _YIPData(
         _small_2dq(tmp_path, "cold"), use_quarter_psf_datacube=False, x_symmetric=False
     )
     _assert_same_cube(warm, cold)
@@ -548,8 +543,8 @@ def test_datacube_identity_includes_physical_symmetry(tmp_path):
 def test_quarter_and_full_cubes_are_distinct(tmp_path):
     """Quarter and full storage use separate entries."""
     path = _small_2dq(tmp_path, "yip")
-    quarter = Coronagraph(path)
-    full = Coronagraph(path, use_quarter_psf_datacube=False)
+    quarter = _YIPData(path)
+    full = _YIPData(path, use_quarter_psf_datacube=False)
     assert quarter._datacube_cache_path != full._datacube_cache_path
     assert _cube(quarter).shape != _cube(full).shape
 
@@ -557,8 +552,8 @@ def test_quarter_and_full_cubes_are_distinct(tmp_path):
 def test_gpu_path_loads_the_cpu_entry(tmp_path, monkeypatch):
     """The GPU loader reads the same identity the CPU writer produced."""
     path = _small_2dq(tmp_path, "yip")
-    expected = _cube(Coronagraph(path))
-    other = Coronagraph(path)
+    expected = _cube(_YIPData(path))
+    other = _YIPData(path)
 
     def fail(*args, **kwargs):
         raise AssertionError("cube was regenerated")
@@ -571,38 +566,38 @@ def test_gpu_path_loads_the_cpu_entry(tmp_path, monkeypatch):
 def test_source_overwrite_invalidates_datacube(tmp_path):
     """A rewritten package gets a fresh cube."""
     path = _small_2dq(tmp_path, "warm")
-    _cube(Coronagraph(path))
+    _cube(_YIPData(path))
     write_synthetic_yip(path, kind="2dq", npix=16, max_offset_lod=2.0, psf_flux=0.5)
     _bump_mtime(path)
-    warm = Coronagraph(path)
-    cold = Coronagraph(_small_2dq(tmp_path, "cold", psf_flux=0.5))
+    warm = _YIPData(path)
+    cold = _YIPData(_small_2dq(tmp_path, "cold", psf_flux=0.5))
     _assert_same_cube(warm, cold)
 
 
 def test_stale_object_does_not_label_cube_as_new_source(tmp_path):
     """An object loaded before a source edit writes under its original identity."""
     path = _small_2dq(tmp_path, "warm")
-    stale = Coronagraph(path)
+    stale = _YIPData(path)
     write_synthetic_yip(path, kind="2dq", npix=16, max_offset_lod=2.0, psf_flux=0.5)
     _bump_mtime(path)
     _cube(stale)
-    warm = Coronagraph(path)
-    cold = Coronagraph(_small_2dq(tmp_path, "cold", psf_flux=0.5))
+    warm = _YIPData(path)
+    cold = _YIPData(_small_2dq(tmp_path, "cold", psf_flux=0.5))
     _assert_same_cube(warm, cold)
 
 
 def test_synthesized_core_cache_does_not_feed_default_curves(tmp_path):
     """Opt-in synthesized core tables cannot masquerade as native-offset tables."""
     path = _yip(tmp_path, "warm", offset_step_lod=2.0)
-    obj = Coronagraph(path, rule=HalfMaximum(0.5))
+    obj = _YIPData(path, rule=HalfMaximum(0.5))
     expected = _metrics(obj)
-    obj.compute_all_performance_curves(
+    obj._prepare_record(
         rule=HalfMaximum(0.5),
         separations_lod=np.arange(0.5, 6.5, 0.5),
         performance_file=obj._perf_filename(),
         cache_dir=obj._perf_dir,
     )
-    warm = Coronagraph(path, rule=HalfMaximum(0.5))
+    warm = _YIPData(path, rule=HalfMaximum(0.5))
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 
@@ -611,14 +606,14 @@ def test_synthesized_core_cache_does_not_feed_default_curves(tmp_path):
 def test_legacy_circle_method_is_not_reused(tmp_path, trunc):
     """A table labeled with the previous cubic aperture cannot supply new curves."""
     path = _yip(tmp_path, "warm")
-    obj = Coronagraph(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
+    obj = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     expected = _metrics(obj)
     identity = obj._auto_perf_identity()
     identity.pop("circle_method", None)
     identity.pop("circle_oversample", None)
     identity["oversample"] = 2
     if trunc is not None:
-        identity["core_step_lod"] = perf.CORE_STEP_LOD
+        identity["core_step_lod"] = 0.5
     save_coro_performance_to_fits(
         replace(
             obj.performance,
@@ -629,9 +624,7 @@ def test_legacy_circle_method_is_not_reused(tmp_path, trunc):
         obj._perf_dir,
         identity=identity,
     )
-    warm = Coronagraph(
-        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
-    )
+    warm = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 
@@ -640,7 +633,7 @@ def test_legacy_circle_method_is_not_reused(tmp_path, trunc):
 def test_center_counting_method_is_not_reused(tmp_path, trunc):
     """A center-counting table cannot supply fractional, source-local curves."""
     path = _yip(tmp_path, "warm")
-    obj = Coronagraph(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
+    obj = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     expected = _metrics(obj)
     identity = obj._auto_perf_identity()
     identity["circle_method"] = "band_limited_float64_subpixel_centers"
@@ -654,9 +647,7 @@ def test_center_counting_method_is_not_reused(tmp_path, trunc):
         obj._perf_dir,
         identity=identity,
     )
-    warm = Coronagraph(
-        path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc)
-    )
+    warm = _YIPData(path, rule=Circular(0.7) if trunc is None else HalfMaximum(trunc))
     for name, value in _metrics(warm).items():
         assert_allclose(value, expected[name], rtol=RTOL, err_msg=name)
 

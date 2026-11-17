@@ -4,7 +4,7 @@ Style activation and figure saving belong to the caller. Importing this module
 does not load eyepiece or Matplotlib or change the active style.
 """
 
-from .performance import PerformanceCurves
+from optixstuff.performance import PerformanceCurves
 
 __all__ = ["plot_core_mean_intensity", "plot_performance_curve"]
 
@@ -87,11 +87,11 @@ def plot_performance_curve(
 def plot_core_mean_intensity(
     separations_lod, intensities, *, ax=None, styles=None, line_kw=None
 ):
-    """Draw the diameter profiles returned by core_mean_intensity_curve.
+    """Draw arrays evaluated from stellar_intensity_curves records.
 
     Args:
         separations_lod: One-dimensional radial separations in lambda/D.
-        intensities: Mapping from stellar diameter (lambda/D Quantity or float)
+        intensities: Mapping from stellar diameter (numeric lambda/D)
             to per-pixel stellar flux fractions, one array per diameter.
         ax: Optional single destination axes; None creates a figure and axes.
         styles: Optional document-wide eyepiece SourceStyles, keyed by the

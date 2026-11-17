@@ -15,9 +15,7 @@ import jax
 import numpy as np
 import pytest
 from lod_unit import lod
-from optixstuff import YippyCoronagraph
 
-from yippy import EqxCoronagraph
 from yippy.performance import stellar_intensity_curves
 
 # Positions between tabulated knots, where the reader has to interpolate. The
@@ -28,7 +26,7 @@ BETWEEN_KNOTS_LOD = (1.25, 2.25, 3.75, 4.25)
 
 def _sum(coro, x_lod, y_lod=0.0):
     """Total flux of the synthesized PSF at a sky position."""
-    return float(np.asarray(coro.offax(x_lod * lod, y_lod * lod).data).sum())
+    return float(np.asarray(coro._offaxis_backend(x_lod * lod, y_lod * lod).data).sum())
 
 
 def test_interpolated_flux_is_bracketed_by_its_two_neighbours(syn_coro_1d):
@@ -129,11 +127,7 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
         rows, columns = np.indices((npix, npix))
         expected = np.hypot(rows - axis, columns - axis) * pixel_lod
 
-        separation_map = np.asarray(
-            YippyCoronagraph(
-                backend=EqxCoronagraph(yippy_coro=syn_coro_1d)
-            ).separation_map()
-        )
+        separation_map = np.asarray(syn_coro_1d.separation_map())
 
         np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
         middle = npix // 2
@@ -143,18 +137,16 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
     """The map and synthesis share an axis, to the 1e-5 pixel float32 fit floor."""
-    separation_map = np.asarray(
-        YippyCoronagraph(
-            backend=EqxCoronagraph(yippy_coro=syn_coro_1d)
-        ).separation_map()
-    )
+    separation_map = np.asarray(syn_coro_1d.separation_map())
     nearest = np.argwhere(separation_map == separation_map.min())
     map_center = float(np.mean(nearest[:, 1]))
 
     columns = []
     for separation in (2.0, 3.0):
         for sign in (+1.0, -1.0):
-            psf = np.asarray(syn_coro_1d.offax(sign * separation * lod, 0.0 * lod).data)
+            psf = np.asarray(
+                syn_coro_1d._offaxis_backend(sign * separation * lod, 0.0 * lod).data
+            )
             row, col = np.unravel_index(np.argmax(psf), psf.shape)
             a, b, c = np.log(psf[row, col - 1 : col + 2])
             columns.append(col + 0.5 * (a - c) / (a - 2 * b + c))
@@ -243,15 +235,15 @@ def test_core_mean_intensity_is_measured_about_the_optical_axis(axis_ring_coro):
     to six percent on its flanks, far outside the tolerance.
     """
     coro = axis_ring_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
+    pixel_lod = float(coro.grid.step)
     radii_pix = AXIS_RING_RADIUS_PIX + AXIS_RING_WIDTH_PIX * np.array(
         [-2.0, -1.0, -0.5, 0.0, 0.3, 0.5, 1.0, 2.0]
     )
     got = np.array(
         [
-            stellar_intensity_curves(
-                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
-            ).evaluate("core_mean_intensity", r * pixel_lod)
+            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+                "core_mean_intensity", r * pixel_lod
+            )
             for r in radii_pix
         ]
     )
@@ -276,21 +268,19 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     """
     with jax.enable_x64():
         coro = axis_concentrated_coro
-        pixel_lod = float(coro.pixel_scale_arcsec.value)
+        pixel_lod = float(coro.grid.step)
         intensity_map = np.asarray(
-            stellar_intensity_curves(
-                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
-            ).evaluate(
-                "core_mean_intensity", np.hypot(*coro.stellar_intens.grid.coordinates())
+            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+                "core_mean_intensity", np.hypot(*coro.stellar_grid.coordinates())
             )
         )
         middle = intensity_map.shape[0] // 2
         central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
 
         expected = float(
-            stellar_intensity_curves(
-                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
-            ).evaluate("core_mean_intensity", np.sqrt(0.5) * pixel_lod)
+            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+                "core_mean_intensity", np.sqrt(0.5) * pixel_lod
+            )
         )
         np.testing.assert_allclose(central, expected, rtol=1e-10)
         np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
@@ -304,8 +294,6 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     quadrants. The explicit half-pixel mutant must differ by >0.1 of peak,
     over 50,000 times the allowed error. Odd grids retain integer offsets.
     """
-    from copy import copy
-
     from synthetic_yip import write_synthetic_yip
 
     from yippy import Coronagraph
@@ -320,24 +308,26 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
         occulter_floor=1.0,
     )
     full = Coronagraph(package.path, use_quarter_psf_datacube=False)
-    full.create_psf_datacube(batch_size=81)
+    full = full.create_psf_datacube(batch_size=81)
     cube = np.asarray(full.psf_datacube)
     center = (npix - 1) / 2
     row, col = npix // 2 - 1, npix // 2 + 1
     x, y = (col - center) * 0.25, (row - center) * 0.25
-    direct = np.asarray(full.offax(x * lod, y * lod).data)
+    direct = np.asarray(full._offaxis_backend(x * lod, y * lod).data)
     scene = np.zeros((npix, npix))
     scene[row, col] = 1
     rendered = np.einsum("ij,ijyx->yx", scene, cube)
     tolerance = direct.max() * 2e-6
     np.testing.assert_allclose(rendered, direct, rtol=0, atol=tolerance)
-    shifted = np.asarray(full.create_psf(x + 0.125, y + 0.125).data)
+    shifted = np.asarray(
+        full.source_psfs(None, [x + 0.125], [y + 0.125], grid=None).data[0]
+    )
     assert np.max(np.abs(shifted - direct)) > direct.max() * 0.1
     # Independent integer-offset reader anchor for odd n, half-integer for even.
     assert x == (col - ((npix - 1) // 2)) * 0.25 if npix % 2 else x == 0.375
-    quarter = copy(full)
-    quarter.use_quarter_psf_datacube = True
-    quarter._create_psf_datacube_gpu(batch_size=81)
+    quarter = Coronagraph(
+        package.path, use_quarter_psf_datacube=True
+    ).create_psf_datacube(batch_size=81)
     small = np.asarray(quarter.psf_datacube)
     assert small.shape[:2] == ((npix + 1) // 2, (npix + 1) // 2)
     folded = np.empty_like(cube)
@@ -355,13 +345,16 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
                 plane = plane[:, ::-1]
             folded[j, i] = plane
     np.testing.assert_allclose(folded, cube, rtol=0, atol=cube.max() * 2e-6)
-    quarter._datacube_cache_path.unlink()
-    quarter.create_psf_datacube(batch_size=81)
+    from yippy._yip import _YIPData
+
+    host = _YIPData(package.path, use_quarter_psf_datacube=True)
+    host._datacube_cache_path.unlink()
+    quarter = quarter.create_psf_datacube(batch_size=81)
     np.testing.assert_allclose(
         quarter.psf_datacube, small, rtol=0, atol=small.max() * 2e-6
     )
-    assert full._datacube_identity()["layout"] == 2
-    # Force the batched builder to generate the full cube rather than load it.
-    full._datacube_cache_path.unlink()
-    full._create_psf_datacube_gpu(batch_size=81)
-    np.testing.assert_allclose(full.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)
+    host = _YIPData(package.path, use_quarter_psf_datacube=False)
+    assert host._datacube_identity()["layout"] == 2
+    host._datacube_cache_path.unlink()
+    host._create_psf_datacube_gpu(batch_size=81)
+    np.testing.assert_allclose(host.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)

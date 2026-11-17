@@ -18,7 +18,6 @@ import numpy as np
 import pytest
 from hwoutils.grids import PixelGrid
 from lod_unit import lod
-from optixstuff import YippyCoronagraph
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -55,7 +54,7 @@ def test_the_header_declares_a_usable_pixel_scale(shipped_coro):
     header = pyfits.getheader(shipped_coro.yip_path / "stellar_intens.fits", 0)
     declared = header["PIXSCALE"]
 
-    assert float(shipped_coro.pixel_scale_arcsec.value) == pytest.approx(declared), (
+    assert float(shipped_coro.grid.step) == pytest.approx(declared), (
         "the reader's pixel scale is not the one the header declares"
     )
     assert 0.05 <= declared <= 1.0, (
@@ -74,7 +73,9 @@ def test_the_off_axis_normalization_is_the_recorded_one(shipped_coro):
     """
     for separation in FAR_FIELD_SEPARATIONS_LOD:
         total = float(
-            np.asarray(shipped_coro.offax(separation * lod, 0.0 * lod).data).sum()
+            np.asarray(
+                shipped_coro._offaxis_backend(separation * lod, 0.0 * lod).data
+            ).sum()
         )
         assert total == pytest.approx(FAR_FIELD_PSF_SUM, rel=FAR_FIELD_TOL), (
             f"the off-axis PSF at {separation} lambda/D sums to {total:.6f}, not "
@@ -91,7 +92,7 @@ def test_the_far_field_normalization_has_actually_plateaued(shipped_coro):
     makes the constant a property of the package.
     """
     sums = [
-        float(np.asarray(shipped_coro.offax(s * lod, 0.0 * lod).data).sum())
+        float(np.asarray(shipped_coro._offaxis_backend(s * lod, 0.0 * lod).data).sum())
         for s in FAR_FIELD_SEPARATIONS_LOD
     ]
     spread = (max(sums) - min(sums)) / np.mean(sums)
@@ -106,18 +107,13 @@ def test_inscribed_conversion_is_explicit(syn_coro_1d):
 
     Exact-algebra: typed header values D=6 m, D_INSC=5 m give 1.2.
     """
-    from yippy import Coronagraph, EqxCoronagraph, lod_inscribed_to_circumscribed
+    from yippy import Coronagraph, lod_inscribed_to_circumscribed
 
     coro = syn_coro_1d
     assert coro.header.diameter.to_value("m") == 6.0
     assert coro.header.diameter_inscribed.to_value("m") == 5.0
-    for constructor, kwargs in (
-        (Coronagraph, {"yip_path": coro.yip_path}),
-        (EqxCoronagraph, {"yip_path": coro.yip_path}),
-        (EqxCoronagraph, {"yippy_coro": coro}),
-    ):
-        with pytest.raises(TypeError, match="use_inscribed_diameter"):
-            constructor(**kwargs, use_inscribed_diameter=True)
+    with pytest.raises(TypeError, match="use_inscribed_diameter"):
+        Coronagraph(coro.yip_path, use_inscribed_diameter=True)
     for separation in (5.0, 10.0):
         assert (
             lod_inscribed_to_circumscribed(separation, coro.grid.frame, 5.0)
@@ -136,16 +132,15 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro, centre, expected):
     throughput curve beneath it; it is not evidence that the value is right.
     The closed-form check of the same derivation is in ``test_analytic_yip.py``.
     """
-    from yippy import Circular, performance_curves
+    from optixstuff.apertures import Circular
 
+    from yippy import Coronagraph
+
+    rule = Circular(0.7, centre=centre)
     record = (
-        shipped_coro.performance
+        shipped_coro.curves()
         if centre == "source"
-        else performance_curves(
-            shipped_coro,
-            shipped_coro.stellar_intens(0.0 * lod),
-            Circular(0.7, centre=centre),
-        )
+        else Coronagraph(shipped_coro.yip_path, rules=(rule,)).curves(rule)
     )
     assert record.rule.centre == centre
     got = record.iwa_lod
@@ -158,9 +153,9 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro, centre, expected):
 def test_data_extent_is_the_array_half_width(shipped_coro):
     """Fails if the array half-width is mislabeled as an outer working angle."""
     expected = min(shipped_coro.grid.shape) / 2 * shipped_coro.grid.step
-    assert shipped_coro.performance.data_extent_lod == pytest.approx(expected)
+    assert shipped_coro.curves().data_extent_lod == pytest.approx(expected)
     assert not hasattr(shipped_coro, "OWA")
-    assert shipped_coro.performance.data_extent_lod > shipped_coro.performance.iwa_lod
+    assert shipped_coro.curves().data_extent_lod > shipped_coro.curves().iwa_lod
 
 
 def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
@@ -171,13 +166,13 @@ def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
     the new API makes that distinction explicit and retains this physical
     counterexample. A factor of ten is deliberately below the measured rise.
     """
-    extent = shipped_coro.performance.data_extent_lod
+    extent = shipped_coro.curves().data_extent_lod
     reference = max(
-        float(shipped_coro.performance.evaluate("raw_contrast", s))
-        for s in np.linspace(shipped_coro.performance.iwa_lod + 1.0, 0.75 * extent, 8)
+        float(shipped_coro.curves().evaluate("raw_contrast", s))
+        for s in np.linspace(shipped_coro.curves().iwa_lod + 1.0, 0.75 * extent, 8)
     )
     probes = np.linspace(0.75 * extent, extent, 9)
-    values = np.asarray(shipped_coro.performance.evaluate("raw_contrast", probes))
+    values = np.asarray(shipped_coro.curves().evaluate("raw_contrast", probes))
     assert np.all(np.isfinite(values))
     assert values.max() > 10.0 * reference
     assert not hasattr(shipped_coro, "OWA")
@@ -203,7 +198,7 @@ def test_header_grid_corner_counts(syn_coro_1d):
     assert grid.frame.diameter_convention == "circumscribed"
 
 
-def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
+def test_public_images_carry_header_grid(syn_coro_1d):
     """Fails if a public image drops geometry, reconstruction, measure or axes.
 
     Metadata are exact. The x=1 lod node is offset index 1/0.5=2.
@@ -216,7 +211,7 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
 
     from yippy.offax import OffAx
 
-    coro, view = syn_coro_1d, syn_eqx_1d
+    coro = syn_coro_1d
     grid = coro.header.pixel_grid()
     numpy_reader = OffAx(
         coro.yip_path,
@@ -226,43 +221,39 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         True,
         True,
     )
+    native_star = coro.stellar_map(None, 0.1, grid=None)
+    native_source = coro.off_axis_psf(None, 1.0, None)
+    batch_source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]))
+    batch_star = coro.stellar_map(None, jnp.array([0.0, 0.1]))
     for product in (
         coro,
-        coro.offax,
+        coro._offaxis_backend,
         numpy_reader,
-        coro.stellar_intens,
+        native_star,
         coro.sky_trans,
-        view,
     ):
         assert product.grid == grid
         assert not hasattr(product, "center_x")
         assert not hasattr(product, "center_y")
+    rendered_source = coro.source_psfs(
+        None, jnp.array([1.0]), jnp.array([0.0]), grid=grid
+    )
+    rendered_star = coro.stellar_map(None, 0.1, grid=grid)
     images = [
         numpy_reader.get_psf_by_offset_idx(2, 0),
-        coro.create_psf(1.0, 0.0),
-        coro.offax(1.0 * lod, 0.0 * lod),
-        coro.offax.get_psf_by_offset_idx(2, 0),
-        coro.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
-        coro.offax.create_psfs_parallel(jnp.array([1.0]), jnp.array([0.0])),
-        coro.stellar_intens(0.1 * lod),
-        coro.stellar_intens(np.array([0.0, 0.1]) * lod),
-        eqx.filter_jit(view.create_psf)(1.0, 0.0),
-        view.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
-        eqx.filter_jit(view.stellar_intens)(0.1),
-        view.stellar_intens(jnp.array([0.0, 0.1])),
-        YippyCoronagraph(backend=view).source_psfs(
-            500,
-            jnp.array([1.0]),
-            jnp.array([0.0]),
-            grid=PixelGrid.regular(grid.shape, 0.25, "lod", frame=view.grid.frame),
+        native_source,
+        coro._offaxis_backend(1.0 * lod, 0.0 * lod),
+        coro._offaxis_backend.get_psf_by_offset_idx(2, 0),
+        batch_source,
+        coro._offaxis_backend.create_psfs_parallel(jnp.array([1.0]), jnp.array([0.0])),
+        native_star,
+        batch_star,
+        eqx.filter_jit(lambda x, y: coro.source_psfs(None, x, y))(
+            jnp.array([1.0]), jnp.array([0.0])
         ),
-        YippyCoronagraph(backend=view).stellar_map(
-            500,
-            0.1,
-            grid=PixelGrid.regular(
-                grid.shape, 0.25, "lod", frame=view.stellar_grid.frame
-            ),
-        ),
+        eqx.filter_jit(lambda d: coro.stellar_map(None, d))(0.1),
+        rendered_source,
+        rendered_star,
     ]
     for image in images:
         assert isinstance(image, Image)
@@ -271,53 +262,25 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         assert len(image.leading_axes) == image.data.ndim - 2
         assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
         assert image.reconstruction == "band_limited"
-    for image in (
-        coro.sky_trans(),
-        view.sky_trans,
-        YippyCoronagraph(backend=view).background_transmission(
-            500,
-            grid=PixelGrid.regular(grid.shape, 0.25, "lod", frame=view.sky_grid.frame),
-        ),
-    ):
+    for image in (coro.sky_trans, coro.background_transmission(None, grid=grid)):
         assert isinstance(image, Image) and image.grid == grid
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == ("per_unit_area", "transmission")
         assert image.reconstruction == "linear"
         assert image.outside == "reflect"
     # Stellar halos continue past the field; off-axis PSFs vanish outside it.
-    for image in (
-        coro.stellar_intens(0.1 * lod),
-        view.stellar_intens(jnp.array([0.0, 0.1])),
-        YippyCoronagraph(backend=view).stellar_map(
-            500,
-            0.1,
-            grid=PixelGrid.regular(
-                grid.shape, 0.25, "lod", frame=view.stellar_grid.frame
-            ),
-        ),
-    ):
+    for image in (native_star, batch_star, rendered_star):
         assert image.outside == "reflect"
-    for image in (
-        coro.create_psf(1.0, 0.0),
-        view.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
-    ):
+    for image in (native_source, batch_source, rendered_source):
         assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
+    coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
     for image in (
-        YippyCoronagraph(backend=view).source_psfs(
-            500,
-            jnp.array([1.0]),
-            jnp.array([0.0]),
-            grid=PixelGrid.regular((32, 32), 0.5, "lod", frame=view.grid.frame),
-        ),
-        YippyCoronagraph(backend=view).stellar_map(
-            500,
-            0.1,
-            grid=PixelGrid.regular((32, 32), 0.5, "lod", frame=view.stellar_grid.frame),
-        ),
+        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse),
+        coro.stellar_map(None, 0.1, grid=coarse),
     ):
         assert image.reconstruction == "linear"
-    actual = np.asarray(coro.create_psf(1.0, 0.0).data)
+    actual = np.asarray(native_source.data)
     flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
     expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
     np.testing.assert_allclose(
@@ -328,7 +291,7 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
     )
 
 
-def test_detector_aperture_converges_to_performance(syn_coro_1d, syn_eqx_1d):
+def test_detector_aperture_converges_to_performance(syn_coro_1d):
     """Fails if detector rendering silently uses linear PSF reconstruction.
 
     Solution verification: refine detector pitch by two at fixed angular extent.
@@ -338,17 +301,15 @@ def test_detector_aperture_converges_to_performance(syn_coro_1d, syn_eqx_1d):
     The observed-order band permits aperture-edge phase and reference quadrature
     error, while rejecting the nonvanishing linear-reconstruction bias.
     """
-    from dataclasses import replace
-
     import jax
-
-    from yippy import Circular, performance_curves
+    from optixstuff.apertures import Circular
+    from optixstuff.performance import performance_curves
 
     with jax.enable_x64():
         rule, separation = Circular(0.7), 2.0
         record = performance_curves(
-            syn_coro_1d,
-            syn_eqx_1d.stellar_intens(0.0),
+            lambda s: syn_coro_1d.off_axis_psf(None, s, None),
+            syn_coro_1d.stellar_map(None, 0.0, grid=None),
             rule,
             separations_lod=[separation],
         )
@@ -356,15 +317,10 @@ def test_detector_aperture_converges_to_performance(syn_coro_1d, syn_eqx_1d):
         errors, sums = [], []
         pitches = (0.24, 0.12, 0.06)
         for pitch, size in zip(pitches, (32, 64, 128), strict=True):
-            stack = YippyCoronagraph(backend=syn_eqx_1d).source_psfs(
-                500.0,
-                np.array([separation]),
-                np.array([0.0]),
-                grid=PixelGrid.regular(
-                    (size, size), pitch, "lod", frame=syn_eqx_1d.grid.frame
-                ),
+            target = PixelGrid.regular(
+                (size, size), pitch, "lod", frame=syn_coro_1d.grid.frame
             )
-            psf = replace(stack, data=stack.data[0], leading_axes=())
+            psf = syn_coro_1d.off_axis_psf(None, separation, target)
             assert psf.reconstruction == "band_limited"
             weights = rule.weights(psf, (separation, 0.0))
             sums.append(float(np.sum(np.asarray(psf.data) * np.asarray(weights))))
@@ -386,7 +342,7 @@ def test_public_package_optical_axis_evidence(shipped_coro):
     """
     coro = shipped_coro
     assert (coro.grid.center_x, coro.grid.center_y) == (127.5, 127.5)
-    image = coro.stellar_intens.psfs[0]
+    image = np.asarray(coro.stellar_map(None, 0.0, grid=None).data)
 
     def rms(a, b):
         return np.linalg.norm(a - b) / np.linalg.norm(a)
@@ -399,7 +355,7 @@ def test_public_package_optical_axis_evidence(shipped_coro):
     assert correct < 1e-5
     assert min(wrong) > 1e4 * correct
     for separation in (5.0, 10.0, 20.0):
-        psf = np.asarray(coro.create_psf(separation, 0.0).data)
+        psf = np.asarray(coro.off_axis_psf(None, separation, None).data)
         row, col = np.unravel_index(np.argmax(psf), psf.shape)
         a, b, c = np.log(psf[row, col - 1 : col + 2])
         peak_x = col + 0.5 * (a - c) / (a - 2 * b + c)

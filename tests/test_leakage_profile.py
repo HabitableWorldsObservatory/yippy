@@ -17,10 +17,9 @@ import jax
 import numpy as np
 import pytest
 from conftest import REFERENCE_DATA_REQUIRED
-from lod_unit import lod
 from scipy.interpolate import RectBivariateSpline
 
-from yippy import Coronagraph, EqxCoronagraph
+from yippy import Coronagraph
 from yippy.performance import stellar_intensity_curves
 
 # Separations (lambda/D) and stellar diameters (lambda/D) probed on the
@@ -57,17 +56,19 @@ def ring_mean(image, center, radii_pix, n_theta=2048):
 
 def relative_errors(coro, diameter_lod, separations_lod):
     """|curve / reference - 1| and the reference, at each separation."""
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    image = np.asarray(coro.stellar_intens(diameter_lod * lod).data, dtype=np.float64)
+    pixel_lod = float(coro.grid.step)
+    image = np.asarray(
+        coro.stellar_map(None, diameter_lod, grid=None).data, dtype=np.float64
+    )
     reference = ring_mean(
         image,
-        (coro.stellar_intens.grid.center_y, coro.stellar_intens.grid.center_x),
+        (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
         separations_lod / pixel_lod,
     )
     curve = np.asarray(
-        stellar_intensity_curves(
-            EqxCoronagraph(yippy_coro=coro), diameter_lod, interpolation="keys"
-        ).evaluate("core_mean_intensity", separations_lod),
+        stellar_intensity_curves(coro, diameter_lod, interpolation="keys").evaluate(
+            "core_mean_intensity", separations_lod
+        ),
         dtype=np.float64,
     )
     return np.abs(curve / reference - 1.0), reference
@@ -97,7 +98,8 @@ def test_curve_is_the_azimuthal_mean_of_the_map(shipped, diameter_lod):
     err, _ = relative_errors(shipped, diameter_lod, SEPARATIONS_LOD)
     worst = SEPARATIONS_LOD[np.argmax(err)]
     summary = (
-        f"{shipped.name} at {diameter_lod} lambda/D: median {np.median(err):.4f}, "
+        f"{shipped.yip_path.name} at {diameter_lod} lambda/D: "
+        f"median {np.median(err):.4f}, "
         f"90th percentile {np.percentile(err, 90):.4f}, max {err.max():.4f} "
         f"at {worst:.2f} lambda/D"
     )
@@ -155,7 +157,7 @@ def test_curve_follows_the_map_between_tabulated_diameters(ring_coro, diameter_l
     crest; far down the Gaussian tails the cubic sampling kernel's error
     relative to the local value grows to about one percent.
     """
-    pixel_lod = float(ring_coro.pixel_scale_arcsec.value)
+    pixel_lod = float(ring_coro.grid.step)
     separations = np.arange(4.0, 22.0, 0.5) * pixel_lod
     err, reference = relative_errors(ring_coro, diameter_lod, separations)
     err = np.where(reference >= 0.1 * reference.max(), err, 0.0)
@@ -168,12 +170,14 @@ def test_curve_follows_the_map_between_tabulated_diameters(ring_coro, diameter_l
 @pytest.mark.parametrize("leakage_rule", ["aperture_mean", "azimuthal_ring_mean"])
 def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
     """A nonconstant radial profile agrees in float64, including linear tails."""
-    from yippy.eqx_coronagraph import EqxCoronagraph
+    from optixstuff.performance import azimuthal_mean_profile, profile_radii
+    from scipy.interpolate import PchipInterpolator
 
     with jax.enable_x64():
         coro = Coronagraph(ring_coro.yip_path, leakage_rule=leakage_rule)
-        eqx_coro = EqxCoronagraph(yippy_coro=coro)
-        nodes = coro.core_intensity_separations
+        grid = coro.stellar_grid
+        radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
+        nodes = radii * grid.step
         separations = np.array(
             [
                 nodes[0] - 0.3,
@@ -186,52 +190,48 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
                 nodes[-1] + 2.0,
             ]
         ).reshape(2, 4)
-        evaluate = jax.jit(
-            lambda x, d: stellar_intensity_curves(
-                eqx_coro, d, interpolation="keys"
-            ).evaluate("core_mean_intensity", x)
-        )
-        for diameter in [0.0, 0.075]:
-            from yippy.performance import core_mean_intensity_profile
-
-            profile_record = coro._profile_record(
-                nodes,
-                "core_mean_intensity",
-                core_mean_intensity_profile(coro, diameter * lod),
+        for diameter in (0.0, 0.075):
+            image = coro.stellar_map(None, diameter, grid=None).data
+            values = np.asarray(
+                azimuthal_mean_profile(image, (grid.center_y, grid.center_x), radii)
             )
-            expected = profile_record.evaluate("core_mean_intensity", separations)
-            np.testing.assert_allclose(
-                profile_record.evaluate("core_mean_intensity", separations),
+            expected = PchipInterpolator(nodes, values)(separations)
+            expected = np.where(
+                separations < nodes[0],
+                values[0]
+                + (separations - nodes[0])
+                * (values[1] - values[0])
+                / (nodes[1] - nodes[0]),
                 expected,
-                rtol=1e-12,
-                atol=1e-24,
             )
-            eager = stellar_intensity_curves(
-                eqx_coro, getattr(diameter, "value", diameter), interpolation="keys"
-            ).evaluate("core_mean_intensity", separations)
-            np.testing.assert_allclose(eager, expected, rtol=1e-12, atol=1e-24)
+            expected = np.where(
+                separations > nodes[-1],
+                values[-1]
+                + (separations - nodes[-1])
+                * (values[-1] - values[-2])
+                / (nodes[-1] - nodes[-2]),
+                expected,
+            )
+
+            def method(s, d):
+                return stellar_intensity_curves(coro, d).evaluate(
+                    "core_mean_intensity", s
+                )
+
             np.testing.assert_allclose(
-                evaluate(separations, diameter), expected, rtol=1e-12, atol=1e-24
+                method(separations, diameter), expected, rtol=1e-12, atol=1e-24
             )
-        scalar = stellar_intensity_curves(
-            eqx_coro, 0.075, interpolation="keys"
-        ).evaluate("core_mean_intensity", 2.03)
-        np.testing.assert_allclose(
-            scalar,
-            stellar_intensity_curves(
-                EqxCoronagraph(yippy_coro=coro), 0.075, interpolation="keys"
-            ).evaluate("core_mean_intensity", 2.03),
-            rtol=1e-12,
-            atol=1e-24,
-        )
+            np.testing.assert_allclose(
+                jax.jit(method)(separations, diameter), expected, rtol=1e-12, atol=1e-24
+            )
 
 
 def test_diameter_outside_the_tabulated_range_is_nan(ring_coro):
     """The loader does not extrapolate the curve past its largest diameter."""
     assert np.isnan(
-        stellar_intensity_curves(
-            EqxCoronagraph(yippy_coro=ring_coro), 0.3, interpolation="keys"
-        ).evaluate("core_mean_intensity", 2.5)
+        stellar_intensity_curves(ring_coro, 0.3, interpolation="keys").evaluate(
+            "core_mean_intensity", 2.5
+        )
     )
 
 
@@ -242,9 +242,7 @@ def test_eqx_separation_arrays_keep_shape(ring_coro, diameter, shape):
     import jax
     import jax.numpy as jnp
 
-    from yippy import EqxCoronagraph
-
-    coro = EqxCoronagraph(yippy_coro=ring_coro)
+    coro = ring_coro
     separations = jnp.linspace(1.5, 3.5, np.prod(shape)).reshape(shape)
     expected = jax.vmap(
         lambda s: stellar_intensity_curves(
@@ -276,9 +274,7 @@ def test_public_diameter_bounds_under_jit(ring_coro, diameter):
     import jax
     import jax.numpy as jnp
 
-    from yippy import EqxCoronagraph
-
-    coro = EqxCoronagraph(yippy_coro=ring_coro)
+    coro = ring_coro
     # The scipy loader is host-only; its inputs must be static inside JIT.
     host = jax.jit(
         lambda: jnp.asarray(
@@ -306,8 +302,7 @@ def test_corner_arcs_of_constant_maps(shape, center, dtype):
     """Every intersecting circle has mean one, even near a far corner."""
     import jax
     import jax.numpy as jnp
-
-    from yippy.performance import azimuthal_mean_profile
+    from optixstuff.performance import azimuthal_mean_profile
 
     corner = max(
         np.hypot(y - center[0], x - center[1])

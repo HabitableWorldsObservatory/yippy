@@ -7,14 +7,15 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import settings
+from synthetic_yip import synthetic_coronagraph
 
 from yippy import Coronagraph
 from yippy._precision import float_dtype
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import stellar_intensity_curves
 
-# Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []
+# Released hwoutils versions may not include the optional budget plugin yet.
 if importlib.util.find_spec("hwoutils.testbudget") is not None:
     pytest_plugins.append("hwoutils.testbudget.plugin")
 if importlib.util.find_spec("hwoutils.internal_refs") is not None:
@@ -26,7 +27,7 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 
 def assert_eqx_arrays_match_active_dtype(eqx_coro):
-    """Assert every stored/forward float array on an EqxCoronagraph is the active dtype.
+    """Assert every stored/forward float array on an Coronagraph is the active dtype.
 
     Checks a directly stored array (``sky_trans``) plus forward evaluations that
     exercise the stellar-intensity spline, a performance interpolator, and a
@@ -34,15 +35,15 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
     no-float32-leak guard. Shared by the float32 and float64 precision suites.
 
     Args:
-        eqx_coro: An ``EqxCoronagraph`` built under the active x64 setting.
+        eqx_coro: An ``Coronagraph`` built under the active x64 setting.
     """
     expected = np.dtype(float_dtype())
     assert np.dtype(eqx_coro.sky_trans.data.dtype) == expected, "sky_trans"
-    assert np.dtype(eqx_coro.stellar_intens(0.0).data.dtype) == expected, (
-        "stellar_intens"
-    )
     assert (
-        np.dtype(eqx_coro.performance.evaluate("throughput", jnp.asarray(5.0)).dtype)
+        np.dtype(eqx_coro.stellar_map(None, 0.0, grid=None).data.dtype) == expected
+    ), "stellar_intens"
+    assert (
+        np.dtype(eqx_coro.curves().evaluate("throughput", jnp.asarray(5.0)).dtype)
         == expected
     ), "throughput"
     if len(eqx_coro._stellar_ln_interp.x) > 1:
@@ -69,10 +70,8 @@ def coro():
 
 @pytest.fixture(scope="session")
 def eqx_coro(coro):
-    """Session-scoped EqxCoronagraph built from the real coronagraph."""
-    from yippy.eqx_coronagraph import EqxCoronagraph
-
-    return EqxCoronagraph(yippy_coro=coro)
+    """Session-scoped Coronagraph built from the real coronagraph."""
+    return coro
 
 
 # ---------------------------------------------------------------------------
@@ -118,45 +117,11 @@ def syn_coro_2d(synthetic_2d):
 def syn_eqx_1d(syn_coro_1d):
     """The JAX-facing view of the radially symmetric analytic package.
 
-    ``Coronagraph`` builds the host records. ``EqxCoronagraph`` holds their
+    ``Coronagraph`` builds the host records. ``Coronagraph`` holds their
     JAX leaves for record evaluation and PSF synthesis inside ``jit``,
     ``vmap`` or ``grad``.
     """
-    from yippy.eqx_coronagraph import EqxCoronagraph
-
-    return EqxCoronagraph(yippy_coro=syn_coro_1d)
-
-
-@pytest.fixture
-def displaced_gaussian_source():
-    """Gaussian source displaced by (0.08, -0.06) lod from its nominal point."""
-    from hwoutils.grids import Frame, Image, PixelGrid
-
-    def build(step):
-        grid = PixelGrid.focal(int(12 / step), step, Frame(500, 6, "circumscribed"))
-        x, y = grid.coordinates()
-
-        def source(separation):
-            data = (
-                0.31
-                * np.exp(
-                    -((x - separation - 0.08) ** 2 + (y + 0.06) ** 2) / (2 * 0.6**2)
-                )
-                / (2 * np.pi * 0.6**2)
-                * step**2
-            )
-            return Image(data, grid, (), "per_pixel", "stellar_flux_fraction")
-
-        star = Image(
-            np.full(grid.shape, 1e-9 * step**2),
-            grid,
-            (),
-            "per_pixel",
-            "stellar_flux_fraction",
-        )
-        return source, star
-
-    return build
+    return syn_coro_1d
 
 
 # A cold cache with no network is a missing referent, not a passing test. The
@@ -183,3 +148,9 @@ def shipped_coro():
             pytest.fail(message)
         pytest.skip(message)
     return Coronagraph(yip_path)
+
+
+@pytest.fixture(scope="session")
+def cached_diameter_coro(tmp_path_factory):
+    """One diameter-dependent analytic table, shared by the contract tests."""
+    return synthetic_coronagraph(tmp_path_factory.mktemp("stellar_diameter_yip"))

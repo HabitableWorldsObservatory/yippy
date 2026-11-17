@@ -1,25 +1,12 @@
-"""Cache-key robustness: source YIP changes must invalidate cached artifacts.
-
-Raised by RASTI review of the yippy paper (Sec 5.2): the performance-curve and
-PSF-datacube cache filenames previously encoded only the aperture settings /
-dtype / package version, not anything about the source YIP data itself, so an
-in-place overwrite of the YIP FITS files could silently return a stale cached
-result. ``Coronagraph._source_signature`` closes that gap; these tests
-exercise it directly against a synthetic directory rather than the real
-session-scoped ``coro`` fixture, since mutating that fixture's pooch-cached
-files would corrupt it for every other test in the session.
-
-``_source_signature`` only reads ``self.yip_path``, so it can be exercised
-against a minimal stand-in rather than a fully constructed ``Coronagraph``.
-"""
+"""Source identities invalidate IO caches when top-level YIP files change."""
 
 from types import SimpleNamespace
 
-from yippy.coronagraph import Coronagraph
+from yippy._yip import _YIPData
 
 
 def _signature(yip_path):
-    return Coronagraph._source_signature(SimpleNamespace(yip_path=yip_path))
+    return _YIPData._source_signature(SimpleNamespace(yip_path=yip_path))
 
 
 def test_signature_stable_when_files_unchanged(tmp_path):
@@ -71,8 +58,9 @@ def test_signature_ignores_yippy_cache_subdirectory(tmp_path):
     assert _signature(tmp_path) == before
 
 
-def test_perf_filename_and_datacube_path_carry_the_signature(coro):
-    """Real Coronagraph cache filenames embed the current source signature."""
-    sig = coro._source_signature()
-    assert sig in coro._perf_filename()
-    assert sig in coro._datacube_cache_path.name
+def test_perf_filename_and_datacube_path_carry_the_signature(synthetic_1d):
+    """Host cache filenames embed the current source signature."""
+    host = _YIPData(synthetic_1d.path)
+    sig = host._source_signature()
+    assert sig in host._perf_filename()
+    assert sig in host._datacube_cache_path.name

@@ -9,15 +9,11 @@ import numpy as np
 import pytest
 from hwoutils.grids import Frame
 from lod_unit import lod
+from optixstuff.apertures import DEFAULT_APERTURE_RULE
+from optixstuff.performance import PerformanceCurves
 
 import yippy
-from yippy import (
-    DEFAULT_APERTURE_RULE,
-    Coronagraph,
-    PerformanceCurves,
-    performance,
-    viz,
-)
+from yippy import performance, viz
 
 
 @pytest.fixture
@@ -49,27 +45,17 @@ def test_default_curve_calls_return_data(curves, tmp_path, monkeypatch):
     independently specified arrays and exercise default FITS persistence.
     The numerical producers have separate analytic coverage.
     """
-    module = importlib.import_module("yippy.coronagraph")
+    from yippy._yip import _YIPData
+
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", None)
     monkeypatch.setitem(sys.modules, "eyepiece", None)
-    coro = object.__new__(Coronagraph)
-    coro.rule = DEFAULT_APERTURE_RULE
-    coro.leakage_rule = "aperture_mean"
-    coro.yip_path = tmp_path
-    coro._source_sig = "synthetic"
-    coro.npixels = 4
-    coro.curves_by_rule = {}
-    coro._perf_identity = lambda *args: {"source": "synthetic"}
-    monkeypatch.setattr(module, "performance_curves", lambda *a, **kw: curves)
-    # Only the all-metrics builder needs to evaluate the stellar image here.
-    coro.stellar_intens = type(
-        "Star", (), {"diams": np.array([0.0]) * lod, "__call__": lambda *a: None}
-    )()
-    record = coro.compute_all_performance_curves()
-    assert (
-        "plot" not in inspect.signature(coro.compute_all_performance_curves).parameters
-    )
-    assert record is curves
+    from synthetic_yip import write_synthetic_yip
+
+    package = write_synthetic_yip(tmp_path / "package")
+    coro = _YIPData(package.path)
+    record = coro._prepare_record()
+    assert "plot" not in inspect.signature(coro._prepare_record).parameters
+    assert record.rule == curves.rule
     assert list(coro._perf_dir.glob("*.fits"))
     assert not hasattr(yippy, "plot_performance_curve")
     assert not hasattr(performance, "plot_performance_curve")

@@ -29,7 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from hwoutils.grids import Frame
 
-from yippy import DEFAULT_APERTURE_RULE, PerformanceCurves, viz
+from optixstuff import DEFAULT_APERTURE_RULE, PerformanceCurves
+from yippy import viz
 
 hwostyle.use("light")
 separations = np.linspace(0, 8, 40)
@@ -63,9 +64,11 @@ result = viz.plot_performance_curve(
 plt.show()
 ```
 
-`plot_core_mean_intensity` consumes the separation array and diameter-to-profile
-mapping returned by `compute_core_mean_intensity_curve(coro)`. Values are per pixel,
-not per unit angular area. Distinct colors and markers distinguish diameters.
+`plot_core_mean_intensity` consumes a separation array and diameter-to-profile
+mapping. Build each profile with
+`stellar_intensity_curves(coro, diameter_lod).evaluate("core_mean_intensity", separations)`.
+Values are per pixel, not per unit angular area. Distinct colors and markers
+distinguish diameters.
 
 ```{code-cell} python
 profiles = {
@@ -85,18 +88,16 @@ display. Use `line_kw` for line styling and the returned axes for titles and
 annotations. Pass colors and markers from a shared `eyepiece.style.SourceStyles`
 through `line_kw` when comparing curves across figures.
 
-## Plot census and scope
+## Plotting a loaded model
 
-The initial census found four throughput implementations in
-`examples/01_Core_Throughput.ipynb` and one in
-`examples/00_Performance_Metrics_Overview.ipynb`; both notebooks also draw
-other performance metrics. Occulter transmission was drawn in the overview,
-`examples/03_Spatial_Metrics_and_Backgrounds.ipynb`, and the Coronagraph
-method. Diameter profiles were drawn in the Coronagraph method and
-`examples/02_Stellar_Leakage_and_Contrast.ipynb`.
+Prepare the desired rules before selecting a record. No mutable calculation
+method is needed after loading:
 
-The two public functions cover these existing static curve families, delegating
-lines, palette selection, and result records to eyepiece. No prepared animation
-API is needed for this scope. The throughput and spatial-metrics notebooks
-now use the same functions as the examples above. Review usage after two
-releases; functions with fewer than two consumers should be retired.
+```python notest
+from optixstuff import Circular
+from yippy import Coronagraph, viz
+
+rule = Circular(0.7)
+coro = Coronagraph("path/to/yip", rules=(rule,))
+result = viz.plot_performance_curve(coro.curves(rule), metric="throughput")
+```

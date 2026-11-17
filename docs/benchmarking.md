@@ -3,11 +3,12 @@
 This page summarizes validation of yippy's coronagraph performance metrics
 against AYO's IDL implementation, tested on two coronagraphs (AAVC and OVC)
 with `HalfMaximum(0.3)`. These historical results used synthesized-PSF
-core measurements between offsets. That calculation now requires the explicit
-`separations_lod=core_separations(coro, CORE_STEP_LOD)` opt-in; default curves measure the shipped
-PSFs at their own offsets and interpolate the resulting values.
+core measurements between offsets. Reproduce that measurement with
+`optixstuff.performance.performance_curves` on an explicit separation axis.
+Default records measure the shipped PSFs at their own offsets and interpolate
+the resulting values.
 
-Performance curves are PCHIP-interpolated between the YIP's offsets by
+Performance curves are PCHIP-interpolated between the YIP's offsets
 through `PerformanceCurves.evaluate`. PCHIP preserves the shape of the tabulated curves without overshoot
 near the inner working angle (Fritsch, F. N. and Carlson, R. E. 1980,
 *SIAM Journal on Numerical Analysis* 17, 238). Throughput and area use linear
@@ -22,9 +23,11 @@ position, keeping the aperture centre fixed in angle independently of
 pixelization. Use `centre="peak"` for a circle following the refined local PSF
 peak. HalfMaximum includes only the region connected to the source peak;
 Matched uses the PSF as a weighted template and reports a noise-equivalent area.
-The selected result is `coro.performance`; previously requested rules are in
-`coro.curves_by_rule`. Evaluate every curve with
-`coro.performance.evaluate(name, separation_lod)`, including export samples.
+Declare the rules with `Coronagraph(path, rules=(...))`. Select a prepared
+record with `record = coro.curves(rule)` and evaluate every curve with
+`record.evaluate(name, separation_lod)`, including export samples. Generic
+`PerformanceCurves` interpolation and aperture photometry are owned by
+optixstuff. YIP loading, native offset selection, and export remain in yippy.
 
 The record contains throughput, `core_area_lod2`, absolute `leakage_fraction`,
 `leakage_density_lod2`, and `raw_contrast`. Its `leakage_rule` distinguishes

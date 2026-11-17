@@ -1,6 +1,6 @@
 # Spatial circle-reader accuracy
 
-`azimuthal_mean_profile` in `src/yippy/performance.py` defaults to the mean of a
+`azimuthal_mean_profile` in `optixstuff.performance` defaults to the mean of a
 **Keys cubic interpolant** on each requested circle. Pass
 `interpolation="quintic"` to opt into a degree-5 cardinal B-spline. It does not promise the
 mean of the continuous optical intensity that was sampled to make the image.
@@ -18,7 +18,7 @@ decision because downstream cached products depend on that choice.
 
 ```python notest
 import equinox as eqx
-from yippy.performance import azimuthal_mean_profile
+from optixstuff.performance import azimuthal_mean_profile
 
 read = eqx.filter_jit(azimuthal_mean_profile)
 profile = read(image, center, radii_pix, n_theta=256, interpolation="quintic")
@@ -26,9 +26,8 @@ profile = read(image, center, radii_pix, n_theta=256, interpolation="quintic")
 
 `interpolation` is a static string under JIT; with raw `jax.jit`, include it
 and `n_theta` in `static_argnames`. Enable JAX float64 for the precision
-reported here. The option is also available on `core_mean_intensity_profile`,
-`compute_core_mean_intensity_curve`, and `stellar_intensity_curves`.
-Evaluate `core_mean_intensity` on the latter record for radial queries.
+reported here. The option is also available on `stellar_intensity_curves`.
+Evaluate `core_mean_intensity` on the returned record for radial queries.
 This controls spatial interpolation; the resulting profile
 uses the shared record evaluator for PCHIP interpolation between radial knots.
 
@@ -50,16 +49,13 @@ only in-image arcs contribute, tangencies use endpoint values, and circles
 entirely outside return zero. No high-order accuracy is promised at an edge,
 or for negative lobes introduced by interpolation near a null.
 
-`Coronagraph` keeps on-demand profiles separately by reader and diameter.
-Quintic calls recompute from the stellar map when a precomputed Keys profile
-would otherwise be used, including point sources and the single-profile fast path.
-`compute_all_performance_curves(interpolation="quintic")` can explicitly
-rebuild the in-memory core intensity tables; later calls still default to
-Keys and select or compute the appropriate profile. These core intensity
-tables are rebuilt from maps, not read from or written to the performance
-FITS cache. Throughput, raw contrast and persistent cache identities are
-unchanged. Consumers saving their own quintic-derived products must distinguish
-them from Keys-derived products.
+`stellar_intensity_curves(coro, diameter_lod, interpolation="quintic")`
+computes a profile from the interpolated stellar map using the selected spatial
+reader. It returns a separate record without mutating the frozen coronagraph.
+Keys remains the default. These radial diagnostics are distinct from the
+aperture performance records selected by `coro.curves(rule)`. Consumers saving
+their own quintic-derived products must distinguish them from Keys-derived
+products.
 
 ## Reproduce without data files
 

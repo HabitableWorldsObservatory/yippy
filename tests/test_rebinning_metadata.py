@@ -61,18 +61,24 @@ def test_optical_center_axes_are_not_transposed(tmp_path):
 
 def test_performance_cache_distinguishes_rebinned_psfs(coro):
     """Changing detector bins changes the aperture calculation's cache entry."""
-    reduced = copy.copy(coro)
-    reduced.npixels = coro.npixels // 2
-    assert reduced._perf_filename() != coro._perf_filename()
+    from yippy._yip import _YIPData
+
+    host = _YIPData(coro.yip_path)
+    reduced = copy.copy(host)
+    reduced.npixels = host.npixels // 2
+    assert reduced._perf_filename() != host._perf_filename()
 
 
 def test_datacube_cache_does_not_reuse_pre_rebinning_schema(coro):
     """Cubes made with center-sampled PSFs cannot be reused for integrated bins."""
-    current = coro._datacube_cache_path
+    from yippy._yip import _YIPData
+
+    host = _YIPData(coro.yip_path)
+    current = host._datacube_cache_path
     parts = current.name.split("_")
     dtype_tag = next(part for part in parts if part in ("f32", "f64"))
-    legacy = (
-        f"psf_datacube_quarter_{dtype_tag}_{coro.npixels}px_"
-        f"{coro._source_signature()}.npy"
+    old = (
+        f"psf_datacube_quarter_{dtype_tag}_{host.npixels}px_"
+        f"{host._source_signature()}.npy"
     )
-    assert current.name != legacy
+    assert current.name != old

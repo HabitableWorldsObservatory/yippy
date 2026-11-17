@@ -11,29 +11,26 @@ finite crop, which would fold the missing Airy wings into the core.
 from dataclasses import replace
 from types import SimpleNamespace
 
-import astropy.units as u
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.grids import Frame, Image, PixelGrid
-from lod_unit import lod
+from optixstuff.apertures import Circular
+from optixstuff.performance import (
+    _circle_square_weights,
+    circular_aperture,
+    core_subpixel_window,
+    core_window_half_width_pix,
+    performance_curves,
+    truncation_core,
+)
 from scipy.integrate import quad
 from scipy.optimize import brentq
 from scipy.special import j0, j1, jvp
 
-from yippy import Circular
-from yippy.performance import (
-    _circle_square_weights,
-    _iter_xaxis_positions,
-    circular_aperture,
-    compute_core_area_curve,
-    compute_raw_contrast_curve,
-    compute_throughput_curve,
-    core_subpixel_window,
-    core_window_half_width_pix,
-    truncation_core,
-)
+from yippy._yip import _YIPData
+from yippy.performance import _iter_xaxis_positions
 
 
 def airy_psf(pixel_lod, shift_pix=0.0, size=256):
@@ -46,8 +43,8 @@ def airy_psf(pixel_lod, shift_pix=0.0, size=256):
     return np.pi / 4 * amplitude**2 * pixel_lod**2
 
 
-def image_coro(psf, pixel_lod, star=None):
-    """Expose one image through the same data interface as a loaded package."""
+def image_source(psf, pixel_lod, star=None):
+    """Return an explicit PSF callable and stellar Image on one physical grid."""
     center_y, center_x = np.array(psf.shape) // 2
     grid = PixelGrid.regular(
         psf.shape,
@@ -56,25 +53,12 @@ def image_coro(psf, pixel_lod, star=None):
         center=(center_x, center_y),
         frame=Frame(500, 6, "circumscribed"),
     )
-    stellar_reader = lambda diam: Image(  # noqa: E731
+    stellar = Image(
         psf if star is None else star, grid, (), "per_pixel", "stellar_flux_fraction"
     )
-    stellar_reader.grid = grid
-    stellar_reader.diams = np.array([0.0]) * lod
-    stellar_reader._evaluate_array = lambda diam: psf if star is None else star
-    return SimpleNamespace(
-        grid=grid,
-        pixel_scale_arcsec=pixel_lod * lod / u.pix,
-        offax=SimpleNamespace(
-            x_offsets=np.array([0.0]) * lod,
-            y_offsets=np.array([0.0]) * lod,
-            grid=grid,
-            get_psf_by_offset_idx=lambda i, j: Image(
-                psf, grid, (), "per_pixel", "stellar_flux_fraction"
-            ),
-        ),
-        stellar_intens=stellar_reader,
-    )
+    return lambda separation: Image(
+        psf, grid, (), "per_pixel", "stellar_flux_fraction"
+    ), stellar
 
 
 def encircled_energy(radius_lod):
@@ -88,10 +72,10 @@ def encircled_energy(radius_lod):
 @pytest.mark.parametrize("radius_lod", [0.7, 1.0, 1.22])
 def test_circle_airy_encircled_energy(pixel_lod, shift_pix, radius_lod):
     """A circular sum recovers the Airy encircled energy at each sampling phase."""
-    coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, rule=Circular(radius_lod, centre="peak"))[
-        1
-    ][0]
+    source, stellar = image_source(airy_psf(pixel_lod, shift_pix), pixel_lod)
+    measured = performance_curves(
+        source, stellar, Circular(radius_lod, centre="peak"), separations_lod=[0.0]
+    ).throughput[0]
     assert measured == pytest.approx(encircled_energy(radius_lod), rel=1e-3)
 
 
@@ -117,10 +101,11 @@ def test_truncation_airy_half_maximum(pixel_lod, shift_pix, metric):
 def test_circle_is_invariant_to_subpixel_shift(pixel_lod):
     """A 0.3-pixel source shift preserves the peak-centered encircled flux."""
     fluxes = [
-        compute_throughput_curve(
-            image_coro(airy_psf(pixel_lod, shift), pixel_lod),
-            rule=Circular(0.7, centre="peak"),
-        )[1][0]
+        performance_curves(
+            *image_source(airy_psf(pixel_lod, shift), pixel_lod),
+            Circular(0.7, centre="peak"),
+            separations_lod=[0.0],
+        ).throughput[0]
         for shift in (0.0, 0.3)
     ]
     assert fluxes[0] == pytest.approx(fluxes[1], rel=1e-3)
@@ -129,18 +114,23 @@ def test_circle_is_invariant_to_subpixel_shift(pixel_lod):
 def test_flat_image_flux_is_the_counted_circle_area():
     """A flat stellar image carries intensity times the measured aperture area."""
     psf = airy_psf(0.25, 0.3, size=64)
-    coro = image_coro(psf, 0.25, star=np.full_like(psf, 3.0))
-    flux = compute_throughput_curve(coro)[1][0]
-    contrast = compute_raw_contrast_curve(coro)[1][0]
-    area = compute_core_area_curve(coro)[1][0]
+    source, stellar = image_source(psf, 0.25, star=np.full_like(psf, 3.0))
+    record = performance_curves(source, stellar, Circular(0.7), separations_lod=[0.0])
+    flux, contrast, area = (
+        record.throughput[0],
+        record.raw_contrast[0],
+        record.core_area_lod2[0],
+    )
     assert contrast * flux == pytest.approx(3 * area / 0.25**2, rel=1e-6)
 
 
 def test_circle_fractional_boundary_has_analytic_area():
     """Fractions of boundary cells tile the disk to one part per million."""
-    coro = image_coro(airy_psf(0.25, size=64), 0.25)
+    source, stellar = image_source(airy_psf(0.25, size=64), 0.25)
     # Boundary fractions must tile the analytic disk, including axial cells.
-    area = compute_core_area_curve(coro)[1][0]
+    area = performance_curves(
+        source, stellar, Circular(0.7), separations_lod=[0.0]
+    ).core_area_lod2[0]
     assert area == pytest.approx(np.pi * 0.7**2, rel=1e-6)
 
 
@@ -178,10 +168,10 @@ def test_circle_matches_independently_sampled_airy(pixel_lod, shift_pix, radius_
     intensity = np.pi / 4 * (2 * j1(x) / x) ** 2
     weights = reference_circle_weights(rows, cols, radius_lod / h)
     expected = (weights * intensity).sum() * h**2
-    coro = image_coro(airy_psf(pixel_lod, shift_pix), pixel_lod)
-    measured = compute_throughput_curve(coro, rule=Circular(radius_lod, centre="peak"))[
-        1
-    ][0]
+    source, stellar = image_source(airy_psf(pixel_lod, shift_pix), pixel_lod)
+    measured = performance_curves(
+        source, stellar, Circular(radius_lod, centre="peak"), separations_lod=[0.0]
+    ).throughput[0]
     assert measured == pytest.approx(expected, rel=2e-6)
 
 
@@ -224,8 +214,8 @@ def test_truncation_matches_independently_sampled_airy(pixel_lod, shift_pix):
 def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
     """Quantify 10x boundary quadrature against 40x on a native shipped PSF."""
     coro = shipped_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    for pos in _iter_xaxis_positions(coro):
+    pixel_lod = float(coro.grid.step)
+    for pos in _iter_xaxis_positions(_YIPData(coro.yip_path)):
         values = []
         for factor in (10, 40):
             with jax.enable_x64():
@@ -257,7 +247,26 @@ def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
 
 def test_shipped_contrast_is_repeatable_for_faint_stellar_sums(shipped_coro):
     """Faint stellar DFT sums are stable despite cancellation of bright modes."""
-    values = np.stack([compute_raw_contrast_curve(shipped_coro)[1] for _ in range(20)])
+    coro = shipped_coro
+    positions = list(_iter_xaxis_positions(_YIPData(coro.yip_path)))
+    images = {
+        pos.separation: Image(
+            pos.psf, coro.grid, (), "per_pixel", "stellar_flux_fraction"
+        )
+        for pos in positions
+    }
+    stellar = coro.stellar_map(None, 0.0, grid=None)
+    values = np.stack(
+        [
+            performance_curves(
+                images.__getitem__,
+                stellar,
+                Circular(0.7),
+                separations_lod=sorted(images),
+            ).raw_contrast
+            for _ in range(20)
+        ]
+    )
     np.testing.assert_allclose(
         values, np.broadcast_to(values[0], values.shape), rtol=1e-6
     )
@@ -283,7 +292,7 @@ def test_circular_aperture_composes_under_jit():
 
 def test_shipped_circle_stays_near_nominal_source(shipped_coro):
     """A dark on-axis source must not jump to a remote leakage speckle."""
-    _, flux = compute_throughput_curve(shipped_coro)
+    flux = shipped_coro.curves().throughput
     assert flux[0] < 1e-8
     first_max = next(
         (i for i in range(1, len(flux) - 1) if flux[i] > flux[i + 1]), len(flux) - 1
@@ -380,7 +389,7 @@ def test_truncation_peak_only_safeguard(value, ratio):
 
 def test_shipped_truncation_stays_near_nominal_source(shipped_coro):
     """The on-axis core excludes unrelated bright leakage outside its window."""
-    pos = next(_iter_xaxis_positions(shipped_coro))
+    pos = next(_iter_xaxis_positions(_YIPData(shipped_coro.yip_path)))
     with jax.enable_x64():
         flux, _ = truncation_core(
             jnp.asarray(pos.psf, dtype=jnp.float64),
@@ -393,9 +402,16 @@ def test_shipped_truncation_stays_near_nominal_source(shipped_coro):
 
 def test_nominal_search_preserves_fractional_pixel_position():
     """Native offsets use the same unrounded coordinates as synthesized PSFs."""
-    coro = image_coro(airy_psf(0.25, 0.3, size=32), 0.25)
-    coro.offax.x_offsets = np.array([0.075]) * lod
-    coro.offax.grid = replace(coro.offax.grid, center_y=16.2)
+    source, _ = image_source(airy_psf(0.25, 0.3, size=32), 0.25)
+    image = source(0.0)
+    coro = SimpleNamespace(
+        offax=SimpleNamespace(
+            x_offsets=np.array([0.075]),
+            y_offsets=np.array([0.0]),
+            grid=replace(image.grid, center_y=16.2),
+            get_psf_by_offset_idx=lambda i, j: image,
+        )
+    )
     pos = next(_iter_xaxis_positions(coro))
     assert pos.px == pytest.approx(16.3)
     assert pos.py == pytest.approx(16.2)

@@ -11,7 +11,7 @@ from hwoutils.transforms import downsample_psfs, rotate_image
 def test_real_psf_downsampling_conserves_flux(coro, size):
     """Every stored PSF retains its integral at integer and noninteger ratios."""
     with jax.enable_x64():
-        source = jnp.asarray(coro.offax.flat_psfs, dtype=jnp.float64)
+        source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=jnp.float64)
         output, scale = downsample_psfs(source, 0.25, (size, size))
         np.testing.assert_allclose(
             output.sum(axis=(1, 2)), source.sum(axis=(1, 2)), rtol=1e-12, atol=1e-30
@@ -24,7 +24,7 @@ def test_real_psf_downsampling_conserves_flux(coro, size):
 def test_real_psf_rotation_padding_convergence(coro):
     """Increasing padding converges while core photometry stays stable."""
     with jax.enable_x64():
-        source = jnp.asarray(coro.offax.flat_psfs[37], dtype=jnp.float64)
+        source = jnp.asarray(coro._offaxis_backend.flat_psfs[37], dtype=jnp.float64)
         outputs = [
             np.asarray(rotate_image(source, 30.0, pad_factor=p))
             for p in (0.5, 1.5, 3.5)

@@ -16,189 +16,146 @@
 
 # yippy
 
-A Python and JAX library for loading coronagraph yield input packages (YIPs)
-and computing coronagraph performance metrics. yippy provides Fourier-based
-off-axis PSF interpolation, aperture performance records, and export to
-EXOSIMS and AYO formats. Query records and render on detector grids through
-`optixstuff.YippyCoronagraph`.
+A Python and JAX library for loading coronagraph yield input packages (YIPs),
+interpolating PSFs, and exporting performance to EXOSIMS and AYO formats.
+`yippy.Coronagraph` is an immutable Equinox module implementing
+`optixstuff.AbstractTableCoronagraph` directly. Aperture rules and generic
+performance records belong to optixstuff.
 
 ## Installation
 
 ```bash
-pip install yippy optixstuff
+pip install yippy
 ```
 
-## Quick Start
+## Quick start
 
-The primary workflow is to point yippy at a YIP directory you already have
-on disk -- either one you built yourself or one you downloaded:
-
-This example needs a user-supplied YIP directory.
+This example needs a user-supplied YIP directory. Source offsets, separations,
+and stellar diameters are dimensionless numeric values in the native product's
+lambda/D frame. Convert unit-bearing values before querying the model.
 
 ```python notest
+from optixstuff import Circular, HalfMaximum
 from yippy import Coronagraph
 
-# Load a YIP from a folder on disk
-coro = Coronagraph("path/to/eac1_aavc_2d")
+circle, core = Circular(0.7), HalfMaximum(0.3)
+coro = Coronagraph("path/to/yip", rules=(circle, core))
 
-# Off-axis PSF at a given (x, y) position
-from lod_unit import lod
+# Native source samples: data has shape (source, y, x).
+planet = coro.source_psfs(None, [2.0], [5.0], grid=None)
+star = coro.stellar_map(None, 0.01, grid=None)
 
-offaxis_psf = coro.offax(2 * lod, 5 * lod)
+# Explicit target grids request pixel integrals, including at native pitch.
+rendered = coro.off_axis_psf(None, 5.0, coro.grid)
+transmission = coro.background_transmission(None, grid=coro.grid)
 
-# Performance metrics at any separation
-from optixstuff import YippyCoronagraph
-from yippy import Circular, EqxCoronagraph
-
-optics = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
-rule = Circular(0.7)
-curves = optics.curves(rule)
-throughput = optics.throughput(5.0, rule=rule)  # scalar or array
-contrast = optics.raw_contrast(5.0)
-occ_trans = optics.occulter_transmission(5.0)
-
-# 2D performance maps (pixel grids)
-throughput_map = optics.throughput_map()
-core_area_map = optics.core_area_map()
+record = coro.curves(circle)
+throughput = coro.throughput(5.0, rule=circle)
+contrast = coro.raw_contrast(5.0, rule=circle)
+area = record.evaluate("core_area_lod2", 5.0)
+throughput_map = coro.throughput_map()
+core_area_map = coro.core_area_map()
 ```
 
-If you don't have a YIP on hand, see [Example data](#example-data-beta)
-below for a convenience downloader.
+Supply every required rule in `rules=` at construction. `curves(rule)` selects
+a prepared record and raises for an unprepared rule. Reading a curve never
+mutates the model. `leakage_rule="aperture_mean"` is the default;
+`"azimuthal_ring_mean"` selects ring-mean leakage density at construction.
+Pass the same `leakage_rule` to `curves` and scalar queries for that record.
+`bandpass` is a `hwoutils.spectral.Band`, or `None` when the YIP has no edges.
+`primary` reads both diameter conventions and collecting area from the YIP.
 
-## Loading and Queries
+## Images, grids, and JAX
 
-yippy provides a host loader and an array backend. Both supply records to
-`optixstuff.YippyCoronagraph`, the front end for scalar performance and
-detector-grid queries:
+Every image query returns `hwoutils.grids.Image`, with array values in `.data`
+and geometry in `.grid`. Source arrays have leading axis `"source"`; stellar
+and sky maps are two-dimensional for scalar diameters. Source and stellar
+images are per-pixel fractions of unocculted stellar flux. Sky transmission is
+dimensionless and uses sampled-value semantics. The off-axis, stellar, and sky
+products can have different frames and pitches.
 
-| | `Coronagraph` | `EqxCoronagraph` |
-|---|---|---|
-| **Purpose** | Full-featured analysis & export | JIT-compiled simulation |
-| **Backend** | NumPy/SciPy + JAX | Pure JAX/Equinox |
-| **JIT-compatible** | No | Yes (`eqx.filter_jit`) |
-| **GPU/TPU support** | PSF generation only | Everything |
-| **I/O & export** | EXOSIMS FITS, AYO CSV | None (simulation only) |
-| **Performance curves** | Computed on init | Converted from `Coronagraph` |
+Use `grid=None` for native source or stellar samples. An explicit target
+`PixelGrid` integrates the declared reconstruction onto its pixels. Native
+coordinates remain in each product's lambda/D frame; convert a grid to sky
+coordinates with `grid.to_arcsec(wavelength_nm)` when needed.
 
-### `Coronagraph` -- Analysis & Data Management
-
-The primary class for loading YIPs, computing performance curves, and
-exporting to external formats:
-
-This example needs a user-supplied YIP directory.
+This example needs a configured `coro`.
 
 ```python notest
-from yippy import Coronagraph
+import equinox as eqx
+import jax.numpy as jnp
 
-coro = Coronagraph("path/to/yip")
 
-from optixstuff import YippyCoronagraph
-from yippy import DEFAULT_APERTURE_RULE, EqxCoronagraph, stellar_intensity_curves
+@eqx.filter_jit
+def simulate(coro, x_lod, y_lod, diameter_lod):
+    planet = coro.source_psfs(None, x_lod, y_lod, grid=coro.grid)
+    stellar = coro.stellar_map(None, diameter_lod, grid=coro.grid)
+    return planet, stellar
 
-optics = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
-rule = DEFAULT_APERTURE_RULE
-curves = optics.curves(rule)
-throughput = optics.throughput(5.0, rule=rule)
-area = curves.evaluate("core_area_lod2", 5.0)
-leakage = curves.evaluate("leakage_fraction", 5.0)
+
+planets, star = simulate(coro, jnp.array([3.0]), jnp.array([2.0]), 0.01)
+```
+
+For extended-scene convolution, prepare a PSF datacube outside JIT and assign
+the returned model. The original module remains unchanged. Cubes can be large;
+choose the grid and available memory before preparing one.
+
+```python notest
+coro = coro.create_psf_datacube()
+image = coro.extended_scene(scene_image, None, grid=detector_grid)
+```
+
+## Performance records
+
+`coro.curves(rule)` returns an `optixstuff.PerformanceCurves` containing
+`separation_lod`, `throughput`, `core_area_lod2`, `leakage_fraction`,
+`leakage_density_lod2`, `raw_contrast`, `iwa_lod`, and `data_extent_lod`.
+Use `record.evaluate(field, separation_lod)` to interpolate. Throughput and
+area use linear-value PCHIP; leakage and contrast use log-value PCHIP. The
+fields interpolate independently. Their contrast identity holds at measured
+knots: contrast = leakage_density * core_area / throughput.
+
+`Circular(radius_lod, centre="source")` fixes the aperture at the supplied
+source position. `centre="peak"` follows the local PSF peak. `HalfMaximum(f)`
+selects the connected core above fraction `f` of its peak. `Matched()` uses
+PSF weights and reports noise-equivalent area. Flux and area share the same
+aperture weights, derived from the band-limited PSF reconstruction.
+
+Default records measure the shipped non-negative off-axis samples. For
+standalone aperture measurements on another separation axis, use
+`optixstuff.performance.performance_curves`. Its source callback returns a
+native two-dimensional `Image`; select the source axis from `source_psfs`
+with `dataclasses.replace`, retaining the native grid and reconstruction.
+The prepared `coro.curves(rule)` records require no callback.
+
+Finite-star leakage queries accept `stellar_diam_lod=` and apply prepared
+aperture operators to the interpolated stellar map. Throughput and area accept
+the same keyword and are independent of stellar diameter. `time_d` is days
+from the scene epoch and is unused by these fixed tables.
+
+The separate stellar ring profile remains available from
+`yippy.performance.stellar_intensity_curves(coro, diameter_lod)`. Evaluate
+`"core_mean_intensity"` for per-stellar-pixel flux fractions; divide by the
+stellar grid pixel area for density per square lambda/D.
+
+## Post-processing and export
+
+Records store unfloored optical quantities. Apply an engineering contrast
+floor and a post-processing factor explicitly in the consumer:
+
+```python notest
+import numpy as np
+
 ppf = 30.0
-contrast_noise = optics.raw_contrast(5.0, rule=rule) / ppf
-density_noise = curves.evaluate("leakage_density_lod2", 5.0) / ppf
-radial = stellar_intensity_curves(EqxCoronagraph(yippy_coro=coro))
-per_pixel_intensity = radial.evaluate("core_mean_intensity", 5.0)  # ring mean
-
-# Export
+contrast_noise = np.maximum(np.abs(coro.raw_contrast(5.0)), 4e-10) / ppf
+density_noise = coro.leakage_density_lod2(5.0) / ppf
 coro.to_exosims()
 coro.dump_ayo_csv("output.csv")
 ```
 
-The post-processing convention here is raw contrast divided by `ppf`, or
-leakage density divided by `ppf` in stellar fraction per square lambda/D.
 `jaxedith.PostProcessing.speckle_residual_fraction` owns the residual fraction
-(`1 / ppf`); coronagraphs expose the optical quantities.
-
-### `EqxCoronagraph` -- JIT-Compatible Simulation
-
-A pure JAX/Equinox module for use inside `jax.jit`-compiled pipelines:
-
-This example needs a user-supplied YIP directory.
-
-```python notest
-from optixstuff import YippyCoronagraph
-from yippy import EqxCoronagraph
-import equinox as eqx
-
-# Create from a YIP path directly
-coro = EqxCoronagraph("path/to/yip")
-
-
-# All methods are JIT-traceable
-@eqx.filter_jit
-def simulate(coro, x, y):
-    psf = coro.create_psf(x, y)
-    stellar = coro.stellar_intens(0.01)
-    return psf, stellar
-
-
-optics = YippyCoronagraph(backend=coro)
-throughput = optics.throughput(5.0)
-```
-
-## Performance Metrics
-
-Individual metric functions are available in `yippy.performance` for
-standalone analysis:
-
-This example needs a configured coronagraph (`coro`).
-
-```python notest
-from yippy.performance import (
-    compute_throughput_curve,
-    compute_raw_contrast_curve,
-    compute_core_area_curve,
-    compute_occ_trans_curve,
-    compute_core_mean_intensity_curve,
-    compute_truncation_throughput_curve,  # PSF truncation-ratio aperture
-    compute_truncation_core_area_curve,
-)
-
-# Compute individual curves
-separations, throughputs = compute_throughput_curve(coro)
-separations, contrasts = compute_raw_contrast_curve(coro)
-```
-
-### PSF Truncation Ratio
-
-When a `HalfMaximum(0.3)` aperture rule is selected,
-throughput and core area are computed using an adaptive aperture that includes
-all oversampled pixels exceeding `ratio * peak`. This matches AYO's
-`photap_frac` / `omega_lod` calculation and is recommended for ETC integration.
-Core areas and aperture throughputs use the PSF's band-limited (trigonometric)
-interpolant at 10 subpixels per pixel side. Circular apertures use exact
-circle-square overlap fractions; truncation cores use fractional areas from
-the local level-set tangent, with gradients from the same DFT basis. Flux
-and area use the same weights. A circle fully inside the image has area
-`pi * radius**2`. Gaussian core-area fits remain fits.
-
-Peak searches stay within `PEAK_SEARCH_RADIUS_LOD = 1.0` lambda/D of the
-nominal source position, including for raw contrast. Stellar leakage uses
-that same planet-centered circle. Truncation measurements include only the
-local core window for in-image sources, preventing distant leakage speckles
-from setting the core below the IWA. Native offsets outside the image retain
-the global in-image truncation-core convention.
-
-By default the curves are tabulated only at the package's own non-negative
-off-axis offsets and interpolated between them. Passing
-`separation_step_lod=CORE_STEP_LOD` to `compute_truncation_curves` or
-`compute_all_performance_curves` opts into a 0.25 lambda/D grid of synthesized
-PSFs as well. A YIP alone cannot establish whether blended PSFs reproduce the
-optics between shipped offsets.
-
-Band-limited reconstruction requires sampling at 0.5 lambda/D per pixel or
-finer. Coarser packages emit one `UserWarning` per `Coronagraph` and still
-compute. Fractional boundaries remove the lattice-point area error;
-intensity quadrature, level-set curvature, and finite-image boundaries still
-require oversampling convergence checks.
+`1 / ppf`. Exports use the first prepared record and only apply a floor when
+explicitly requested.
 
 ## Example data
 
@@ -257,105 +214,23 @@ from yippy import cache_dir
 print(cache_dir())
 ```
 
-## Precision
+## Precision and execution
 
-`yippy` follows JAX's global `jax_enable_x64` flag. The default is `float32`
-(JAX's default and the memory-friendly choice -- the PSF datacube dominates
-memory). For a uniform `float64` pipeline -- needed for high-fidelity work or
-backends that require double precision -- enable x64 *before* building a
-coronagraph:
-
-This example needs a user-supplied YIP directory.
+Enable JAX x64 before constructing a model when deep-contrast accuracy or the
+sampled-intensity reader requires double precision:
 
 ```python notest
 import jax
-
-jax.config.update("jax_enable_x64", True)  # or set JAX_ENABLE_X64=1 in the env
-
-from yippy import Coronagraph, EqxCoronagraph
-
-coro = EqxCoronagraph("/path/to/yip")  # now all arrays are float64
-```
-
-There is no per-object dtype option: precision is one global switch, so the
-whole pipeline stays a single dtype (JAX does not mix `float32` and `float64`
-cleanly). PSF datacube caches are dtype-keyed (`psf_datacube*_f32.npy` vs
-`*_f64.npy`), so float32 and float64 runs never share a cache.
-
-## Units
-
-Yield input packages use $`\lambda / D`$ units so `yippy` treats them
-as the default and uses the `lod_unit` package to define the `lod` unit. However,
-it can use three different `astropy` units: pixels (as defined by the yield
-input package), angular separation (angle units), or apparent separation
-(length units). If no units are provided it assumes the input is in $`\lambda / D`$.
-
-This example needs a configured coronagraph (`coro`).
-
-```python notest
-import astropy.units as u
-
-# pixels
-x_pos = 2 * u.pix
-y_pos = 5 * u.pix
-offaxis_psf = coro.offax(x_pos, y_pos)
-
-# angular separation
-telescope_diameter = 10 * u.m
-wavelength = 500 * u.nm
-offaxis_psf = coro.offax(x_pos, y_pos, lam=wavelength, D=telescope_diameter)
-
-# apparent separation
-star_dist = 10 * u.pc
-offaxis_psf = coro.offax(
-    x_pos, y_pos, lam=wavelength, D=telescope_diameter, dist=star_dist
-)
-```
-
-## JAX
-
-yippy uses [JAX](https://jax.readthedocs.io) for JIT compilation and
-GPU/TPU-accelerated PSF generation. JAX defaults to 32-bit precision;
-if you need 64-bit precision, configure it
-**before** importing yippy or any other JAX-based library:
-
-```python
-# At the very top of your script
-from hwoutils import enable_x64, set_platform
-
-enable_x64()  # switch to float64
-set_platform("cpu")  # or "gpu", "gpu,cpu" for fallback
-
-# Now it's safe to import yippy
 from yippy import Coronagraph
+
+jax.config.update("jax_enable_x64", True)
+coro = Coronagraph("path/to/yip")
 ```
 
-Or via environment variables (safest):
-
-```bash
-JAX_ENABLE_X64=True JAX_PLATFORMS=cpu python my_script.py
-```
-
-See the [JAX Configuration Guide](https://github.com/CoreySpohn/hwoutils/blob/main/docs/jax_configuration.md)
-in hwoutils for details and common gotchas.
-
-### Constructor options
-
-- `use_jax`: Use JAX for PSF computation. Default is `True`.
-- `x_symmetric`: Off-axis PSFs are symmetric about the x-axis. Default is `True`.
-- `y_symmetric`: Off-axis PSFs are symmetric about the y-axis. Default is `True`.
-
-### Parallel processing of off-axis PSFs
-
-The base call of `coronagraph.offax(x,y)` is the most user-friendly, but is not
-the most efficient. When generating many PSFs it is recommended to convert all
-required (x,y) positions into arrays of floats (in $`\lambda / D`$) and use the
-`coronagraph.offax.create_psfs_parallel(x_arr, y_arr)` function. This function
-uses JAX's `shard_map` to distribute the computation across multiple CPU devices.
-
-To use multiple CPU devices, call `hwoutils.set_host_device_count(N)` or set
-`XLA_FLAGS=--xla_force_host_platform_device_count=N` **before** importing JAX.
-On GPU/TPU backends, yippy automatically uses `vmap`+`jit` instead of `shard_map`.
+There is no per-object dtype option. Datacube caches distinguish float32 and
+float64. Model construction and export perform host I/O; image and scalar
+queries support JAX transformations. Batch source positions through
+`source_psfs(None, x_lod_array, y_lod_array, grid=target)`.
 
 ### Optional sampled-intensity reader
 
@@ -365,25 +240,24 @@ The `sinchole` dependency must be available separately until its first release.
 
 ```python notest
 import jax
-from yippy import Coronagraph, EqxCoronagraph, SincOptions
+from yippy import Coronagraph, SincOptions
 
 jax.config.update("jax_enable_x64", True)
 coro = Coronagraph(
     "delivery", interpolation="sinc", sinc_options=SincOptions(product_id="mono-000")
 )
-image = coro.create_psf(4.0, 5.5)
-result = coro.create_psf_with_info(4.0, 5.5)
-view = EqxCoronagraph(yippy_coro=coro)
+image = coro.source_psfs(None, [4.0], [5.5], grid=None)
+result = coro.source_psfs_with_info([4.0], [5.5])
 ```
 
 `blend` remains the default. Unmarked packages do not import sinchole;
-versioned deliveries require it for file-free validation even with blend. Unmarked legacy
-packages retain their numerical and cache behavior. `auto` records its
+versioned deliveries require it for file-free validation even with blend.
+Unmarked packages retain their numerical and cache behavior. `auto` records its
 construction decision in the frozen `interpolation_info` record. It can use
 blend for supported sampling refusals on full signed grids. Quadrant deliveries
 require validated reflection evidence and midpoint detector geometry; they have
 no blend fallback. Explicit `blend` rejects these deliveries. A bounded policy
-never constructs a blend backend, including for unmarked legacy packages.
+never constructs a blend backend, including for unmarked packages.
 
 For `sinc-delivery-0.1`, FITS `PIXSCALE` with an empty or absent comment uses
 the schema unit, lambda0/D per pixel, and is compared numerically with the
@@ -403,17 +277,13 @@ reason bits, converted error diagnostics and a `selected_backend` value of 0
 (blend) or 1 (sinc). Sampling admission permits unknown error; bounded policies
 refuse. Eager strict reads raise on refusal, while compiled reads return NaNs.
 
-The adapter selects one monochromatic product and reads stellar and sky data
-from the manifest's separate legacy package. The instance keeps the stellar
-`header`, plus distinct `offaxis_header` and `sky_header` records. In the Equinox
-view, `pixel_scale_lod` is the off-axis pitch; `stellar_pixel_scale_lod` and
-`sky_pixel_scale_lod` describe the other maps. The `source_psfs`, `stellar_map`,
-and `background_transmission` methods live on `optixstuff.YippyCoronagraph`
-and accept a target `PixelGrid`.
-Their wavelength argument preserves fixed-product table compatibility and does
-not select another product. Target pitches and coordinates use the respective
-product's reference frame. Wrappers with a single shared pitch must delegate
-these methods explicitly to preserve distinct stellar and sky frames.
+The model selects one monochromatic product and reads stellar and sky data
+from the manifest's separate package. Each `Image` carries its own `PixelGrid`
+and wavelength/diameter `Frame`. `source_psfs`, `stellar_map`, and
+`background_transmission` accept explicit target grids and reconcile different
+frames through angular coordinates. `grid=None` retains native source or stellar
+samples. The wavelength argument does not select another product; use
+`optixstuff.MultiBandCoronagraph` to dispatch among products.
 
 `SincOptions` accepts sinchole domain, memory and policy objects, plus an
 optional prefilter `taps` count (5 to 10). By default sinchole selects its
@@ -429,3 +299,5 @@ arrays; larger batches need an explicit budget. Cube caches preserve per-query
 status and backend selections in an integrity-checked sidecar. Every opt-in
 cache identity retains the requested domain, policy and canonical options,
 including when construction binds blend.
+
+The `interpolation` selector accepts `blend` (default), `legacy_blend`, `auto`, and `sinc`. `legacy_blend` selects the blend reader and retains that requested name in admission provenance.

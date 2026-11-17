@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from yippy.coronagraph import _load_cached_datacube, _save_datacube
+from yippy._yip import _load_cached_datacube, _save_datacube
 
 
 def test_save_then_load_round_trips(tmp_path):

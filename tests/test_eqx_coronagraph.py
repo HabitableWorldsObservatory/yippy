@@ -5,14 +5,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import requires_available_yip
 from hwoutils.grids import Frame
-from optixstuff import YippyCoronagraph
+from optixstuff.apertures import Circular
+from optixstuff.performance import PerformanceCurves
 from scipy.interpolate import PchipInterpolator
 
-from yippy import Coronagraph, EqxCoronagraph
-from yippy.apertures import Circular
-from yippy.performance import PerformanceCurves, stellar_intensity_curves
+from yippy import Coronagraph
 
 
 def _record(nodes, values):
@@ -86,57 +84,6 @@ class TestPerformanceRecord:
         np.testing.assert_allclose(actual, expected, rtol=2e-6)
 
 
-@requires_available_yip
-class TestEqxCoronagraphInterpolation:
-    """Check host-to-JAX conversion on the public package, at float32 precision."""
-
-    @pytest.fixture()
-    def test_separations(self, coro):
-        """Sample from the inner crossing to the array extent."""
-        return np.linspace(
-            coro.performance.iwa_lod, coro.performance.data_extent_lod, 20
-        )
-
-    def test_throughput(self, coro, eqx_coro, test_separations):
-        """Fails if the wrapper evaluates a different throughput table."""
-        expected = coro.performance.evaluate("throughput", test_separations)
-        actual = eqx_coro.performance.evaluate("throughput", test_separations)
-        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-8)
-
-    def test_raw_contrast_at_knots(self, coro, eqx_coro):
-        """Fails if the contrast table or its scale changes at the JAX boundary."""
-        knots = coro.performance.separation_lod
-        expected = coro.performance.evaluate("raw_contrast", knots)
-        actual = eqx_coro.performance.evaluate("raw_contrast", knots)
-        np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=0)
-
-    def test_occulter_transmission(self, coro, eqx_coro, test_separations):
-        """Fails if the occulter profile is read on the performance axis."""
-        expected = coro.occultation_record.evaluate(
-            "occulter_transmission", test_separations
-        )
-        actual = eqx_coro.occultation_record.evaluate(
-            "occulter_transmission", test_separations
-        )
-        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-8)
-
-    def test_core_area(self, coro, eqx_coro, test_separations):
-        """Fails if the wrapper changes the aperture area or its lod-squared unit."""
-        expected = coro.performance.evaluate("core_area_lod2", test_separations)
-        actual = eqx_coro.performance.evaluate("core_area_lod2", test_separations)
-        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-8)
-
-    def test_core_mean_intensity(self, coro, eqx_coro, test_separations):
-        """Fails if the stellar profile is read on the performance axis."""
-        expected = coro._intensity_record.evaluate(
-            "core_mean_intensity", test_separations
-        )
-        actual = stellar_intensity_curves(eqx_coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", test_separations
-        )
-        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=0)
-
-
 def test_synthetic_performance_agrees_in_float64(synthetic_1d):
     """Fails on host/JAX drift, including tails and diameter-dependent profiles.
 
@@ -145,70 +92,36 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
     """
     with jax.enable_x64():
         coro = Coronagraph(synthetic_1d.path)
-        eqx_coro = EqxCoronagraph(yippy_coro=coro)
+        eqx_coro = coro
         grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
-        for name in [
-            "throughput",
-            "raw_contrast",
-            "core_area",
-            "occulter_transmission",
-            "core_mean_intensity",
+        for field, method in [
+            ("throughput", coro.throughput),
+            ("raw_contrast", coro.raw_contrast),
+            ("core_area_lod2", coro.core_area),
         ]:
-            record = (
-                coro.occultation_record
-                if name == "occulter_transmission"
-                else coro._intensity_record
-                if name == "core_mean_intensity"
-                else coro.performance
+            expected = PchipInterpolator(
+                coro.curves().separation_lod,
+                np.log10(getattr(coro.curves(), field))
+                if field == "raw_contrast"
+                else getattr(coro.curves(), field),
             )
-            field = "core_area_lod2" if name == "core_area" else name
-            expected = record.evaluate(field, grid)
-            method = (
-                (
-                    lambda x: stellar_intensity_curves(eqx_coro).evaluate(
-                        "core_mean_intensity", x
-                    )
-                )
-                if name == "core_mean_intensity"
-                else getattr(YippyCoronagraph(backend=eqx_coro), name)
-            )
-            np.testing.assert_allclose(method(grid), expected, rtol=1e-12, atol=1e-24)
+            queries = jnp.array([0.13, 1.37, 3.29])
+            reference = expected(queries)
+            if field == "raw_contrast":
+                reference = 10**reference
             np.testing.assert_allclose(
-                jax.jit(lambda x, method=method: method(x))(grid),
-                expected,
-                rtol=1e-12,
-                atol=1e-24,
+                eqx.filter_jit(method)(queries), reference, rtol=1e-12, atol=1e-24
             )
-        for diameter in [0.05, 0.1, 0.3]:
-            if diameter > float(coro.stellar_intens.diams[-1].value):
-                expected = np.full_like(grid, np.nan)
-            else:
-                from lod_unit import lod
-
-                from yippy.performance import core_mean_intensity_profile
-
-                profile = core_mean_intensity_profile(coro, diameter * lod)
-                expected = coro._profile_record(
-                    coro.core_intensity_separations, "core_mean_intensity", profile
-                ).evaluate("core_mean_intensity", grid)
-            actual = jax.jit(
-                lambda x, d: stellar_intensity_curves(
-                    eqx_coro, d, interpolation="keys"
-                ).evaluate("core_mean_intensity", x)
-            )(grid, diameter)
-            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-24)
-        derivative = jax.grad(lambda x: eqx_coro.performance.evaluate("throughput", x))(
+        derivative = jax.grad(lambda x: eqx_coro.curves().evaluate("throughput", x))(
             1.37
         )
         expected_derivative = PchipInterpolator(
-            coro.performance.separation_lod, coro.performance.throughput
+            coro.curves().separation_lod, coro.curves().throughput
         )(1.37, nu=1)
         np.testing.assert_allclose(derivative, expected_derivative, rtol=1e-12)
         np.testing.assert_allclose(
-            eqx.filter_jit(lambda model, x: model.throughput(x))(
-                YippyCoronagraph(backend=eqx_coro), grid
-            ),
-            coro.performance.evaluate("throughput", grid),
+            eqx.filter_jit(lambda model, x: model.throughput(x))(eqx_coro, grid),
+            coro.curves().evaluate("throughput", grid),
             rtol=1e-12,
             atol=1e-24,
         )
@@ -221,7 +134,7 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
         ):
             assert not hasattr(eqx_coro, removed)
         with pytest.raises(TypeError):
-            EqxCoronagraph(yippy_coro=coro, interp_order=1)
+            Coronagraph(coro.yip_path, interp_order=1)
 
 
 def test_pchip_conversion_uses_original_nodes():

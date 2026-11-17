@@ -20,7 +20,7 @@ from conftest import requires_available_yip
 @pytest.fixture(scope="session")
 def offax(coro):
     """The OffAx/OffJAX object from the session coronagraph."""
-    return coro.offax
+    return coro._offaxis_backend
 
 
 @pytest.fixture(scope="session")
@@ -107,7 +107,7 @@ class TestDarkHoleContrast:
         significant artifacts that would artificially brighten the dark hole
         region compared to the PSFs at the original grid points.
         """
-        pixel_scale_arcsec = float(offax.pixel_scale_arcsec.value)
+        pixel_scale_arcsec = float(offax.grid.step)
 
         # Pick a midpoint between two grid points
         mid_idx = len(grid_offsets) // 2

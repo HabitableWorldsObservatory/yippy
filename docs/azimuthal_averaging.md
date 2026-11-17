@@ -49,20 +49,14 @@ grid:
 This example needs a user-supplied YIP directory (`yip_path`).
 
 ```python notest
-from yippy import Coronagraph, HalfMaximum
+from optixstuff import HalfMaximum
+from yippy import Coronagraph
+from yippy.performance import stellar_intensity_curves
 
-coro = Coronagraph(yip_path, rule=HalfMaximum(0.3),
-                   leakage_rule="azimuthal_ring_mean")
-
-# Configure the query front end for a loaded yippy Coronagraph
-from optixstuff import YippyCoronagraph
-from yippy import EqxCoronagraph, stellar_intensity_curves
-
-backend = EqxCoronagraph(yippy_coro=coro)
-optics = YippyCoronagraph(backend=backend)
-radial = stellar_intensity_curves(backend)
-# To get a 2D map:
-r_lod = optics.separation_map()  # (npix, npix) separations in lam/D
+rule = HalfMaximum(0.3)
+coro = Coronagraph(yip_path, rules=(rule,), leakage_rule="azimuthal_ring_mean")
+radial = stellar_intensity_curves(coro)
+r_lod = coro.separation_map()
 istar_az_avg = radial.evaluate("core_mean_intensity", r_lod)
 ```
 
@@ -70,8 +64,8 @@ This approach:
 
 - **Fast**: a single vectorized interpolation call (~0.001s)
 - **Artifact-free**: no rotation interpolation artifacts
-- **True azimuthal mean**: mathematically exact average over all position
-  angles, by definition
+- **Circle-defined mean**: the chosen spatial interpolant is integrated over
+  position angle, subject to angular quadrature and interpolation error
 - **Perfectly symmetric**: every pixel at the same radius gets the exact
   same value
 
@@ -109,7 +103,7 @@ profile. The circle-sampled profile agrees with the exact mean to a few
 tenths of a percent except within the deepest nulls.
 
 At a stellar diameter between the tabulated ones, the profile is taken from
-the stellar intensity map interpolated to that diameter (`stellar_intens`),
+the stellar intensity map interpolated to that diameter (`stellar_map(None, diameter_lod, grid=None)`),
 so the curve and the map an image simulator renders describe the same star.
 
 ## Recommendation
@@ -121,11 +115,13 @@ cleaner azimuthal averages.
 For a residual density, divide the aperture record by the post-processing
 factor. The aperture-mean density convention differs from the ring mean above:
 
-This example needs an optixstuff coronagraph `optics`, an aperture `rule`,
+This example needs a configured coronagraph `coro`, an aperture `rule`,
 a separation, and a post-processing factor `ppf`.
 
 ```python notest
-residual_density = optics.curves(rule).evaluate("leakage_density_lod2", separation) / ppf
+residual_density = coro.leakage_density_lod2(
+    separation, rule=rule, leakage_rule="azimuthal_ring_mean"
+) / ppf
 ```
 
 See also: [Noise Floor Conventions](examples/06_Noise_Floor_Conventions.ipynb)

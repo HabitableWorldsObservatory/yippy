@@ -33,7 +33,7 @@ def export_exosims(
     """
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
         raise ValueError("units must be 'LAMBDA/D' or 'arcsec'")
-    performance = coro.performance
+    performance = coro._records[0]
     separations = np.asarray(
         performance.separation_lod if separations_lod is None else separations_lod,
         dtype=float,
@@ -48,7 +48,7 @@ def export_exosims(
     exosims_dir.mkdir(exist_ok=True)
 
     header = pyfits.Header()
-    header["PIXSCALE"] = (coro.pixel_scale_arcsec.value, "Angular pixel scale")
+    header["PIXSCALE"] = (coro.grid.step, "Angular pixel scale")
     header["LAMBDA"] = (coro.header.lambda0.to_value(u.um), "Wavelength in micrometers")
     header["D"] = (coro.header.diameter.to_value(u.m), "Telescope diameter in meters")
     header["OBSCURED"] = (coro.header.obscured, "Obscuration fraction")
@@ -69,7 +69,7 @@ def export_exosims(
         header["DELTALAM"] = (bandwidth.to_value(u.um), "Bandpass width in micrometers")
         delta_lambda_nm = bandwidth.to_value(u.nm)
 
-    stellar_grid = coro.stellar_intens.grid
+    stellar_grid = coro.stellar_grid
     stellar_frame = stellar_grid.frame
     angular_ratio = performance.frame.lod_to_arcsec(
         performance.frame.reference_wavelength_nm
@@ -84,7 +84,7 @@ def export_exosims(
             performance.evaluate("leakage_density_lod2", separations)
         )
         * stellar_pixel_area_lod2,
-        "occ_trans": coro.occultation_record.evaluate(
+        "occ_trans": coro._occultation_record.evaluate(
             "occulter_transmission", separations
         ),
     }
@@ -103,7 +103,7 @@ def export_exosims(
         "obscurFac": coro.header.obscured,
         "starlightSuppressionSystems": [
             {
-                "name": coro.name,
+                "name": coro.yip_path.name,
                 "lam": coro.header.lambda0.to_value(u.nm),
                 "deltaLam": delta_lambda_nm,
                 "occ_trans": "occ_trans.fits",
@@ -145,11 +145,11 @@ def export_ayo_csv(
         else separations_lod,
         dtype=float,
     )
-    contrast = np.asarray(coro.performance.evaluate("raw_contrast", separations))
+    contrast = np.asarray(coro._records[0].evaluate("raw_contrast", separations))
     if contrast_floor is not None:
         contrast = np.maximum(contrast, contrast_floor)
-    throughput = coro.performance.evaluate("throughput", separations)
-    occ_trans = coro.occultation_record.evaluate("occulter_transmission", separations)
+    throughput = coro._records[0].evaluate("throughput", separations)
+    occ_trans = coro._occultation_record.evaluate("occulter_transmission", separations)
     columns = np.column_stack(
         (separations, contrast, contrast / ppf, throughput, occ_trans)
     )

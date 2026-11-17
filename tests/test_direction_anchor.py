@@ -22,7 +22,7 @@ GRID_ALIGNED_LOD = (1.0, 2.0, 3.0)
 
 def _peak(coro, x_lod, y_lod):
     """The (row, column) of the brightest pixel for a source at a sky position."""
-    psf = np.asarray(coro.offax(x_lod * lod, y_lod * lod).data)
+    psf = np.asarray(coro._offaxis_backend(x_lod * lod, y_lod * lod).data)
     row, col = np.unravel_index(np.argmax(psf), psf.shape)
 
     def vertex(values):
@@ -96,8 +96,8 @@ def test_the_two_axes_are_not_transposed(package, coro):
     still interpolate smoothly. This is the cheapest assertion that separates
     the two.
     """
-    along_x = np.asarray(coro.offax(2.0 * lod, 0.0 * lod).data)
-    along_y = np.asarray(coro.offax(0.0 * lod, 2.0 * lod).data)
+    along_x = np.asarray(coro._offaxis_backend(2.0 * lod, 0.0 * lod).data)
+    along_y = np.asarray(coro._offaxis_backend(0.0 * lod, 2.0 * lod).data)
     assert not np.allclose(along_x, along_y), (
         "a source displaced along x gives the same image as one displaced "
         "along y; the axes are transposed"

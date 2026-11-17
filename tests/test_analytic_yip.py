@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 from test_band_limited_apertures import reference_circle_weights
 
-from yippy import EqxCoronagraph
 from yippy.performance import stellar_intensity_curves
 
 APERTURE_RADIUS_LOD = 0.7
@@ -73,7 +72,7 @@ def test_the_aperture_bias_is_a_separation_independent_constant(
     """
     separations = np.array([1.0, 1.5, 2.0, 3.0, 4.0, 5.0])
     got = np.array(
-        [float(coro.performance.evaluate("throughput", s)) for s in separations]
+        [float(coro.curves().evaluate("throughput", s)) for s in separations]
     )
     expected = package.expected_throughput(separations, APERTURE_RADIUS_LOD)
     ratio = got / expected
@@ -90,7 +89,7 @@ def test_throughput_matches_the_encircled_flux_closed_form(
 ):
     """Throughput is the occulter transmission times a Gaussian's encircled flux."""
     for separation in (1.0, 2.5, 5.0):
-        got = float(coro.performance.evaluate("throughput", separation))
+        got = float(coro.curves().evaluate("throughput", separation))
         expected = package.expected_throughput(separation, APERTURE_RADIUS_LOD)
         assert got == pytest.approx(
             expected * (1.0 + aperture_bias), rel=APERTURE_BIAS_TOL
@@ -107,9 +106,9 @@ def test_core_mean_intensity_returns_the_constant_stellar_level(package, coro):
     """
     for separation in (1.0, 3.0, 5.0):
         got = float(
-            stellar_intensity_curves(
-                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
-            ).evaluate("core_mean_intensity", separation)
+            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+                "core_mean_intensity", separation
+            )
         )
         assert got == pytest.approx(package.stellar_level, rel=1e-6), (
             f"core_mean_intensity({separation}, 0)"
@@ -134,8 +133,8 @@ def test_raw_contrast_divides_two_aperture_sums_not_two_means(package, coro):
     separations = np.array([1.5, 3.0, 5.0])
     implied_area = np.array(
         [
-            float(coro.performance.evaluate("raw_contrast", s))
-            * float(coro.performance.evaluate("throughput", s))
+            float(coro.curves().evaluate("raw_contrast", s))
+            * float(coro.curves().evaluate("throughput", s))
             / package.stellar_level
             for s in separations
         ]
@@ -154,7 +153,7 @@ def test_raw_contrast_divides_two_aperture_sums_not_two_means(package, coro):
 def test_occulter_transmission_follows_the_radial_function(package, coro):
     """Sky transmission at a radius is the function the package was written with."""
     for radius in (1.0, 2.0, 3.0):
-        got = float(coro.occultation_record.evaluate("occulter_transmission", radius))
+        got = float(coro._occultation_record.evaluate("occulter_transmission", radius))
         expected = package.sky_trans_at(radius)
         assert got == pytest.approx(expected, rel=0.03), (
             f"occulter_transmission({radius})"
@@ -170,7 +169,7 @@ def test_inner_working_angle_is_the_half_maximum_crossing(package, coro):
     interpolation error over a half-lambda/D knot spacing and narrow enough
     that an off-by-one in the crossing search would fail.
     """
-    got = coro.performance.iwa_lod
+    got = coro.curves().iwa_lod
     expected = package.expected_iwa()
     assert abs(got - expected) < package.pixscale, (
         f"IWA {got:.4f} is more than one native pixel from {expected:.4f}"
@@ -180,10 +179,8 @@ def test_inner_working_angle_is_the_half_maximum_crossing(package, coro):
 def test_data_extent_is_array_half_width(package, coro):
     """Fails if array extent is labeled as a physical outer working angle."""
     assert not hasattr(coro, "OWA")
-    assert coro.performance.data_extent_lod == pytest.approx(
-        package.max_offset_in_image
-    )
-    assert coro.performance.data_extent_lod > package.offsets[:, 0].max(), (
+    assert coro.curves().data_extent_lod == pytest.approx(package.max_offset_in_image)
+    assert coro.curves().data_extent_lod > package.offsets[:, 0].max(), (
         "this package has data extent beyond its last offset, "
         "which is the regime the contrast sentinel guards"
     )
@@ -200,9 +197,9 @@ def test_contrast_does_not_blow_up_between_last_offset_and_data_extent(package, 
     larger of the two in-image knots that bracket the tabulated range.
     """
     last_offset = float(package.offsets[:, 0].max())
-    data_extent_lod = coro.performance.data_extent_lod
+    data_extent_lod = coro.curves().data_extent_lod
     in_image = [
-        float(coro.performance.evaluate("raw_contrast", s))
+        float(coro.curves().evaluate("raw_contrast", s))
         for s in (last_offset - 0.5, last_offset)
     ]
     ceiling = 10.0 * max(in_image)
@@ -210,7 +207,7 @@ def test_contrast_does_not_blow_up_between_last_offset_and_data_extent(package, 
     probes = np.linspace(last_offset, data_extent_lod, 9)
     checked = 0
     for separation in probes:
-        value = float(coro.performance.evaluate("raw_contrast", separation))
+        value = float(coro.curves().evaluate("raw_contrast", separation))
         assert np.isfinite(value), f"raw_contrast({separation}) is not finite"
         assert value <= ceiling, (
             f"raw_contrast({separation:.3f}) = {value:.3e} exceeds ten times the "
@@ -228,7 +225,9 @@ def test_the_stellar_diameter_list_is_not_mutated_by_construction(package, coro)
     ``diams`` back sees a diameter the package does not have. The substitution
     belongs to the interpolator, not to the loaded list.
     """
-    diams = np.asarray(coro.stellar_intens.diams.value)
+    from astropy.io import fits
+
+    diams = fits.getdata(package.path / "stellar_intens_diam_list.fits")
     assert diams[0] == 0.0, (
         f"the first stellar diameter is {diams[0]!r}, not 0; the epsilon "
         "substitution has leaked into the loaded list"

@@ -10,7 +10,7 @@ from yippy import performance
 
 def test_documented_performance_names_are_exported():
     """Notebook imports and the measurement kernels are supported package API."""
-    names = {"compute_truncation_curves", "truncation_core", "circular_aperture"}
+    names = {"stellar_intensity_curves", "core_separations"}
     for notebook in Path("docs/examples").glob("*.ipynb"):
         for cell in json.loads(notebook.read_text())["cells"]:
             if cell["cell_type"] != "code":
@@ -29,5 +29,19 @@ def test_documented_performance_names_are_exported():
                         if not alias.name.startswith("_")
                     )
     for name in sorted(names):
-        assert name in yippy.__all__, name
-        assert getattr(yippy, name) is getattr(performance, name)
+        assert callable(getattr(performance, name))
+    for name in (
+        "EqxCoronagraph",
+        "Circular",
+        "HalfMaximum",
+        "PerformanceCurves",
+        "performance_curves",
+    ):
+        assert not hasattr(yippy, name)
+
+    for name in (
+        "compute_core_mean_intensity_curve",
+        "core_mean_intensity_profile",
+        "compute_occ_trans_curve",
+    ):
+        assert not hasattr(performance, name)

@@ -24,10 +24,12 @@ import astropy.io.fits as pyfits
 import numpy as np
 import pytest
 from conftest import REFERENCE_DATA_REQUIRED
+from optixstuff.apertures import HalfMaximum
+from optixstuff.performance import performance_curves
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
-from yippy import Coronagraph, HalfMaximum
+from yippy import Coronagraph
 from yippy.performance import CORE_STEP_LOD, core_separations
 
 # Separations (lambda/D) probed, on and between the tabulated offsets.
@@ -86,11 +88,11 @@ def test_core_area_of_a_gaussian_is_its_closed_form(gaussian_package, ratio):
     centered on a pixel the cells cross the threshold in symmetric rings and
     the area is off by 9 percent at a ratio of 0.5.
     """
-    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
+    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
     expected = gaussian_core_area(gaussian_package.psf_sigma_lod, ratio)
     got = np.array(
         [
-            coro.performance.evaluate("core_area_lod2", s)
+            coro.curves(HalfMaximum(ratio)).evaluate("core_area_lod2", s)
             for s in GAUSSIAN_SEPARATIONS_LOD
         ]
     )
@@ -180,21 +182,21 @@ def test_core_area_follows_the_synthesized_psf_between_offsets(growth_package, r
     overstates it by 4 to 9 percent here, because the core of the mixed PSF
     is not the mix of the two cores.
     """
-    coro = Coronagraph(growth_package.path, rule=HalfMaximum(ratio))
-    coro.compute_all_performance_curves(
-        rule=HalfMaximum(ratio),
+    coro = Coronagraph(growth_package.path, rules=(HalfMaximum(ratio),))
+    record = performance_curves(
+        lambda s: coro.off_axis_psf(None, s, grid=None),
+        coro.stellar_map(None, 0.0, grid=None),
+        HalfMaximum(ratio),
         separations_lod=np.union1d(
-            core_separations(coro, CORE_STEP_LOD), np.asarray(coro.offax.x_offsets)
+            core_separations(coro, CORE_STEP_LOD),
+            np.asarray(coro._offaxis_backend.x_offsets),
         ),
-        save_to_fits=False,
     )
     separations = np.array([2.5, 3.0, 3.37, 3.5, 4.6, 4.9])
     expected = np.array(
         [mixture_core_area(growth_package, s, ratio) for s in separations]
     )
-    got = np.array(
-        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
-    )
+    got = np.array([record.evaluate("core_area_lod2", s) for s in separations])
     err = np.abs(got / expected - 1.0)
     assert err.max() <= AREA_TOL, (
         f"core area departs from the synthesized PSF's by {err.max():.4f} at "
@@ -255,7 +257,7 @@ def shipped_trunc_coro():
         if REFERENCE_DATA_REQUIRED:
             pytest.fail(message)
         pytest.skip(message)
-    return Coronagraph(yip_path, rule=HalfMaximum(SHIPPED_RATIO))
+    return Coronagraph(yip_path, rules=(HalfMaximum(SHIPPED_RATIO),))
 
 
 @pytest.mark.parametrize("separation_lod", (3.3, 4.7, 6.1, 9.4))
@@ -269,14 +271,16 @@ def test_shipped_core_area_matches_the_band_limited_psf(
     the package pixels, and interpolates those measurements with PCHIP.
     """
     coro = shipped_trunc_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    y_offsets = np.asarray(coro.offax.y_offsets, dtype=float)
-    nodes = np.asarray(coro.offax.x_offsets)
+    pixel_lod = float(coro.grid.step)
+    y_offsets = np.asarray(coro._offaxis_backend.y_offsets, dtype=float)
+    nodes = np.asarray(coro._offaxis_backend.x_offsets)
     valid = [
         i
         for i, node in enumerate(nodes)
         if node >= 0
-        and coro.offax.get_psf_by_offset_idx(i, int(np.argmin(np.abs(y_offsets))))
+        and coro._offaxis_backend.get_psf_by_offset_idx(
+            i, int(np.argmin(np.abs(y_offsets)))
+        )
         is not None
     ]
     native_nodes = nodes[valid]
@@ -285,9 +289,8 @@ def test_shipped_core_area_matches_the_band_limited_psf(
     stencil = native_nodes[max(0, i - 1) : min(len(native_nodes), i + 3)]
     values = [
         fourier_upsampled_core(
-            coro.offax.get_psf_by_offset_idx(
-                int(np.flatnonzero(nodes == s)[0]),
-                int(np.argmin(np.abs(y_offsets))),
+            coro._offaxis_backend.get_psf_by_offset_idx(
+                int(np.flatnonzero(nodes == s)[0]), int(np.argmin(np.abs(y_offsets)))
             ).data,
             pixel_lod,
             SHIPPED_RATIO,
@@ -296,7 +299,9 @@ def test_shipped_core_area_matches_the_band_limited_psf(
         for s in stencil
     ]
     expected = PchipInterpolator(stencil, values)(separation_lod)
-    got = coro.performance.evaluate("core_area_lod2", separation_lod)
+    got = coro.curves(HalfMaximum(SHIPPED_RATIO)).evaluate(
+        "core_area_lod2", separation_lod
+    )
     assert got == pytest.approx(expected, rel=AREA_TOL)
 
 
@@ -310,7 +315,7 @@ def test_core_throughput_of_a_gaussian_is_its_closed_form(gaussian_package, rati
     pixels misplaces the core boundary and is off by several percent for a
     core centered on a pixel.
     """
-    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
+    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
     nodes = np.sort(gaussian_package.offsets[:, 0])
     flux = np.interp(
         GAUSSIAN_SEPARATIONS_LOD,
@@ -319,7 +324,10 @@ def test_core_throughput_of_a_gaussian_is_its_closed_form(gaussian_package, rati
     )
     expected = flux * (1.0 - ratio)
     got = np.array(
-        [coro.performance.evaluate("throughput", s) for s in GAUSSIAN_SEPARATIONS_LOD]
+        [
+            coro.curves(HalfMaximum(ratio)).evaluate("throughput", s)
+            for s in GAUSSIAN_SEPARATIONS_LOD
+        ]
     )
     err = np.abs(got / expected - 1.0)
     assert err.max() <= THROUGHPUT_TOL, (
@@ -338,19 +346,21 @@ def test_core_throughput_follows_the_synthesized_psf_between_offsets(
     Interpolating the tabulated throughputs linearly in separation instead
     overstates it by 2 to 7 percent here.
     """
-    coro = Coronagraph(growth_package.path, rule=HalfMaximum(ratio))
-    coro.compute_all_performance_curves(
-        rule=HalfMaximum(ratio),
+    coro = Coronagraph(growth_package.path, rules=(HalfMaximum(ratio),))
+    record = performance_curves(
+        lambda s: coro.off_axis_psf(None, s, grid=None),
+        coro.stellar_map(None, 0.0, grid=None),
+        HalfMaximum(ratio),
         separations_lod=np.union1d(
-            core_separations(coro, CORE_STEP_LOD), np.asarray(coro.offax.x_offsets)
+            core_separations(coro, CORE_STEP_LOD),
+            np.asarray(coro._offaxis_backend.x_offsets),
         ),
-        save_to_fits=False,
     )
     separations = np.array([2.5, 3.0, 3.37, 3.5, 4.6, 4.9])
     expected = np.array(
         [mixture_core(growth_package, s, ratio)[1] for s in separations]
     )
-    got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
+    got = np.array([record.evaluate("throughput", s) for s in separations])
     err = np.abs(got / expected - 1.0)
     assert err.max() <= THROUGHPUT_TOL, (
         f"core throughput departs from the synthesized PSF's by {err.max():.4f} "
@@ -365,14 +375,16 @@ def test_shipped_core_throughput_matches_the_band_limited_psf(
 ):
     """The default throughput curve interpolates native band-limited core fluxes."""
     coro = shipped_trunc_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    y_offsets = np.asarray(coro.offax.y_offsets, dtype=float)
-    nodes = np.asarray(coro.offax.x_offsets)
+    pixel_lod = float(coro.grid.step)
+    y_offsets = np.asarray(coro._offaxis_backend.y_offsets, dtype=float)
+    nodes = np.asarray(coro._offaxis_backend.x_offsets)
     valid = [
         i
         for i, node in enumerate(nodes)
         if node >= 0
-        and coro.offax.get_psf_by_offset_idx(i, int(np.argmin(np.abs(y_offsets))))
+        and coro._offaxis_backend.get_psf_by_offset_idx(
+            i, int(np.argmin(np.abs(y_offsets)))
+        )
         is not None
     ]
     native_nodes = nodes[valid]
@@ -381,9 +393,8 @@ def test_shipped_core_throughput_matches_the_band_limited_psf(
     stencil = native_nodes[max(0, i - 1) : min(len(native_nodes), i + 3)]
     values = [
         fourier_upsampled_core(
-            coro.offax.get_psf_by_offset_idx(
-                int(np.flatnonzero(nodes == s)[0]),
-                int(np.argmin(np.abs(y_offsets))),
+            coro._offaxis_backend.get_psf_by_offset_idx(
+                int(np.flatnonzero(nodes == s)[0]), int(np.argmin(np.abs(y_offsets)))
             ).data,
             pixel_lod,
             SHIPPED_RATIO,
@@ -392,7 +403,7 @@ def test_shipped_core_throughput_matches_the_band_limited_psf(
         for s in stencil
     ]
     expected = PchipInterpolator(stencil, values)(separation_lod)
-    got = coro.performance.evaluate("throughput", separation_lod)
+    got = coro.curves(HalfMaximum(SHIPPED_RATIO)).evaluate("throughput", separation_lod)
     assert got == pytest.approx(expected, rel=THROUGHPUT_TOL)
 
 
@@ -429,12 +440,17 @@ def test_core_near_the_image_edge_is_its_closed_form(edge_package, ratio):
     interpolant evaluated next to the edge would wrap light from the
     opposite border into it.
     """
-    coro = Coronagraph(edge_package.path, rule=HalfMaximum(ratio))
+    coro = Coronagraph(edge_package.path, rules=(HalfMaximum(ratio),))
     separations = (6.0, 6.5, 7.0)
     t_expected, a_expected = gaussian_core_expected(edge_package, separations, ratio)
-    t_got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
+    t_got = np.array(
+        [coro.curves(HalfMaximum(ratio)).evaluate("throughput", s) for s in separations]
+    )
     a_got = np.array(
-        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
+        [
+            coro.curves(HalfMaximum(ratio)).evaluate("core_area_lod2", s)
+            for s in separations
+        ]
     )
     assert np.abs(a_got / a_expected - 1.0).max() <= AREA_TOL, a_got
     assert np.abs(t_got / t_expected - 1.0).max() <= THROUGHPUT_TOL, t_got
@@ -450,14 +466,19 @@ def test_core_inside_the_inner_working_angle_is_its_closed_form(
     magnitude near the axis without changing their shape, so the core is
     defined relative to the PSF's own peak and keeps its closed form.
     """
-    coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
+    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
     separations = (0.1, 0.25, 0.5, 0.8)
     t_expected, a_expected = gaussian_core_expected(
         gaussian_package, separations, ratio
     )
-    t_got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
+    t_got = np.array(
+        [coro.curves(HalfMaximum(ratio)).evaluate("throughput", s) for s in separations]
+    )
     a_got = np.array(
-        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
+        [
+            coro.curves(HalfMaximum(ratio)).evaluate("core_area_lod2", s)
+            for s in separations
+        ]
     )
     assert np.abs(a_got / a_expected - 1.0).max() <= AREA_TOL, a_got
     assert np.abs(t_got / t_expected - 1.0).max() <= THROUGHPUT_TOL, t_got
@@ -468,13 +489,12 @@ def quintic_spline_core(psf, pixel_lod, ratio, factor=40):
 
     The spline (scipy ``RectBivariateSpline``, degree 5 in each axis) is
     evaluated at subpixel centers over the window
-    :func:`yippy.performance.truncation_core` uses, a reference built with a
+    :func:`optixstuff.performance.truncation_core` uses, a reference built with a
     different interpolant. The 40x reference suppresses its own whole-cell
     boundary error below the comparison tolerance.
     """
+    from optixstuff.performance import core_window_half_width_pix
     from scipy.interpolate import RectBivariateSpline
-
-    from yippy.performance import core_window_half_width_pix
 
     psf = np.asarray(psf, dtype=np.float64)
     n = psf.shape[0]
@@ -506,13 +526,11 @@ def test_shipped_core_matches_a_quintic_spline_reference(
     percent at this sampling).
     """
     import jax.numpy as jnp
-    from lod_unit import lod
-
-    from yippy.performance import core_window_half_width_pix, truncation_core
+    from optixstuff.performance import core_window_half_width_pix, truncation_core
 
     coro = shipped_trunc_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    psf = coro.offax(separation_lod * lod, 0.0 * lod).data
+    pixel_lod = float(coro.grid.step)
+    psf = coro.off_axis_psf(None, separation_lod, grid=None).data
     t_ref, a_ref = quintic_spline_core(psf, pixel_lod, SHIPPED_RATIO)
     t_got, a_got = truncation_core(
         jnp.asarray(psf),
@@ -528,13 +546,11 @@ def test_shipped_core_matches_a_quintic_spline_reference(
 def test_core_converges_in_subpixels(shipped_trunc_coro, separation_lod):
     """Ten subpixels per side agree with twenty to half a percent."""
     import jax.numpy as jnp
-    from lod_unit import lod
-
-    from yippy.performance import core_window_half_width_pix, truncation_core
+    from optixstuff.performance import core_window_half_width_pix, truncation_core
 
     coro = shipped_trunc_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    psf = jnp.asarray(coro.offax(separation_lod * lod, 0.0 * lod).data)
+    pixel_lod = float(coro.grid.step)
+    psf = jnp.asarray(coro.off_axis_psf(None, separation_lod, grid=None).data)
     half = core_window_half_width_pix(pixel_lod)
     t10, a10 = truncation_core(
         psf, SHIPPED_RATIO, pixel_lod, oversample=10, half_width_pix=half
@@ -546,30 +562,26 @@ def test_core_converges_in_subpixels(shipped_trunc_coro, separation_lod):
     assert float(t10) == pytest.approx(float(t20), rel=5e-3)
 
 
-@pytest.mark.parametrize("curve", ["both", "throughput", "area"])
-def test_default_core_separations_are_the_package_offsets(growth_package, curve):
+def test_default_core_separations_are_the_package_offsets(growth_package):
     """Default curves rely only on PSFs supplied by the package."""
-    from yippy.performance import (
-        compute_truncation_core_area_curve,
-        compute_truncation_curves,
-        compute_truncation_throughput_curve,
-    )
-
-    coro = Coronagraph(growth_package.path, rule=HalfMaximum(0.5))
-    compute = {
-        "both": compute_truncation_curves,
-        "throughput": compute_truncation_throughput_curve,
-        "area": compute_truncation_core_area_curve,
-    }[curve]
-    sep = compute(coro)[0]
+    rule = HalfMaximum(0.5)
+    coro = Coronagraph(growth_package.path, rules=(rule,))
+    sep = coro.curves(rule).separation_lod
     nodes = np.unique(growth_package.offsets[:, 0])
     np.testing.assert_array_equal(sep, nodes[nodes >= 0])
 
 
 def test_synthesized_core_separations_remain_opt_in(growth_package):
     """Explicit synthesis adds the quarter-lambda/D grid between native offsets."""
-    from yippy.performance import CORE_STEP_LOD, compute_truncation_curves
-
     coro = Coronagraph(growth_package.path)
-    sep = compute_truncation_curves(coro, separation_step_lod=CORE_STEP_LOD)[0]
+    record = performance_curves(
+        lambda s: coro.off_axis_psf(None, s, grid=None),
+        coro.stellar_map(None, 0.0, grid=None),
+        HalfMaximum(0.5),
+        separations_lod=np.union1d(
+            core_separations(coro, CORE_STEP_LOD),
+            coro.curves().separation_lod,
+        ),
+    )
+    sep = record.separation_lod
     np.testing.assert_array_equal(sep, np.append(np.arange(0, 5.01, 0.25), 6.0))

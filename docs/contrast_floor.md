@@ -6,14 +6,14 @@ contract quantities:
 
 ```python notest
 import numpy as np
-from optixstuff import YippyCoronagraph
-from yippy import Circular
+from optixstuff import Circular
+from yippy import Coronagraph
 
-optics = YippyCoronagraph("path/to/yip")
 rule = Circular(0.7)
-curves = optics.curves(rule)
+coro = Coronagraph("path/to/yip", rules=(rule,))
+curves = coro.curves(rule)
 separations = np.array([3.0, 5.0, 10.0, 20.0])
-contrast = np.maximum(np.abs(optics.raw_contrast(separations, rule=rule)), 4e-10)
+contrast = np.maximum(np.abs(coro.raw_contrast(separations, rule=rule)), 4e-10)
 noise = contrast / 30.0
 ```
 
@@ -21,9 +21,10 @@ Smaller contrast means better suppression, so the engineering floor is a
 lower bound: `max(abs(raw_contrast), contrast_floor) / ppf` gives the
 EXOSIMS noise convention. It changes neither the stored curve nor the PSFs,
 aperture throughput, aperture area, stellar leakage, or sky transmission.
-AYO density noise is `optics.leakage_density_lod2(separations) / ppf`;
+AYO density noise is `coro.leakage_density_lod2(separations) / ppf`;
 per-stellar-pixel ring intensity is read with
-`stellar_intensity_curves(backend).evaluate("core_mean_intensity", separations)`.
+`yippy.performance.stellar_intensity_curves` as
+`stellar_intensity_curves(coro).evaluate("core_mean_intensity", separations)`.
 Multiply density by the stellar pixel area only when a per-pixel consumer
 requires it, accounting for the two products' Frames when they differ.
 

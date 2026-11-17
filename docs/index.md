@@ -52,11 +52,18 @@ develop/_changelog.md
 
 ## Performance API
 
-The performance functions imported in these examples are supported public API
-and are also exported from `yippy`. They include `compute_truncation_curves`,
-`truncation_core`, and `circular_aperture`. Names beginning with `_` are
-implementation details, even when an example uses them to display intermediate
-samples.
+`yippy.Coronagraph(path, rules=(...))` directly implements
+`optixstuff.AbstractTableCoronagraph`. Supply aperture rules at construction,
+select records with `coro.curves(rule)`, and query images through
+`source_psfs(None, x_lod, y_lod, grid=None)` or
+`stellar_map(None, diameter_lod, grid=None)`. Native samples retain their product
+grid; explicit target grids request pixel integration.
+
+Aperture rules and generic photometry belong to optixstuff:
+`optixstuff.Circular`, `HalfMaximum`, `Matched`, `PerformanceCurves`, and
+`optixstuff.performance.performance_curves`. YIP-specific radial diagnostics
+remain in `yippy.performance`. Names beginning with `_` are implementation
+details.
 
 For photometry on an arbitrary image at a known centroid, pass an explicit
 `fixed_center=(row, column)` in original pixel coordinates:
@@ -64,7 +71,7 @@ For photometry on an arbitrary image at a known centroid, pass an explicit
 This example needs a user-supplied image (`image`).
 
 ```python notest
-from yippy import circular_aperture
+from optixstuff.performance import circular_aperture
 
 flux, area, _ = circular_aperture(
     image, radius_pix=2.8, pixel_scale_lod=0.25,
