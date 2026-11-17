@@ -15,22 +15,21 @@ import math
 import statistics
 import sys
 from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
 
 import jax
 import numpy as np
+from hwoutils.constants import m2nm
+from sinchole import MIRROR_TOLERANCE, KernelProfile
 
 from .interpolation import SincOptions
 from .sinc_delivery import (
     admit_delivery,
     campaign_sampling_failed,
+    delivery_ratios,
     detect_delivery,
     load_delivery,
 )
-
-#: Largest kernel occupancy rho = 2 (lambda0 / lambda_min) L h that sinchole admits.
-MAX_OCCUPANCY = 0.76
 
 #: Interpolation residual accepted at each interior check, as a fraction of the
 #: direct local peak. A rehearsal delivery of a public coronagraph design read
@@ -38,18 +37,8 @@ MAX_OCCUPANCY = 0.76
 #: while sitting five orders below the blend reader on the same checks.
 ACCEPTANCE_LEVEL = 1e-5
 
-#: Mirror and axis residual limit, fixed by the format (reflection tolerance).
-MIRROR_TOLERANCE = 1e-6
-
-#: Half-width of the interpolation stencil, in nodes.
-STENCIL_HALF_WIDTH = 16
-
 #: Default number of interior checks that ``plan`` spreads over radius.
 DEFAULT_CHECK_COUNT = 16
-
-#: Cell fractions of the cell layout of checks, per axis.
-CELL_FRACTIONS_X = (0.001, 0.375, 0.75, 0.999)
-CELL_FRACTIONS_Y = (0.001, 0.25, 0.625, 0.999)
 
 
 class SincToolsError(ValueError):
@@ -128,7 +117,7 @@ class ValidationReport:
         if self.rho is not None:
             lines.append(
                 f"rho (x, y): {self.rho[0]:.4f}, {self.rho[1]:.4f} "
-                f"(limit {MAX_OCCUPANCY})"
+                f"(limit {KernelProfile().margin_limit})"
             )
         lines.append(
             f"interior checks: {len(self.interior_residuals)}, "
@@ -153,26 +142,8 @@ def _fmt(value):
 
 
 def _nanmax(values):
-    finite = [v for v in values if math.isfinite(v)]
-    return max(finite) if finite else math.nan
-
-
-def _kernel_occupancy(manifest, plane):
-    """Reproduce the core's binary64 operation order for rho on each axis."""
-    reference = float(manifest["lambda0_m"]) * 1e9
-    minima = [plane.get("sampling_min_wavelength_m")]
-    campaign = manifest["spectral_sampling"].get("campaign_sampling_min_m")
-    if campaign is not None:
-        minima.append(campaign)
-    minima = [m * 1e9 for m in minima if m is not None]
-    extents = manifest.get("support_extent_D")
-    if not minima or extents is None:
-        return None
-    sigma = reference / min(minima)
-    return tuple(
-        (2.0 * (sigma * float(extent))) * float(pitch)
-        for extent, pitch in zip(extents, manifest["source_spacing_lod"], strict=True)
-    )
+    """Maximum finite residual for the human-readable report."""
+    return max((v for v in values if math.isfinite(v)), default=math.nan)
 
 
 def _outer_edge_notes(delivery):
@@ -239,7 +210,8 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
         message = str(error) or type(error).__name__
         return _failed(message, product_id)
     plane = delivery.plane
-    rho = _kernel_occupancy(manifest, plane)
+    ratios = delivery_ratios(delivery, sc)
+    rho = tuple(max(ratios[axis::2]) for axis in range(2)) if ratios else None
     failures, notes = [], list(_outer_edge_notes(delivery))
     if campaign_sampling_failed(delivery):
         failures.append("campaign sampling claim fails rho <= 0.76 on an axis")
@@ -267,7 +239,16 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
     axis = tuple(float(v) for v in (receipt.axis_relative if receipt else ()))
     exact = tuple(bool(v) for v in (receipt.axis_exact if receipt else ()))
     if admitted:
-        _judge(manifest, interior, mirror, axis, exact, acceptance_level, failures)
+        failures.extend(
+            sc.judge_checks(
+                interior,
+                mirror,
+                axis,
+                exact,
+                reflected=manifest["layout"] == "quadrant_rectangle",
+                acceptance_level=acceptance_level,
+            )
+        )
     worst_interior = max(interior, default=math.nan)
     pool = [v for v in (*mirror, *axis) if math.isfinite(v)]
     return ValidationReport(
@@ -289,32 +270,6 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
         mirror_tolerance=MIRROR_TOLERANCE,
         product_id=plane["id"],
     )
-
-
-def _judge(manifest, interior, mirror, axis, exact, level, failures):
-    if not interior:
-        failures.append("no interior checks were compared")
-    elif not all(math.isfinite(v) for v in interior):
-        failures.append("an interior check has no positive local peak reference")
-    elif max(interior) > level:
-        failures.append(
-            f"worst interior residual {max(interior):.3e} exceeds {level:.0e}"
-        )
-    if manifest["layout"] == "quadrant_rectangle":
-        if not mirror:
-            failures.append("no mirror checks were compared")
-        elif not all(math.isfinite(v) and v <= MIRROR_TOLERANCE for v in mirror):
-            failures.append(
-                f"mirror residual {_nanmax(mirror):.3e} exceeds {MIRROR_TOLERANCE:.0e}"
-            )
-        for value, is_exact in zip(axis, exact, strict=False):
-            if not is_exact and not (
-                math.isfinite(value) and value <= MIRROR_TOLERANCE
-            ):
-                failures.append(
-                    f"axis residual {value:.3e} exceeds {MIRROR_TOLERANCE:.0e}"
-                )
-                break
 
 
 def _failed(message, product_id):
@@ -400,31 +355,6 @@ class Plan:
         }
 
 
-def plan_spacing(lambda0_m, lambda_min_m, support_extent_D, decimals=6):
-    """Largest node spacing with rho <= 0.76, rounded down to ``decimals`` places.
-
-    rho = 2 (lambda0 / lambda_min) L h, with L the larger entrance width over D.
-    The same binary64 operation order as sinchole is used for the final test.
-
-    Returns:
-        The spacing h in lambda0/D.
-    """
-    if not (lambda_min_m > 0 and lambda0_m >= lambda_min_m):
-        raise SincToolsError("need 0 < lambda_min <= lambda0")
-    longest = max(support_extent_D)
-    if not longest > 0:
-        raise SincToolsError("support widths must be positive")
-    sigma = (lambda0_m * 1e9) / (lambda_min_m * 1e9)
-    limit = MAX_OCCUPANCY / (2.0 * sigma * longest)
-    unit = Decimal(1).scaleb(-decimals)
-    spacing = float((Decimal(repr(limit)) // unit) * unit)
-    while not (2.0 * (sigma * longest)) * spacing <= MAX_OCCUPANCY:
-        spacing = float(Decimal(repr(spacing)) - unit)
-    if spacing <= 0:
-        raise SincToolsError("spacing underflows the requested decimals")
-    return spacing
-
-
 def _mirror_rows(bases, spacing):
     rows = []
     for ix, iy in bases:
@@ -450,36 +380,6 @@ def _mirror_rows(bases, spacing):
                 }
             )
     return rows
-
-
-def _radius_checks(count, limit, kind, spacing, seed):
-    """Stratify the served radius into ``count`` shells, one off-node check each."""
-    rng = np.random.default_rng(seed)
-    golden = (math.sqrt(5.0) - 1.0) / 2.0
-    phase = float(rng.uniform())
-    points = []
-    for k in range(count):
-        for _ in range(100):
-            t = (k + float(rng.uniform(0.1, 0.9))) / count
-            turn = (phase + golden * (k + 1)) % 1.0
-            theta = (0.05 + 0.9 * turn) * math.pi / 2.0
-            if kind == "annulus":
-                x, y = t * limit[0] * math.cos(theta), t * limit[0] * math.sin(theta)
-            else:
-                x, y = t * limit[0] * math.cos(theta), t * limit[1] * math.sin(theta)
-            cell = np.array([x, y]) / spacing
-            off_node = np.all(np.abs(cell - np.rint(cell)) > 1e-3)
-            inside = (
-                x * x + y * y < limit[0] ** 2
-                if kind == "annulus"
-                else x < limit[0] and y < limit[1]
-            )
-            if off_node and inside:
-                break
-        else:
-            raise SincToolsError("could not place an interior check; change the seed")
-        points.append((x, y))
-    return points
 
 
 def plan(
@@ -528,11 +428,23 @@ def plan(
         limit = (limit[0], limit[0])
     if check_layout not in ("radius", "cell"):
         raise SincToolsError("check layout must be radius or cell")
-    spacing = plan_spacing(lambda0_m, lambda_min_m, support, decimals)
-    sigma = (lambda0_m * 1e9) / (lambda_min_m * 1e9)
-    rho = tuple((2.0 * (sigma * extent)) * spacing for extent in support)
-    cells = tuple(math.ceil(value / spacing) for value in limit)
-    nx, ny = (n + STENCIL_HALF_WIDTH for n in cells)
+    from sinchole import (
+        plan_cell_checks,
+        plan_mirror_bases,
+        plan_radial_checks,
+        plan_sampling,
+    )
+
+    try:
+        spacing, rho, cells, (nx, ny) = plan_sampling(
+            lambda0_m * m2nm,
+            lambda_min_m * m2nm,
+            support,
+            limit,
+            decimals,
+        )
+    except ValueError as error:
+        raise SincToolsError(str(error)) from error
     training = [
         {
             "index": iy * nx + ix,
@@ -544,35 +456,19 @@ def plan(
         for iy in range(ny)
         for ix in range(nx)
     ]
-    jx, jy = cells[0] - 1, cells[1] - 1
     if check_layout == "cell":
-        if kind != "box":
-            raise SincToolsError("the cell check layout needs two limits (a box)")
-        points = [
-            (jx * spacing + fx * spacing, jy * spacing + fy * spacing)
-            for fy in CELL_FRACTIONS_Y
-            for fx in CELL_FRACTIONS_X
-        ]
+        try:
+            points = plan_cell_checks(cells, spacing, kind)
+        except ValueError as error:
+            raise SincToolsError(str(error)) from error
     else:
-        points = _radius_checks(check_count, limit, kind, spacing, seed)
+        points = plan_radial_checks(check_count, limit, kind, spacing, seed)
     checks = [
         {"index": i, "id": f"check-{i:03d}", "x_lod": x, "y_lod": y}
         for i, (x, y) in enumerate(points)
     ]
     if mirror_bases is None:
-        ordered = [
-            (1, 1),
-            (1, jy),
-            (jx, 1),
-            (jx, jy),
-            (0, jy),
-            (jx, 0),
-            (nx - 1, 1),
-            (3, ny - 1),
-        ]
-        mirror_bases = list(
-            dict.fromkeys(b for b in ordered if b[0] < nx and b[1] < ny)
-        )
+        mirror_bases = plan_mirror_bases(cells, (nx, ny))
     mirrors = _mirror_rows([tuple(b) for b in mirror_bases], spacing)
     notes = []
     if max(support) > 1.0:

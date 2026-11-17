@@ -2,7 +2,7 @@
 
 A sinc delivery is a directory of sampled off-axis planet PSFs that a coronagraph
 designer propagates at positions chosen by the reader, plus a manifest that declares
-what the samples mean. The reader is a 32-tap Kaiser-sinc kernel in `sinchole`, which is
+what the samples mean. The reader is selected by the file-free `sinchole` engine, which is
 loaded through yippy with `Coronagraph(path, interpolation="sinc")`. This page is the
 complete contract for schema `sinc-delivery-0.1`. The parser in
 `yippy.sinc_delivery` is the source of truth, and the notes below say which fields the
@@ -97,7 +97,7 @@ the manifest, but nothing reads their value.
 | `delivery_id`, `design_id` | string | no | Free labels, carried. |
 | `lambda0_m` | number | yes | Reference wavelength in meters. The angular unit of every source coordinate is $\lambda_0/D$. |
 | `diameter_m` | number | yes | Entrance diameter $D$ in meters. |
-| `diameter_convention` | string | yes | Nonempty name of the diameter definition, for example `circumscribed_entrance`. |
+| `diameter_convention` | string | yes | Diameter definition: `circumscribed` or `inscribed`. |
 | `coordinate_model` | string | yes | Exactly `paraxial_entrance_tilt`. |
 | `source_unit` | string | yes | Exactly `lambda0/D`. |
 | `offset_order` | string | yes | Exactly `xy`. |
@@ -409,7 +409,7 @@ parses exactly this block.
   "design_id": "example-design",
   "lambda0_m": 1e-06,                  // reference wavelength, meters
   "diameter_m": 15.0,                  // entrance diameter D, meters
-  "diameter_convention": "circumscribed_entrance",
+  "diameter_convention": "circumscribed",
   "coordinate_model": "paraxial_entrance_tilt",
   "source_unit": "lambda0/D",
   "offset_order": "xy",
@@ -549,3 +549,11 @@ assert report.passed
 A pass is empirical evidence about the delivered finite model. It does not establish
 physical accuracy, the correctness of the optical state, or an error bound between the
 checks.
+
+The manifest kernel describes the raw sample admission convention. At load time,
+`sinchole` selects its default prefiltered reader when the sampling ratio is at
+most 0.64, otherwise its raw reader (limit 0.76). `SincOptions(taps=5..10)`
+requests a prefilter tap count explicitly. Both readers report an unknown
+image-error bound; sampled tone-error design figures are not certified bounds.
+Detector and source geometry use `hwoutils.grids.PixelGrid`. Diameter conventions
+are `circumscribed` or `inscribed`, as required by `hwoutils.grids.Frame`.

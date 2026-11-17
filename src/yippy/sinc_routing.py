@@ -12,6 +12,7 @@ from .sinc_delivery import (
     admit_delivery,
     campaign_sampling_failed,
     delivery_memory,
+    delivery_profile,
     detect_delivery,
     load_delivery,
 )
@@ -101,7 +102,8 @@ def route_interpolation(path, requested, options, downsample_shape):
     )
     if sc is not None:
         base.update(
-            sinchole_version=sc.__version__, kernel_profile=sc.KernelProfile().identity
+            sinchole_version=sc.__version__,
+            kernel_profile=delivery_profile(delivery, options, sc).identity,
         )
 
     def blend_result(reasons=(), bits=0):
@@ -134,7 +136,12 @@ def route_interpolation(path, requested, options, downsample_shape):
             )
         return blend_result(("METADATA_MISSING",), int(sc.Reason.METADATA_MISSING))
     try:
-        delivery_memory(delivery, sc, options.memory)
+        delivery_memory(
+            delivery,
+            sc,
+            options.memory,
+            profile=delivery_profile(delivery, options, sc),
+        )
     except sc.MemoryLimit:
         if (
             requested != "auto"
@@ -171,8 +178,12 @@ def route_interpolation(path, requested, options, downsample_shape):
     policy = options.policy or sc.ReadPolicy()
     if policy.mode == "bounded":
         policy = sc.ReadPolicy("bounded", policy.max_abs_error / delivery.conversion)
-    reader = sc.Interpolator(
-        admission.require(), domain, sc.KernelProfile(), policy, sc.Tiling(), memory
+    reader = sc.make_reader(
+        admission.require(),
+        domain,
+        profile=delivery_profile(delivery, options, sc),
+        policy=policy,
+        memory=memory,
     )
     return (
         delivery,
@@ -208,6 +219,7 @@ def _options_identity(options):
     policy = options.policy
     identity = {
         "product_id": options.product_id,
+        "taps": options.taps,
         "policy": ("sampling", None)
         if policy is None or policy.mode == "sampling"
         else (policy.mode, float(policy.max_abs_error)),

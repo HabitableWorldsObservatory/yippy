@@ -26,6 +26,7 @@ class DeliveryBackend(eqx.Module):
     auto refusal returns statuses/NaNs because midpoint-aware blend is unavailable.
     """
 
+    training_nodes: jax.Array | None
     reader: Any
     blend_nodes: jax.Array | None
     blend_offsets: jax.Array | None
@@ -44,11 +45,20 @@ class DeliveryBackend(eqx.Module):
     def __init__(self, delivery, reader, requested, fallback_reasons=0):
         """Bind one selected native plane and its photon-unit conversion."""
         self.reader = reader
+        self.training_nodes = None
+        if reader is not None and reader.grid.stored == "prefiltered_coefficients":
+            order = np.argsort(
+                delivery.indices[:, 1] * delivery.shape_yx[1] + delivery.indices[:, 0]
+            )
+            self.training_nodes = jnp.asarray(delivery.nodes)[order]
         full = delivery.manifest["layout"] == "full_rectangle" and (
             reader is None or requested == "auto"
         )
         self.blend_nodes = jnp.asarray(delivery.nodes) if full else None
         self.blend_offsets = jnp.asarray(delivery.offsets) if full else None
+        if full and self.training_nodes is not None:
+            self.blend_nodes = self.training_nodes
+            self.blend_offsets = self.blend_offsets[order]
         origin, spacing = (
             delivery.origin_lod,
             np.array(delivery.manifest["source_spacing_lod"]),
@@ -61,7 +71,7 @@ class DeliveryBackend(eqx.Module):
         )
         self.conversion = delivery.conversion
         self.pitch_lod = float(delivery.manifest["pixel_scale_lod_xy"][0])
-        self.grid = delivery.header.pixel_grid()
+        self.grid = delivery.grid
         self.psf_shape = tuple(delivery.manifest["detector_shape_yx"])
         self.requested = requested
         self.fallback_reasons = fallback_reasons
@@ -81,7 +91,12 @@ class DeliveryBackend(eqx.Module):
     def get_psf_by_offset_idx(self, x_idx, y_idx):
         """Return a measured training image for performance diagnostics."""
         if self.reader is not None:
-            image = self.reader.grid.intensity[0, y_idx, x_idx]
+            index = y_idx * self.x_offsets.size + x_idx
+            image = (
+                self.reader.grid.intensity[0, y_idx, x_idx]
+                if self.training_nodes is None
+                else self.training_nodes[index]
+            )
         else:
             offset = jnp.array([self.x_offsets[x_idx], self.y_offsets[y_idx]])
             index = jnp.argmin(jnp.sum((self.blend_offsets - offset) ** 2, axis=1))
@@ -225,17 +240,15 @@ class DeliveryBackend(eqx.Module):
         if x.ndim != 1 or x.shape != y.shape:
             raise ValueError("Coordinates must be equal-length vectors")
         if self.reader is not None:
-            from sinchole.reader import _check_memory, estimate_memory
+            from sinchole import check_memory
 
-            estimates = estimate_memory(
-                self.reader.grid.intensity.nbytes,
-                self.psf_shape,
-                self.reader.tiling,
-                x.size,
-            )
+            estimates = self.reader.memory_estimate(x.size)
+            if self.training_nodes is not None:
+                for key in ("resident", "total"):
+                    estimates[key] += self.training_nodes.nbytes
             estimates["output"] += x.size * 4
             estimates["total"] += x.size * 4
-            _check_memory(self.reader.memory, estimates)
+            check_memory(self.reader.memory, estimates)
         if not x.size:
             shape = eqx.filter_eval_shape(self.create_psf_with_info, 0.0, 0.0)
             return jax.tree.map(lambda a: jnp.empty((0, *a.shape), a.dtype), shape)

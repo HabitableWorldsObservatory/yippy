@@ -69,7 +69,7 @@ def write_delivery(root, *, full=False):
         "design_id": "symmetric",
         "lambda0_m": 500e-9,
         "diameter_m": 6.0,
-        "diameter_convention": "entrance_diameter",
+        "diameter_convention": "circumscribed",
         "coordinate_model": "paraxial_entrance_tilt",
         "source_unit": "lambda0/D",
         "offset_order": "xy",

@@ -376,7 +376,8 @@ result = coro.create_psf_with_info(4.0, 5.5)
 view = EqxCoronagraph(yippy_coro=coro)
 ```
 
-`blend` remains the default and does not import sinchole. Unmarked legacy
+`blend` remains the default. Unmarked packages do not import sinchole;
+versioned deliveries require it for file-free validation even with blend. Unmarked legacy
 packages retain their numerical and cache behavior. `auto` records its
 construction decision in the frozen `interpolation_info` record. It can use
 blend for supported sampling refusals on full signed grids. Quadrant deliveries
@@ -414,7 +415,12 @@ not select another product. Target pitches and coordinates use the respective
 product's reference frame. Wrappers with a single shared pitch must delegate
 these methods explicitly to preserve distinct stellar and sky frames.
 
-`SincOptions` accepts sinchole domain, memory and policy objects. Domain overrides
+`SincOptions` accepts sinchole domain, memory and policy objects, plus an
+optional prefilter `taps` count (5 to 10). By default sinchole selects its
+7-tap prefilter for sampling ratios up to 0.64 and the raw kernel up to 0.76.
+Prefilter tone-error estimates are not certified image-error bounds.
+yippy retains raw training samples for performance diagnostics and includes
+them in the prefiltered memory budget. Domain overrides
 can only restrict the declared served geometry. Policy error budgets use photon
 fractions per pixel. The default memory budget is computed from the actual
 native cube size using sinchole's admission and 1024-output estimates, one-query

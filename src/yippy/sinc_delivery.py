@@ -13,11 +13,12 @@ from itertools import pairwise
 from pathlib import Path
 
 import astropy.units as u
+import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
-from hwoutils.constants import rad2arcsec
-from hwoutils.grids import Frame
+from hwoutils.constants import m2nm, rad2arcsec
+from hwoutils.grids import Frame, PixelGrid
 from lod_unit import lod
 
 from .header import HeaderData
@@ -50,6 +51,7 @@ class Delivery:
     manifest_sha256: str
     plane: dict
     header: HeaderData
+    grid: PixelGrid
     nodes: np.ndarray
     offsets: np.ndarray
     indices: np.ndarray
@@ -100,14 +102,6 @@ def _native(array):
     return np.array(array, dtype=array.dtype.newbyteorder("="), copy=True)
 
 
-def _valid_intensity(array):
-    """Check signs by bits so negative subnormals cannot flush to accepted zero."""
-    integer = np.int32 if array.dtype.itemsize == 4 else np.int64
-    bits = array.view(integer)
-    negative = (bits < 0) & ((bits & np.iinfo(integer).max) != 0)
-    return np.all(np.isfinite(array) & ~negative)
-
-
 def _agree(actual, expected, label, tolerance):
     if not np.all(np.isfinite(actual)) or np.any(np.abs(actual - expected) > tolerance):
         raise ValueError(f"Conflicting {label} in delivery metadata or FITS header")
@@ -115,7 +109,7 @@ def _agree(actual, expected, label, tolerance):
 
 def _header_checks(header, manifest, plane, tolerance_lod):
     frame = Frame(
-        float(manifest["lambda0_m"]) * 1e9,
+        float(manifest["lambda0_m"]) * m2nm,
         float(manifest["diameter_m"]),
         "circumscribed",
     )
@@ -180,6 +174,8 @@ def load_delivery(root, manifest, options):
     Returns:
         A Delivery ready for sinchole construction, with no legacy transforms.
     """
+    import sinchole as sc
+
     root = Path(root)
     for key in (
         "detector_shape_yx",
@@ -224,9 +220,9 @@ def load_delivery(root, manifest, options):
     kernel = manifest["kernel"]
     if kernel != {
         "family": "kaiser_sinc_raw",
-        "half_width": 16,
+        "half_width": sc.KernelProfile().taps // 2,
         "beta": 12,
-        "max_occupancy": 0.76,
+        "max_occupancy": sc.KernelProfile().margin_limit,
     }:
         raise ValueError("Unsupported sinc kernel profile")
     spectral = manifest["spectral_sampling"]
@@ -239,30 +235,34 @@ def load_delivery(root, manifest, options):
         p["shortest_contributing_m"] for p in planes
     ):
         raise ValueError("Conflicting campaign shortest contributor")
+    campaign = spectral.get("campaign_sampling_min_m")
     for p in planes:
+        minimum = p.get("sampling_min_wavelength_m")
+        reasons = sc.spectral_reasons(
+            p["kind"],
+            p["wavelength_m"] * m2nm,
+            [v * m2nm for v in p["band_edges_m"]],
+            np.nan if minimum is None else minimum * m2nm,
+            np.nan if campaign is None else campaign * m2nm,
+        )
         if (
             p["kind"] != "monochromatic"
-            or not np.isfinite(float(p["wavelength_m"]) * 1e9)
-            or p["wavelength_m"] <= 0
             or p["shortest_contributing_m"] != p["wavelength_m"]
-            or (
-                p.get("sampling_min_wavelength_m") is not None
-                and not (0 < p["sampling_min_wavelength_m"] <= p["wavelength_m"])
-            )
-            or p["band_edges_m"] != [p["wavelength_m"]] * 2
+            or reasons & sc.Reason.METADATA_CONFLICT
         ):
             raise ValueError("METADATA_CONFLICT: monochromatic wavelength metadata")
-    campaign = spectral.get("campaign_sampling_min_m")
-    if campaign is not None and not (
-        0
-        < campaign
-        <= min(p.get("sampling_min_wavelength_m") or p["wavelength_m"] for p in planes)
-    ):
-        raise ValueError("Conflicting campaign sampling minimum")
     if spectral.get("band_ready") and campaign is None:
         raise ValueError("Band-ready campaign requires a sampling minimum")
-    _validate_declarations(manifest)
-    _validate_domain(manifest.get("served"), options.domain)
+    sc.validate_declarations(
+        manifest["normalization"],
+        manifest["lambda0_m"] * m2nm,
+        manifest["diameter_m"],
+        manifest.get("support_extent_D"),
+        manifest.get("premises"),
+        (manifest.get("reflection") or {}).get("kind"),
+        manifest["layout"] == "quadrant_rectangle",
+    )
+    _domain(manifest.get("served"), options.domain)
     if (
         manifest["layout"] == "full_rectangle"
         and manifest.get("reflection") is not None
@@ -306,11 +306,12 @@ def load_delivery(root, manifest, options):
     csv_offsets = np.array(
         [[float(row["x_lod"]), float(row["y_lod"])] for row in rows]
     )[order]
-    if len(np.unique(indices, axis=0)) != count:
-        raise ValueError("Duplicate training nodes")
     lower, upper = indices.min(axis=0), indices.max(axis=0)
     size = upper - lower + 1
-    if int(np.prod(size)) != count:
+    index_reasons = sc.index_reasons(indices - lower, tuple(size[::-1]))
+    if index_reasons & sc.Reason.GRID_DUPLICATE:
+        raise ValueError("Duplicate training nodes")
+    if index_reasons & sc.Reason.GRID_INCOMPLETE:
         raise ValueError("Holes in declared complete rectangle")
     if np.any(size > np.iinfo(np.int32).max):
         raise ValueError("Source rectangle exceeds int32 indices")
@@ -327,36 +328,27 @@ def load_delivery(root, manifest, options):
         np.any(origin != 0) or np.any(lower != 0)
     ):
         raise ValueError("Quadrant lattice must be anchored at zero with both axes")
-    if not np.all((spacing >= 1e-6) & (spacing <= 1e6)) or not np.all(
-        (origin == 0) | ((np.abs(origin) >= 1e-6) & (np.abs(origin) <= 1e6))
-    ):
+    if sc.lattice_reasons(origin, spacing):
         raise ValueError("Source lattice outside supported numeric range")
     offsets = _native(fits.getdata(offsets_path))
     if offsets.dtype not in (np.dtype("float32"), np.dtype("float64")):
         raise ValueError("Offsets require float32 or float64")
     if not np.all(np.isfinite(offsets)):
         raise ValueError("Nonfinite source offsets")
-    scale = np.maximum(
-        np.max(np.abs(offsets.astype(np.float64)), axis=0), np.abs(spacing)
-    )
-    rounded = scale.astype(offsets.dtype)
-    tolerance = 4 * (
-        np.nextafter(rounded, np.array(np.inf, offsets.dtype)) - rounded
-    ).astype(np.float64)
-    if np.any(tolerance >= 1e-4 * np.abs(spacing)):
-        raise ValueError("Offset uncertainty exceeds pitch cap")
-    expected = origin + spacing * indices
     canonical_origin = origin + spacing * lower
-    canonical = canonical_origin + spacing * (indices - lower)
-    for actual in (csv_offsets, offsets.astype(np.float64)):
-        _agree(actual, expected, "authoritative training coordinates", tolerance)
-        _agree(actual, canonical, "canonical lattice", tolerance)
-    if not np.all(
-        (canonical_origin == 0)
-        | ((np.abs(canonical_origin) >= 1e-6) & (np.abs(canonical_origin) <= 1e6))
-    ):
+    if sc.lattice_reasons(canonical_origin, spacing):
         raise ValueError("Canonical lattice outside supported numeric range")
-    residual = np.max(np.abs(offsets - canonical), axis=0)
+    for actual in (csv_offsets, offsets):
+        for start, index in ((origin, indices), (canonical_origin, indices - lower)):
+            valid, tolerance, residual = sc.offset_evidence(
+                actual, start, spacing, index, offsets.dtype
+            )
+            if not valid:
+                raise ValueError(
+                    "Conflicting authoritative training coordinates "
+                    "or canonical lattice"
+                )
+    tolerance, residual = np.asarray(tolerance), np.asarray(residual)
     _header_checks(header, manifest, plane, tolerance)
     measure = manifest["sample_kind"]
     if measure not in ("integral", "mean"):
@@ -375,7 +367,7 @@ def load_delivery(root, manifest, options):
         raise ValueError("Conflicting storage_dtype")
     for start in range(0, nodes.size, 65536):
         block = nodes.reshape(-1)[start : start + 65536]
-        if not _valid_intensity(block):
+        if not sc.valid_intensity(block):
             raise ValueError("Invalid negative or nonfinite intensity data")
     for record in (
         manifest.get("reflection"),
@@ -401,6 +393,18 @@ def load_delivery(root, manifest, options):
         reference = record.get("local_peak_reference")
         if reference is not None and not (0 < reference / conversion < np.inf):
             raise ValueError("DATA_INVALID: unrepresentable local_peak_reference")
+    grid = PixelGrid(
+        tuple(manifest["detector_shape_yx"]),
+        *manifest["detector_center_xy"],
+        np.diag(manifest["pixel_scale_lod_xy"]),
+        "lod",
+        Frame(
+            float(manifest["lambda0_m"]) * m2nm,
+            manifest["diameter_m"],
+            manifest.get("diameter_convention") or "circumscribed",
+            manifest.get("coordinate_model") or "paraxial_entrance_tilt",
+        ),
+    )
     return Delivery(
         root,
         manifest,
@@ -414,6 +418,7 @@ def load_delivery(root, manifest, options):
             minlam=float(plane["wavelength_m"]) * u.m,
             maxlam=float(plane["wavelength_m"]) * u.m,
         ),
+        grid,
         nodes,
         offsets,
         (indices - lower).astype(np.int32),
@@ -431,24 +436,12 @@ def admit_delivery(delivery, options, sc):
     """Map validated delivery declarations to the installed sinchole API."""
     d, p = delivery.manifest, delivery.plane
     f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
-    pixels = sc.PixelGrid(
-        tuple(d["detector_shape_yx"]),
-        f64(d["detector_center_xy"]),
-        jnp.diag(f64(d["pixel_scale_lod_xy"])),
-        "pixel_integral" if d["sample_kind"] == "integral" else "pixel_mean_density",
-    )
     premises = [d.get("premises", {}).get(key, {}) for key in _PREMISES]
     norm = d["normalization"]
     if not norm.get("source_independent", False):
         premises[4] = dict(premises[4], value=False)
     products = sc.Products(
-        sc.Frame(
-            f64(float(d["lambda0_m"]) * 1e9),
-            f64(d["diameter_m"]),
-            d["diameter_convention"],
-            d["coordinate_model"],
-        ),
-        pixels,
+        delivery.grid,
         sc.Normalization(
             norm["kind"],
             f64([p["photon_conversion"]]),
@@ -463,13 +456,13 @@ def admit_delivery(delivery, options, sc):
             json.dumps(norm, sort_keys=True),
         ),
         p["kind"],
-        f64([p["wavelength_m"] * 1e9]),
-        f64([[p["wavelength_m"] * 1e9] * 2]),
-        f64([p["sampling_min_wavelength_m"] * 1e9]),
+        f64([p["wavelength_m"] * m2nm]),
+        f64([[p["wavelength_m"] * m2nm] * 2]),
+        f64([p["sampling_min_wavelength_m"] * m2nm]),
         f64(
             np.nan
             if d["spectral_sampling"]["campaign_sampling_min_m"] is None
-            else d["spectral_sampling"]["campaign_sampling_min_m"] * 1e9
+            else d["spectral_sampling"]["campaign_sampling_min_m"] * m2nm
         ),
         f64([d.get("support_extent_D", [np.nan, np.nan])]),
         jnp.array([1 if d.get("support_evidence") else 0], jnp.int32),
@@ -484,23 +477,15 @@ def admit_delivery(delivery, options, sc):
         ).hexdigest(),
         "monochromatic",
         delivery.manifest_sha256 + ":" + p["id"],
+        measure="per_pixel" if d["sample_kind"] == "integral" else "per_unit_area",
     )
-    lattice = sc.Lattice(
-        f64(delivery.origin_lod), f64(d["source_spacing_lod"]), delivery.shape_yx
+    lattice = sc.source_grid(
+        delivery.origin_lod,
+        d["source_spacing_lod"],
+        delivery.shape_yx,
+        delivery.grid.frame,
     )
-    served = d["served"]
-    domain = sc.Domain(
-        served["kind"],
-        served["boundary"],
-        f64(
-            np.array(served["bounds_lod"]).T
-            if served["kind"] == "box"
-            else np.zeros((2, 2))
-        ),
-        f64(served["radii_lod"] if served["kind"] == "annulus" else [0.0, 0.0]),
-    )
-    if options.domain is not None:
-        domain = options.domain
+    domain = _domain(d["served"], options.domain)
     reflection = d.get("reflection")
     mirror = None
     if d["layout"] == "quadrant_rectangle":
@@ -524,7 +509,7 @@ def admit_delivery(delivery, options, sc):
                 "mirror_plus_conjugation",
                 "other_response",
             )
-            or reflection.get("check_tolerance_local_peak") != 1e-6
+            or reflection.get("check_tolerance_local_peak") != sc.MIRROR_TOLERANCE
             or reflection.get("check_status") != "pass"
             or reflection.get("optical_state_id") != d["optical_state"].get("state_id")
         ):
@@ -619,9 +604,8 @@ def admit_delivery(delivery, options, sc):
             "independent_images",
             p["id"],
         )
-    memory = options.memory
-    if memory is None:
-        memory = delivery_memory(delivery, sc)
+    profile = delivery_profile(delivery, options, sc)
+    memory = delivery_memory(delivery, sc, options.memory, profile=profile)
     admission = sc.admit_grid(
         delivery.nodes[None],
         delivery.offsets,
@@ -630,6 +614,7 @@ def admit_delivery(delivery, options, sc):
         products=products,
         reflection=reflection,
         domain=domain,
+        profile=profile,
         checks=checks,
         mirror_checks=mirror,
         memory=memory,
@@ -640,41 +625,6 @@ def admit_delivery(delivery, options, sc):
         ),
     )
     return admission, domain, memory
-
-
-def _validate_declarations(d):
-    """Reject malformed physical declarations before optional admission gates."""
-    norm = d["normalization"]
-    if not isinstance(norm, dict) or norm.get("kind") not in (
-        "incident_photon",
-        "unocculted_peak",
-    ):
-        raise ValueError("Unknown or missing normalization reference")
-    for key in ("lambda0_m", "diameter_m"):
-        value = float(d[key])
-        if not np.isfinite(value) or value <= 0:
-            raise ValueError("Invalid physical geometry: " + key)
-    support = d.get("support_extent_D")
-    if support is not None:
-        support = np.asarray(support, np.float64)
-        if support.shape != (2,) or not np.all(np.isfinite(support) & (support > 0)):
-            raise ValueError("Support extents require two finite positive values")
-    for entry in (d.get("premises") or {}).values():
-        if not isinstance(entry, dict):
-            raise ValueError("Premises require keyed evidence records")
-        if entry.get("value") is False:
-            raise ValueError("METADATA_CONFLICT: explicitly false physical premise")
-        if entry.get("evidence") == 2:
-            raise ValueError(
-                "Externally established premises require verified external evidence"
-            )
-    reflection = d.get("reflection")
-    if (
-        d["layout"] == "quadrant_rectangle"
-        and reflection is not None
-        and reflection.get("kind") != "two_axis_pixel_flip_v1"
-    ):
-        raise ValueError("Unsupported quadrant reflection kind")
 
 
 def _missing_metadata(d, p):
@@ -705,70 +655,30 @@ def _missing_metadata(d, p):
     return tuple(missing)
 
 
-def _validate_domain(served, override):
-    """Validate permission declarations and restrictions without core objects."""
+def _domain(served, override=None):
+    """Translate file-domain fields and delegate numeric permission checks."""
+    import sinchole as sc
 
-    def values(kind, boundary, limits, radii):
-        if boundary not in ("closed", "lower_closed_upper_open"):
-            raise ValueError("Unsupported domain boundary")
-        data = np.asarray(limits if kind == "box" else radii, np.float64)
-        if kind not in ("box", "annulus") or data.shape != (
-            (2, 2) if kind == "box" else (2,)
-        ):
-            raise ValueError("Unsupported served domain geometry")
-        normal = (data == 0) | (np.abs(data) >= np.finfo(np.float64).tiny)
-        if not np.all(np.isfinite(data) & normal) or np.any(np.abs(data) > 1e6):
-            raise ValueError("Domain outside supported numeric range")
-        if kind == "box":
-            ordered = data[0] <= data[1] if boundary == "closed" else data[0] < data[1]
-            if not np.all(ordered):
-                raise ValueError("Box limits must be ordered and nonempty")
-        elif not (
-            0 <= data[0] < data[1]
-            and data[1] >= 1e-6
-            and (data[0] == 0 or data[0] >= 1e-6)
-        ):
-            raise ValueError(
-                "Annulus requires ordered radii in supported numeric range"
+    with jax.enable_x64():
+        declared = (
+            None
+            if served is None
+            else sc.Domain(
+                served["kind"],
+                served["boundary"],
+                np.asarray(served["bounds_lod"]).T
+                if served["kind"] == "box"
+                else np.zeros((2, 2)),
+                served["radii_lod"] if served["kind"] == "annulus" else np.zeros(2),
             )
-        return data
-
-    if served is None:
-        if override is not None:
-            values(
-                override.kind,
-                override.boundary,
-                override.limits_xy_lod,
-                override.radii_lod,
-            )
-        return
-    kind, boundary = served["kind"], served["boundary"]
-    declared = values(
-        kind,
-        boundary,
-        np.array(served["bounds_lod"]).T if kind == "box" else None,
-        served.get("radii_lod"),
-    )
-    if override is not None:
-        if override.kind != kind or override.boundary != boundary:
-            raise ValueError(
-                "Domain override must restrict declared geometry and boundary"
-            )
-        restricted = values(kind, boundary, override.limits_xy_lod, override.radii_lod)
-        subset = (
-            (
-                np.all(restricted[0] >= declared[0])
-                and np.all(restricted[1] <= declared[1])
-            )
-            if kind == "box"
-            else (restricted[0] >= declared[0] and restricted[1] <= declared[1])
         )
-        if not subset:
-            raise ValueError("Domain override cannot expand served permission")
+        return sc.restrict_domain(declared, override)
 
 
 def _independent_images(root, manifest, indices, shape):
     """Hash/open each independent file once, validating exact authoritative rows."""
+    import sinchole as sc
+
     records = [*manifest.get("checks", []), *manifest.get("mirror_checks", [])]
     grouped = {}
     ids = {p["id"] for p in manifest["planes"]}
@@ -799,7 +709,7 @@ def _independent_images(root, manifest, indices, shape):
                 if type(index) is not int or not 0 <= index < len(cube):
                     raise ValueError("Independent image_index must identify a cube row")
                 image = _native(cube[index])
-                if not _valid_intensity(image):
+                if not sc.valid_intensity(image):
                     raise ValueError("Invalid independent intensity data")
                 images[(name, digest, index)] = image
     for record in manifest.get("checks", []):
@@ -819,89 +729,62 @@ def _independent_images(root, manifest, indices, shape):
 
 
 def _validate_check_positions(manifest, origin, spacing, size):
-    """Reject delivered checks outside the delivery's own served region or coverage.
+    """Check delivered references against the declared raw-table permission."""
+    import sinchole as sc
 
-    A caller's narrower domain override does not make a delivered check
-    invalid; such checks are excluded from the empirical comparison at
-    admission and recorded in the receipt provenance instead.
-    """
-    served = manifest.get("served")
-    for record in manifest.get("checks", []):
-        query = np.asarray(record["source_lod_xy"], np.float64)
-        query = np.where(np.abs(query) < np.finfo(np.float64).tiny, 0.0, query)
-        if served is not None:
-            kind = served["kind"]
-            boundary = served["boundary"]
-            if kind == "box":
-                bounds = np.asarray(served["bounds_lod"]).T
-                lower, upper = query >= bounds[0], query <= bounds[1]
-                if boundary != "closed":
-                    upper = query < bounds[1]
-            else:
-                radii = np.asarray(served["radii_lod"])
-                radius2 = np.sum(query * query)
-                lower, upper = radius2 >= radii[0] ** 2, radius2 <= radii[1] ** 2
-                if boundary != "closed":
-                    upper = radius2 < radii[1] ** 2
-            if not (np.all(lower) and np.all(upper)):
-                raise ValueError(
-                    "DATA_INVALID: independent check outside served domain"
-                )
-        # Same exact-quotient floor as the core, after the rounded subtraction.
-        difference = query - origin
-        remainder = np.fmod(difference, spacing)
-        floor = np.rint((difference - remainder) / spacing) - (
-            (remainder != 0) & (difference < 0)
+    with jax.enable_x64():
+        frame = Frame(
+            manifest["lambda0_m"] * m2nm,
+            manifest["diameter_m"],
+            manifest.get("diameter_convention") or "circumscribed",
         )
-        lower = 16 - size if manifest["layout"] == "quadrant_rectangle" else 15
-        if not np.all(np.isfinite(floor) & (floor >= lower) & (floor <= size - 17)):
-            raise ValueError("DATA_INVALID: independent check outside stencil coverage")
+        lattice = sc.source_grid(origin, spacing, tuple(size[::-1]), frame)
+        sc.validate_check_positions(
+            [r["source_lod_xy"] for r in manifest.get("checks", [])],
+            _domain(manifest.get("served")),
+            lattice,
+            manifest["layout"] == "quadrant_rectangle",
+        )
+
+
+def delivery_ratios(delivery, sc, *, campaign_only=False):
+    """Translate manifest units for the engine's sampling-ratio calculation."""
+    d, p = delivery.manifest, delivery.plane
+    minima = [d["spectral_sampling"].get("campaign_sampling_min_m")]
+    if not campaign_only:
+        minima.append(p.get("sampling_min_wavelength_m"))
+    support = d.get("support_extent_D")
+    if support is None:
+        return ()
+    return tuple(
+        sc.sampling_ratio(d["lambda0_m"] * m2nm, minimum * m2nm, extent, pitch)
+        for minimum in minima
+        if minimum is not None
+        for extent, pitch in zip(support, d["source_spacing_lod"], strict=True)
+    )
 
 
 def campaign_sampling_failed(delivery):
-    """Evaluate the explicit campaign test with the core's separate binary64 steps."""
-    d = delivery.manifest
-    minimum = d["spectral_sampling"].get("campaign_sampling_min_m")
-    if minimum is None or d.get("support_extent_D") is None:
-        return False
-    # Match the core's nm frame and operation order, including rounded conversions.
-    sigma = float(d["lambda0_m"] * 1e9) / float(minimum * 1e9)
-    for extent, pitch in zip(
-        d["support_extent_D"], d["source_spacing_lod"], strict=True
-    ):
-        bandwidth = sigma * float(extent)
-        rho = (2.0 * bandwidth) * float(pitch)
-        if not rho < 1.0 or not rho <= 0.76:
-            return True
-    return False
+    """Ask the engine whether the explicit campaign claim meets admission."""
+    import sinchole as sc
+
+    return bool(sc.sampling_reasons(delivery_ratios(delivery, sc, campaign_only=True)))
 
 
-def delivery_memory(delivery, sc, supplied=None):
-    """Isolate the private core allocation-model coupling for admission and reads."""
-    from sinchole.reader import estimate_memory
+def delivery_profile(delivery, options, sc):
+    """Pass the declared band and requested tap count to engine selection."""
+    return sc.select_profile(delivery_ratios(delivery, sc), taps=options.taps)
 
-    estimates = [
-        estimate_memory(
-            delivery.nodes.nbytes,
-            delivery.nodes.shape[1:],
-            sc.Tiling(),
-            1,
-            admission=True,
-        )
-    ]
-    if supplied is not None:
-        for key in ("resident", "output", "scratch", "total"):
-            if estimates[0][key] > getattr(supplied, "max_" + key + "_bytes"):
-                raise sc.MemoryLimit(key + " estimate exceeds supplied budget")
-        return supplied
-    estimates.append(
-        estimate_memory(
-            delivery.nodes.nbytes, delivery.nodes.shape[1:], sc.Tiling(), 1024
-        )
-    )
-    ceilings = {key: max(item[key] for item in estimates) for key in estimates[0]}
-    ceilings["output"] += 1024 * 4
-    ceilings["total"] += 1024 * 4
-    return sc.MemoryBudget(
-        *(int(ceilings[key]) for key in ("resident", "output", "scratch", "total"))
+
+def delivery_memory(delivery, sc, supplied=None, *, profile=None):
+    """Pass table sizes and yippy's output tag allocation to the engine."""
+    return sc.memory_budget(
+        delivery.nodes.nbytes,
+        delivery.nodes.shape[1:],
+        profile=profile,
+        supplied=supplied,
+        extra_output_bytes=1024 * 4,
+        extra_resident_bytes=delivery.nodes.nbytes
+        if isinstance(profile, sc.PrefilteredKernelProfile)
+        else 0,
     )

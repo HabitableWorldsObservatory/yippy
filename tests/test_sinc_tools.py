@@ -21,7 +21,6 @@ from yippy.sinc_tools import (
     SincToolsError,
     main,
     plan,
-    plan_spacing,
     validate,
     write_plan,
 )
@@ -191,16 +190,6 @@ def rows_of(path):
     """Read a CSV file into a list of row dicts."""
     with Path(path).open(newline="") as stream:
         return list(csv.DictReader(stream))
-
-
-def test_plan_spacing_follows_the_occupancy_limit():
-    """The spacing is the largest rounded value with rho at or below 0.76."""
-    assert plan_spacing(1e-6, 1e-6, (1.0, 1.0)) == 0.38
-    for lambda_min, support in ((1e-6, (0.982, 0.946)), (8e-7, (1.0, 1.0))):
-        h = plan_spacing(1e-6, lambda_min, support)
-        sigma = 1e-6 / lambda_min
-        assert 2 * sigma * max(support) * h <= 0.76
-        assert 2 * sigma * max(support) * (h + 1e-6) > 0.76
 
 
 def test_plan_reproduces_the_starter_lists(tmp_path):

@@ -16,6 +16,7 @@ class SincOptions:
     """Select a fixed product and optional sinchole construction controls.
 
     Args:
+        taps: Optional prefilter tap count (5..10); None lets sinchole select.
         product_id: Exact manifest plane ID, required for multiple planes.
         domain: Optional permission restriction in reference lambda/D.
         memory: Explicit sinchole MemoryBudget. None uses array-size estimates
@@ -29,6 +30,7 @@ class SincOptions:
     domain: "Domain | None" = None
     memory: "MemoryBudget | None" = None
     policy: "ReadPolicy | None" = None
+    taps: int | None = None
 
 
 @dataclass(frozen=True)

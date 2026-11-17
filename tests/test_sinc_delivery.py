@@ -178,7 +178,9 @@ def test_quadrant_native_intake(admitted):
     grid = admitted.offax.reader.grid
     assert grid.intensity.dtype == jnp.float32
     assert grid.intensity.shape == (1, 18, 18, 4, 4)
-    np.testing.assert_array_equal(grid.products.pixels.center_xy_pix, [1.5, 1.5])
+    np.testing.assert_array_equal(
+        (grid.products.pixels.center_x, grid.products.pixels.center_y), [1.5, 1.5]
+    )
     assert admitted.offax.get_psf_by_offset_idx(0, 0).reconstruction == "band_limited"
 
 
