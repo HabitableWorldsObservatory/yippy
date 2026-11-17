@@ -90,9 +90,7 @@ class EqxCoronagraph(eqx.Module):
     contrast_floor: float | None
 
     # -- Off-axis PSF synthesis (auto-static: callables) ------------------
-    _legacy_create_psf: callable
-    _legacy_create_psfs: callable
-    _offaxis_backend: eqx.Module | None
+    _offaxis_backend: object
     stellar_pixel_scale_lod: float
     sky_pixel_scale_lod: float
     stellar_frame: tuple[float, float]
@@ -227,15 +225,7 @@ class EqxCoronagraph(eqx.Module):
         )
 
         # -- PSF creation callables --------------------------------------
-        self._offaxis_backend = (
-            yippy_coro.offax if yippy_coro._sinc_delivery is not None else None
-        )
-        self._legacy_create_psf = (
-            yippy_coro.offax.create_psf if self._offaxis_backend is None else None
-        )
-        self._legacy_create_psfs = (
-            yippy_coro.offax.create_psfs if self._offaxis_backend is None else None
-        )
+        self._offaxis_backend = yippy_coro.offax
 
         # -- Stellar intensity interpolation -----------------------------
         # FITS-sourced arrays are big-endian (>f8); jnp cannot ingest those, so
@@ -321,19 +311,15 @@ class EqxCoronagraph(eqx.Module):
 
     def create_psf(self, x_lod, y_lod):
         """Return one off-axis PSF, delegating dynamic delivery arrays."""
-        if self._offaxis_backend is not None:
-            return self._offaxis_backend.create_psf(x_lod, y_lod)
-        return self._legacy_create_psf(x_lod, y_lod)
+        return self._offaxis_backend.create_psf(x_lod, y_lod)
 
     def create_psfs(self, x, y):
         """Return off-axis PSFs at equal-length coordinate vectors."""
-        if self._offaxis_backend is not None:
-            return self._offaxis_backend.create_psfs(x, y)
-        return self._legacy_create_psfs(x, y)
+        return self._offaxis_backend.create_psfs(x, y)
 
     def create_psf_with_info(self, x_lod, y_lod):
         """Return fixed-product diagnostics for a versioned delivery."""
-        if self._offaxis_backend is None:
+        if not hasattr(self._offaxis_backend, "create_psf_with_info"):
             raise ValueError(
                 "with-info on EqxCoronagraph requires a versioned delivery"
             )
@@ -341,7 +327,7 @@ class EqxCoronagraph(eqx.Module):
 
     def create_psfs_with_info(self, x, y):
         """Return fixed-product batch diagnostics for a versioned delivery."""
-        if self._offaxis_backend is None:
+        if not hasattr(self._offaxis_backend, "create_psf_with_info"):
             raise ValueError(
                 "with-info on EqxCoronagraph requires a versioned delivery"
             )

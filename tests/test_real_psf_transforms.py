@@ -4,9 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.transforms import downsample_psfs
-
-from yippy.jax_funcs import fft_rotate_jax
+from hwoutils.transforms import downsample_psfs, rotate_image
 
 
 @pytest.mark.parametrize("size", [64, 100])
@@ -28,7 +26,7 @@ def test_real_psf_rotation_padding_convergence(coro):
     with jax.enable_x64():
         source = jnp.asarray(coro.offax.flat_psfs[37], dtype=jnp.float64)
         outputs = [
-            np.asarray(fft_rotate_jax(source, 30.0, pad_factor=p))
+            np.asarray(rotate_image(source, 30.0, pad_factor=p))
             for p in (0.5, 1.5, 3.5)
         ]
     reference = outputs[-1]

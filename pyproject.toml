@@ -90,7 +90,6 @@ library = "yippy"
 "tests/test_eqx_coronagraph.py" = { case = "performance-curves", evidence = "code-verification" }
 "tests/test_rebinning_metadata.py" = { case = "psf-synthesis", evidence = "code-verification" }
 "tests/test_real_psf_transforms.py" = { case = "psf-synthesis", evidence = "code-verification" }
-"tests/test_rotation_regressions.py" = { case = "psf-synthesis", evidence = "code-verification" }
 
 [tool.ruff]
 exclude = ["docs"]

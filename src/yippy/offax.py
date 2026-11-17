@@ -1,24 +1,16 @@
-"""Base class for all offax_psfs.fits files.
+"""Package loading and coordinate handling for off-axis PSFs."""
 
-This has been deprecated. Please use OffJAX instead.
-"""
-
-import warnings
 from dataclasses import replace
-from multiprocessing import Pool
 from pathlib import Path
 
 import astropy.io.fits as pyfits
 import astropy.units as u
+import jax
 import numpy as np
 from astropy.units import Quantity
-from hwoutils.fft import fft_shift
-from hwoutils.grids import Image, PixelGrid
+from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.transforms import downsample_psfs
 from lod_unit import lod
-from numpy.typing import NDArray
-
-from yippy.util import convert_to_lod, create_shift_mask
 
 from .header import HeaderData
 from .logger import logger
@@ -28,12 +20,7 @@ class OffAx:
     """Base class for off-axis PSF handling.
 
     Handles YIP data loading, offset parsing, and symmetry detection.
-    ``OffJAX`` inherits from this class and overrides ``create_psf`` /
-    ``create_psfs`` with JAX-accelerated implementations.
-
-    The pure-Python ``create_psf`` and ``create_psfs`` methods on this class
-    are retained as a reference implementation but are not used in production.
-    All ``Coronagraph`` instances now use ``OffJAX`` exclusively.
+    ``OffJAX`` inherits the loader and supplies PSF synthesis.
 
     This class loads and processes PSF data from the yield input package (YIP).
     It currently supports oneD and quarter symmetric PSF YIPs. The primary use
@@ -289,267 +276,10 @@ class OffAx:
             )
         return None
 
-    def create_psf(self, x: float, y: float) -> Image:
-        """Return a per-pixel fraction of unocculted source flux at (x, y) lod."""
-        return Image(
-            self._create_psf(x, y),
-            self.grid,
-            (),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
-        )
-
-    def _create_psf(self, x: float, y: float):
-        """Create and return the PSF at the specified off-axis position.
-
-        The pure-Python implementation is deprecated. Use ``Coronagraph``
-        (which uses ``OffJAX``) instead.
-
-        Interpolates and returns the Point Spread Function (PSF) at the specified
-        off-axis position (x, y). If the exact (x, y) position matches one of the
-        PSFs in the YIP, that PSF is returned directly. Otherwise, the PSFs
-        from the surrounding positions are combined using Gaussian weighting and
-        Fourier interpolation to produce an interpolated PSF.
-
-        Args:
-            x (float):
-                The x-coordinate of the off-axis position.
-            y (float):
-                The y-coordinate of the off-axis position.
-
-        Returns:
-            np.ndarray:
-                The interpolated PSF corresponding to the input (x, y) position.
-
-        Notes:
-            - If `self.type` is "1d", the (x, y) position is converted to a
-              radial separation for interpolation; the PSF is mirrored for
-              x < 0 or y < 0 and translated, never rotated to the position
-              angle.
-            - If `self.type` is "2dq", the (x, y) position is mirrored to the
-              first quadrant, and the PSF is flipped accordingly after
-              interpolation.
-            - Gaussian weighting is used to combine the nearest PSFs when the
-              exact (x, y) position does not match any precomputed PSF. The
-              weighting is based on the distance from the input position.
-            - The PSFs are shifted to align with the input position before
-              combining, and the final PSF is normalized by the cumulative weight
-              for each pixel.
-
-        """
-        warnings.warn(
-            "OffAx.create_psf is deprecated; use Coronagraph (OffJAX) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Set default values
-        flip_lr, flip_ud = False, False
-
-        # Check for exact matches
-        if x in self.x_offsets and y in self.y_offsets:
-            x_ind = np.searchsorted(self.x_offsets, x)
-            y_ind = np.searchsorted(self.y_offsets, y)
-            flat_idx = self.offset_to_flat_idx[x_ind, y_ind]
-            if flat_idx >= 0:
-                return self.flat_psfs[flat_idx]
-
-        # Translate position based on type
-        if self.type == "1d":
-            flip_lr, flip_ud = x < 0, y < 0
-            sep = np.sqrt(x**2 + y**2)
-            _x, _y = sep, 0
-        elif self.type == "2dq":
-            flip_lr, flip_ud = x < 0, y < 0
-            _x, _y = abs(x), abs(y)
-        else:
-            _x, _y = x, y
-
-        # Get indices of nearest PSFs, in x and y directions
-        x_match = _x in self.x_offsets
-        _x_search = np.searchsorted(self.x_offsets, _x)
-        if x_match:
-            # If the x value is an exact match, we only need one index
-            x_inds = _x_search.reshape(-1)
-        else:
-            x_inds = np.array([_x_search - 1, _x_search])
-
-        y_match = _y in self.y_offsets
-        _y_search = np.searchsorted(self.y_offsets, _y)
-        if y_match:
-            # If the y value is an exact match, we only need one index
-            y_inds = _y_search.reshape(-1)
-        else:
-            y_inds = np.array([_y_search - 1, _y_search])
-
-        x_vals, y_vals = self.x_offsets[x_inds], self.y_offsets[y_inds]
-        # Get the indices of the nearest PSFs to the input (x, y)
-        near_inds = np.array(np.meshgrid(x_inds, y_inds)).T.reshape(-1, 2)
-
-        # Get the (x, y) offsets of the nearest PSFs to the input (x, y)
-        near_offsets = np.array(np.meshgrid(x_vals, y_vals)).T.reshape(-1, 2)
-
-        # Get the PSFs at the nearest offsets using the index mapping
-        flat_indices = self.offset_to_flat_idx[near_inds[:, 0], near_inds[:, 1]]
-        near_psfs = self.flat_psfs[flat_indices]
-
-        # Combine the PSFs
-        if len(near_psfs) > 1:
-            # Get the shift (in pixels) required to align with the input (x, y)
-            near_shifts = (
-                np.array([_x, _y]) - near_offsets
-            ) / self.pixel_scale_arcsec.value
-
-            # Calculate the distance of each PSF from the input (x, y)
-            near_diffs = np.linalg.norm(near_shifts, axis=1)
-
-            # Gaussian weighting
-            sigma = 0.25
-            weights = np.exp(-(near_diffs**2) / (2 * sigma**2))
-
-            # Normalize the weights
-            weights /= weights.sum()
-
-            # Initialize the PSF array
-            psf = np.zeros_like(near_psfs[0])
-
-            # Initialize the weight array
-            # This weight system is used because shifting a PSF right by one pixel
-            # will leave a blank pixel on the left side of the image. The weight
-            # array keeps track of which PSFs have contributions for each pixel.
-            weight_array = np.zeros_like(psf)
-            for i, near_psf in enumerate(near_psfs):
-                shifted_psf = fft_shift(near_psf, *near_shifts[i])
-                weight_mask = create_shift_mask(near_psf, *near_shifts[i], weights[i])
-                # Add the weighted PSF to the total PSF
-                psf += weight_mask * shifted_psf
-                # Keep track of the weight for each pixel
-                weight_array += weight_mask
-            # Divide each pixel by its weight to get the final PSF
-            psf /= weight_array
-        else:
-            psf = near_psfs[0]
-
-        # Apply any necessary flips before shifting
-        if self.x_symmetric and flip_lr:
-            psf = np.fliplr(psf)
-            remaining_x_shift = x + _x
-        else:
-            remaining_x_shift = x - _x
-        if self.y_symmetric and flip_ud:
-            psf = np.flipud(psf)
-            remaining_y_shift = y + _y
-        else:
-            remaining_y_shift = y - _y
-
-        if remaining_x_shift != 0 or remaining_y_shift != 0:
-            psf = fft_shift(
-                psf,
-                remaining_x_shift / self.pixel_scale_arcsec.value,
-                remaining_y_shift / self.pixel_scale_arcsec.value,
-            )
-
-        return psf
-
-    def create_psfs(self, x: NDArray, y: NDArray) -> Image:
-        """Create and return the PSFs at the specified off-axis positions.
-
-        The pure-Python implementation is deprecated. Use ``Coronagraph``
-        (which uses ``OffJAX``) instead.
-        """
-        warnings.warn(
-            "OffAx.create_psfs is deprecated; use Coronagraph (OffJAX) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        psfs = np.empty((len(x), *self.flat_psfs.shape[1:]))
-        for i in range(len(x)):
-            psfs[i] = self._create_psf(x[i], y[i])
-        return Image(
-            psfs,
-            self.grid,
-            ("source",),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
-        )
-
-    def create_psfs_parallel(
-        self,
-        x: np.ndarray,
-        y: np.ndarray,
-        lam=None,
-        D=None,
-        dist=None,
-        workers: int = 4,
-    ) -> Image:
-        """Compute PSFs for batches of (x, y) arrays using multiprocessing.
-
-        The pure-Python implementation is deprecated. Use ``Coronagraph``
-        (which uses ``OffJAX``) instead.
-
-        Args:
-            x (np.ndarray):
-                Array of x positions.
-            y (np.ndarray):
-                Array of y positions.
-            lam (astropy.units.Quantity):
-                Wavelength of the observation
-            D (astropy.units.Quantity):
-                Diameter of the telescope
-            dist (astropy.units.Quantity):
-                Distance to the system
-            workers (int):
-                Number of parallel processes to use.
-
-        Returns:
-            Image:
-                Per-pixel flux fractions with axes (source_x, source_y, y, x).
-        """
-        if isinstance(x, Quantity):
-            # Convert the x and y positions to lambda/D if they are in pixels
-            if x.unit != lod:
-                x = convert_to_lod(
-                    x, self.grid.center_x * u.pix, self.pixel_scale_arcsec, lam, D, dist
-                )
-            else:
-                x = x.value
-        if isinstance(y, Quantity):
-            if y.unit != lod:
-                y = convert_to_lod(
-                    y, self.grid.center_y * u.pix, self.pixel_scale_arcsec, lam, D, dist
-                )
-            else:
-                y = y.value
-        # For each x[i], we create a column of identical x-values and the full y-array.
-        # This way, each process will handle (len(y)) points for that particular x[i].
-        args = []
-        for xi in x:
-            # Create an array filled with xi, same shape as y
-            x_col = np.full_like(y, xi)
-            args.append((x_col, y))
-
-        # Each process will handle a single (x_col, y) pair and run self.create_psfs
-        # which returns a 3D stack: shape = (len(y), height, width).
-        with Pool(processes=workers) as pool:
-            psf_rows = pool.starmap(self.create_psfs, args)
-
-        # psf_rows is now a list of arrays, each of shape (len(y), height, width)
-        # Stack them along a new axis to form (len(x), len(y), height, width)
-        psf_datacube = np.stack([row.data for row in psf_rows], axis=0)
-        return Image(
-            psf_datacube,
-            self.grid,
-            ("source_x", "source_y"),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
-        )
-
     def __call__(self, x: Quantity, y: Quantity, lam=None, D=None, dist=None) -> Image:
         """Return the PSF at the given x/y position.
 
-        This function (via util.convert_to_lod) has the following assumptions
+        This function has the following assumptions
         on the x/y values provided:
 
         - Pixel coordinates label centers: (0, 0) is the first pixel center.
@@ -574,21 +304,56 @@ class OffAx:
             Image:
                 Per-pixel unocculted source flux fractions at the given position.
         """
-        if isinstance(x, Quantity):
-            # Convert the x and y positions to lambda/D if they are in pixels
-            if x.unit != lod:
-                x = convert_to_lod(
-                    x, self.grid.center_x * u.pix, self.pixel_scale_arcsec, lam, D, dist
-                )
-            x = x.value
-        if isinstance(y, Quantity):
-            if y.unit != lod:
-                y = convert_to_lod(
-                    y, self.grid.center_y * u.pix, self.pixel_scale_arcsec, lam, D, dist
-                )
-            y = y.value
+        if (
+            isinstance(x, Quantity)
+            and isinstance(y, Quantity)
+            and x.unit == y.unit == u.pix
+        ):
+            with jax.enable_x64():
+                x, y = self.grid.pixel_to_unit(x.to_value(u.pix), y.to_value(u.pix))
+            x, y = np.asarray(x), np.asarray(y)
+        else:
+            values = []
+            for value, axis in ((x, "x"), (y, "y")):
+                if isinstance(value, Quantity):
+                    if value.unit == u.pix:
+                        with jax.enable_x64():
+                            point = self.grid.pixel_to_unit(
+                                value.to_value(u.pix)
+                                if axis == "x"
+                                else self.grid.center_x,
+                                value.to_value(u.pix)
+                                if axis == "y"
+                                else self.grid.center_y,
+                            )
+                        value = np.asarray(getattr(point, axis))
+                    elif value.unit == lod:
+                        value = value.to_value(lod)
+                    else:
+                        if value.unit.physical_type == "length":
+                            value = (
+                                np.arctan(value.to_value(u.m) / dist.to_value(u.m))
+                                * u.rad
+                            )
+                        frame = (
+                            self.grid.frame
+                            if lam is None and D is None
+                            else Frame(
+                                lam.to_value(u.nm), D.to_value(u.m), "circumscribed"
+                            )
+                        )
+                        wavelength = (
+                            frame.reference_wavelength_nm
+                            if lam is None
+                            else lam.to_value(u.nm)
+                        )
+                        value = value.to_value(u.arcsec) / frame.lod_to_arcsec(
+                            wavelength
+                        )
+                values.append(value)
+            x, y = values
 
-        if np.isscalar(x) and np.isscalar(y):
+        if np.ndim(x) == np.ndim(y) == 0:
             return self.create_psf(x, y)
         else:
             return self.create_psfs(x, y)

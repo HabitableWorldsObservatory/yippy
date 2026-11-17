@@ -1,7 +1,5 @@
 """JAX functions for image processing operations."""
 
-from functools import partial
-
 import jax.numpy as jnp
 from hwoutils.fft import (
     fft_shear_setup as fft_shear_setup,
@@ -16,7 +14,6 @@ from hwoutils.fft import (
     fft_shift_x,
     fft_shift_y,
 )
-from hwoutils.transforms import rotate_image
 from jax import lax
 
 
@@ -404,101 +401,6 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
     shift = sym_shift_val(input_val, converted_val, pixel_scale_arcsec)
     # Apply the shift
     return fft_shift_y(_PSF, shift, y_phasor)
-
-
-def fft_rotate_jax(image, rot_deg, *, pad_factor=0.5, center=None):
-    """Rotate a square image with the shared hwoutils Fourier implementation.
-
-    Args:
-        image: 2D square image.
-        rot_deg: CCW angle in degrees when displayed with origin at lower left.
-        pad_factor: Padding per side as a fraction of N. Default 0.5 gives
-            approximately 2N width; use 1.5 for 4N and check convergence for
-            precision wings or substantial edge content.
-        center: Optional optical center (row, column), in input pixels.
-            Defaults to the geometric array center (N-1)/2.
-
-    Returns:
-        Rotated image, without clipping or flux renormalization. See
-        ``hwoutils.transforms.rotate_image`` for Nyquist and derivative semantics.
-    """
-    return rotate_image(image, rot_deg, pad_factor=pad_factor, center=center)
-
-
-def rotate_with_shear(image, rot_deg, *, pad_factor=0.5):
-    """Retain the legacy clockwise residual-angle convention using shared code.
-
-    Args:
-        image: 2D square image.
-        rot_deg: Clockwise residual angle in degrees, normally in (-45, 45].
-        pad_factor: Padding per side as a fraction of input width.
-
-    Returns:
-        Rotated image with the same shape as the input.
-    """
-    return rotate_image(image, -rot_deg, pad_factor=pad_factor)
-
-
-def decompose_angle_jax(angle):
-    """Decompose an angle from [0, 360) to (-45, 45] and 90 degree rotations.
-
-    Args:
-        angle (float):
-            The input angle in degrees.
-
-    Returns:
-        tuple:
-            - float: The rotation angle in the range (-45, 45] degrees.
-            - int: The number of 90-degree rotations to apply.
-    """
-    # Normalize the angle to [0, 360)
-    angle = angle % 360
-
-    # Determine the number of 90-degree rotations
-    n_rot = (angle // 90).astype(int)
-
-    # Cut the angle to [0, 90)
-    adjusted_angle = angle % 90
-
-    # Adjust the angle to the range (-45, 45]
-    adjusted_angle, n_rot = lax.cond(
-        adjusted_angle > 45,
-        lambda x: (x - 90, n_rot + 1),
-        lambda x: (x, n_rot),
-        adjusted_angle,
-    )
-    # if n_rot is 4, set it to 0 to avoid unnecessary rotations
-    # this occurs when the angle is in the range (315, 360)
-    n_rot = lax.cond(
-        n_rot == 4,
-        lambda x: 0,
-        lambda x: x,
-        n_rot,
-    )
-
-    return adjusted_angle, n_rot
-
-
-def rot90_traceable(m, k=1, axes=(0, 1)):
-    """Rotate an array by 90 degrees in the plane specified by axes.
-
-    This function is a traceable version of `numpy.rot90` taken from the
-    jax GitHub issues.
-
-    Args:
-        m (jax.numpy.ndarray):
-            The input array to be rotated.
-        k (int, optional):
-            The number of 90-degree rotations to apply.
-        axes (tuple, optional):
-            The axes to rotate the array in.
-
-    Returns:
-        jax.numpy.ndarray:
-            The rotated array.
-    """
-    k %= 4
-    return lax.switch(k, [partial(jnp.rot90, m, k=i, axes=axes) for i in range(4)])
 
 
 def synthesize_psf_separable(

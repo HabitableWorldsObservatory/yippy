@@ -201,14 +201,13 @@ def test_header_grid_corner_counts(syn_coro_1d):
     assert grid.frame.diameter_convention == "circumscribed"
 
 
-def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d, monkeypatch):
+def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
     """Fails if a public image drops geometry, reconstruction, measure or axes.
 
-    Metadata are exact; the node image is checked at the float32 FFT floor
-    (2e-7 of peak).
+    Metadata are exact. The x=1 lod node is offset index 1/0.5=2.
+    Its raw input pixels are the oracle; four machine epsilons of peak
+    allow the padded FFT pair and weighted-normalization roundoff.
     """
-    from multiprocessing.pool import ThreadPool
-
     import equinox as eqx
     import jax.numpy as jnp
     from hwoutils.grids import Image
@@ -236,20 +235,7 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d, monkeypatch):
         assert product.grid == grid
         assert not hasattr(product, "center_x")
         assert not hasattr(product, "center_y")
-    with pytest.warns(DeprecationWarning):
-        numpy_single = numpy_reader.create_psf(1.0, 0.0)
-    with pytest.warns(DeprecationWarning):
-        numpy_stack = numpy_reader.create_psfs([1.0], [0.0])
-    # Exercise the cube product without charging process startup to metadata.
-    monkeypatch.setattr("yippy.offax.Pool", ThreadPool)
-    with pytest.warns(DeprecationWarning):
-        numpy_cube = numpy_reader.create_psfs_parallel(
-            np.array([1.0]), np.array([0.0]), workers=1
-        )
     images = [
-        numpy_single,
-        numpy_stack,
-        numpy_cube,
         numpy_reader.get_psf_by_offset_idx(2, 0),
         coro.create_psf(1.0, 0.0),
         coro.offax(1.0 * lod, 0.0 * lod),
@@ -312,11 +298,14 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d, monkeypatch):
         view.stellar_map(500, 0.1, pixel_scale_lod=0.5, shape=(32, 32)),
     ):
         assert image.reconstruction == "linear"
+    actual = np.asarray(coro.create_psf(1.0, 0.0).data)
+    flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
+    expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
     np.testing.assert_allclose(
-        numpy_single.data,
-        coro.create_psf(1.0, 0.0).data,
+        actual,
+        expected,
         rtol=0,
-        atol=float(numpy_single.data.max()) * 2e-7,
+        atol=4 * np.finfo(actual.dtype).eps * float(expected.max()),
     )
 
 

@@ -212,6 +212,17 @@ class OffJAX(OffAx):
 
         self._create_psf = create_psf_wrapper
 
+    def create_psf(self, x, y) -> Image:
+        """Return one per-pixel source flux fraction image."""
+        return Image(
+            self._create_psf(x, y),
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+            reconstruction="band_limited",
+        )
+
     def create_psfs(self, x, y) -> Image:
         """Return per-pixel source flux fractions with leading axis source."""
         return Image(

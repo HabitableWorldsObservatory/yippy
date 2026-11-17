@@ -13,7 +13,8 @@ import numpy as np
 def test_benchmark_airy_reference_without_git(tmp_path):
     """Analytic evidence regenerates from the installed code with no Git tool."""
     script = Path("tools/benchmark_apertures.py").resolve()
-    env = dict(os.environ, PATH="", PYTHONPATH=str(Path("src").resolve()))
+    env = dict(os.environ, PATH="")
+    env["PYTHONPATH"] = os.environ.get("PYTHONPATH", str(Path("src").resolve()))
     result = subprocess.run(
         [sys.executable, str(script), str(tmp_path), "--airy-only"],
         cwd=tmp_path,

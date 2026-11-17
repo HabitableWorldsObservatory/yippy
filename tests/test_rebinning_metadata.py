@@ -36,8 +36,8 @@ def test_optical_center_axes_are_not_transposed(tmp_path):
     """center_x measures columns and center_y measures rows, not the reverse.
 
     A square PSF stack cannot see a row/column transposition, so this uses 8
-    rows by 12 columns. ``center_x`` feeds ``convert_to_lod`` for an x position,
-    so it must come from the column count. Tolerance basis: alg (exact halves).
+    rows by 12 columns. ``center_x`` feeds ``PixelGrid.pixel_to_unit`` for an
+    x position, so it must come from the column count. Tolerance basis: exact halves.
     """
     fits.writeto(tmp_path / "psfs.fits", np.ones((4, 8, 12)))
     fits.writeto(

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
-import astropy.units as u
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -27,7 +26,6 @@ from scipy.optimize import root_scalar
 
 from .apertures import ApertureRule, Circular, HalfMaximum
 from .logger import logger
-from .util import convert_to_pix
 
 if TYPE_CHECKING:
     from .coronagraph import Coronagraph
@@ -81,12 +79,9 @@ def _iter_xaxis_positions(coro: Coronagraph):
         planet_psf = None if planet_image is None else np.asarray(planet_image.data)
         if planet_psf is None:
             continue
-        px = convert_to_pix(
-            x_lod_val, coro.offax.grid.center_x * u.pix, coro.pixel_scale_arcsec
-        ).value
-        py = convert_to_pix(
-            y_lod_val, coro.offax.grid.center_y * u.pix, coro.pixel_scale_arcsec
-        ).value
+        with jax.enable_x64():
+            px, py = coro.offax.grid.unit_to_pixel(x_lod_val, y_lod_val)
+        px, py = float(px), float(py)
         yield _OffAxisPosition(separation=r, psf=planet_psf, px=px, py=py)
 
 
@@ -162,44 +157,6 @@ def _threshold_mask(psf_os: np.ndarray, trunc_ratio: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Public utility
 # ---------------------------------------------------------------------------
-
-
-def compute_radial_average(
-    image: np.ndarray,
-    pixel_scale_value: float,
-    center: tuple[float, float] | None = None,
-    nbins: int | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute radial average of a 2D image.
-
-    Thin wrapper around :func:`hwoutils.radial.radial_profile` for
-    backward compatibility.
-
-    Args:
-        image: 2D numpy array.
-        pixel_scale_value: Pixel scale in lambda/D per pixel (float).
-        center: ``(cy, cx)`` pixel coordinates of center. Defaults to
-            image center.
-        nbins: Number of radial bins. Defaults to ``floor(max_dim / 2)``.
-
-    Returns:
-        ``(separations_lod, radial_profile)`` - 1-D arrays.
-    """
-    kwargs = {}
-    if center is not None:
-        # Incoming convention is [x, y]; radial_profile expects (cy, cx)
-        if isinstance(center, list):
-            kwargs["center"] = (center[1], center[0])
-        else:
-            kwargs["center"] = center
-    if nbins is not None:
-        kwargs["nbins"] = nbins
-    seps, prof = radial_profile(
-        jnp.asarray(np.asarray(image, dtype=np.float64)),
-        pixel_scale_arcsec=pixel_scale_value,
-        **kwargs,
-    )
-    return np.asarray(seps), np.asarray(prof)
 
 
 def plot_performance_curve(
@@ -987,9 +944,12 @@ def compute_occ_trans_curve(
     """
     sky_trans_data = coro.sky_trans.data
     grid = coro.sky_trans.grid
-    return compute_radial_average(
-        sky_trans_data, grid.step, center=(grid.center_y, grid.center_x)
+    separations, profile = radial_profile(
+        jnp.asarray(np.asarray(sky_trans_data, dtype=np.float64)),
+        grid.step,
+        center=(grid.center_y, grid.center_x),
     )
+    return np.asarray(separations), np.asarray(profile)
 
 
 PROFILE_STEP_PIX = 0.25

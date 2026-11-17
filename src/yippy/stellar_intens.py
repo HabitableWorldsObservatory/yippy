@@ -3,14 +3,14 @@
 from pathlib import Path
 
 import astropy.io.fits as pyfits
+import astropy.units as u
 import numpy as np
 from astropy.units import Quantity
-from hwoutils.grids import Image
+from hwoutils.grids import Frame, Image
 from lod_unit import lod
 from scipy.interpolate import CubicSpline
 
 from .header import HeaderData
-from .util import convert_to_lod
 
 
 class StellarIntens:
@@ -120,5 +120,10 @@ class StellarIntens:
     def _evaluate_array(self, stellar_diam, lam=None, D=None):
         """Host spline values, retaining FITS precision for performance tables."""
         if stellar_diam.unit != lod:
-            stellar_diam = convert_to_lod(stellar_diam, lam=lam, D=D)
+            frame = Frame(lam.to_value(u.nm), D.to_value(u.m), "circumscribed")
+            stellar_diam = (
+                stellar_diam.to_value(u.arcsec)
+                / frame.lod_to_arcsec(lam.to_value(u.nm))
+                * lod
+            )
         return np.exp(self.ln_interp(stellar_diam))

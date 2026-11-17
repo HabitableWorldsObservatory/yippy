@@ -27,7 +27,6 @@ from .performance import (
     compute_core_area_curve,
     compute_core_mean_intensity_curve,
     compute_occ_trans_curve,
-    compute_radial_average,
     compute_raw_contrast_curve,
     compute_throughput_curve,
     core_mean_intensity_profile,
@@ -801,27 +800,6 @@ class Coronagraph:
     # ------------------------------------------------------------------
     # Performance curve computation (delegates to yippy.performance)
     # ------------------------------------------------------------------
-
-    def _compute_radial_average(self, image, center=None, nbins=None):
-        """Compute radial average of a 2D image.
-
-        .. deprecated:: Use :func:`yippy.performance.compute_radial_average`.
-        """
-        sep_lod, profile = compute_radial_average(
-            image, self.pixel_scale_arcsec.value, center=center, nbins=nbins
-        )
-        # Original returned pixel-unit bin_centers; convert back
-        bin_centers_pix = sep_lod / self.pixel_scale_arcsec.value
-        return bin_centers_pix, profile
-
-    def _plot_performance_curve(
-        self, x, y, title, xlabel, ylabel, marker="o-", log_scale=False, ms=4
-    ):
-        """Helper method to plot performance curves.
-
-        .. deprecated:: Use :func:`yippy.performance.plot_performance_curve`.
-        """
-        plot_performance_curve(x, y, title, xlabel, ylabel, marker, log_scale, ms)
 
     def compute_all_performance_curves(
         self,

@@ -19,7 +19,6 @@ from yippy.performance import (
     compute_core_area_curve,
     compute_core_mean_intensity_curve,
     compute_occ_trans_curve,
-    compute_radial_average,
     compute_raw_contrast_curve,
     compute_throughput_curve,
     compute_truncation_core_area_curve,
@@ -203,16 +202,6 @@ class TestComputeAllPerformanceCurves:
         assert np.all(coro.raw_contrast(result.separation_lod) >= floor)
         assert np.any(result.raw_contrast < floor)
         coro.contrast_floor = None  # clean up
-
-
-class TestRadialAverage:
-    """Tests for the backward-compatible compute_radial_average wrapper."""
-
-    def test_uniform_image(self):
-        """Uniform image should have constant radial profile."""
-        image = np.ones((32, 32)) * 5.0
-        _sep, profile = compute_radial_average(image, pixel_scale_value=0.3)
-        np.testing.assert_allclose(profile, 5.0, atol=0.5)
 
 
 @pytest.fixture(scope="module")
