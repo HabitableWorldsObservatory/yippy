@@ -39,6 +39,10 @@ class Circular:
         return _rule_weights(self, psf, source_position, oversample)
 
 
+#: The photometric core used when a caller names no rule: a 0.7 lambda/D circle.
+DEFAULT_APERTURE_RULE = Circular(0.7)
+
+
 @dataclass(frozen=True)
 class HalfMaximum:
     """Region about the PSF peak by construction, above ``fraction`` of it.

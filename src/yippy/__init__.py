@@ -4,6 +4,7 @@ __all__ = [
     "CORE_OVERSAMPLE",
     "CORE_STEP_LOD",
     "CORE_WINDOW_LOD",
+    "DEFAULT_APERTURE_RULE",
     "PEAK_SEARCH_RADIUS_LOD",
     "PROFILE_STEP_PIX",
     "ApertureRule",
@@ -44,7 +45,13 @@ __all__ = [
 ]
 
 from ._version import __version__
-from .apertures import ApertureRule, Circular, HalfMaximum, Matched
+from .apertures import (
+    DEFAULT_APERTURE_RULE,
+    ApertureRule,
+    Circular,
+    HalfMaximum,
+    Matched,
+)
 from .coronagraph import Coronagraph
 from .datasets import cache_dir, fetch_yip, list_yips, yip_exists, yip_info
 from .eqx_coronagraph import EqxCoronagraph
