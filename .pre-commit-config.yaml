@@ -1,12 +1,8 @@
 repos:
-  - repo: local
+  - repo: https://github.com/CoreySpohn/hwoutils
+    rev: 7ea5d77
     hooks:
       - id: no-internal-refs
-        name: no internal research references
-        entry: python3 tools/check_internal_refs.py
-        language: system
-        types: [text]
-        exclude: ^(CHANGELOG\.md|tools/check_internal_refs\.py)$
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: "v6.0.0"
     hooks:
