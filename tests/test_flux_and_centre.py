@@ -358,3 +358,21 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     host._datacube_cache_path.unlink()
     host._create_psf_datacube_gpu(batch_size=81)
     np.testing.assert_allclose(host.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)
+
+
+def test_offaxis_grid_must_match_the_stellar_grid(tmp_path):
+    """Fails if the off-axis PSFs silently take the stellar header's geometry.
+
+    A package whose off-axis optical axis sits one pixel from the stellar axis
+    is refused, because the reader combines both products on one grid.
+    """
+    import astropy.io.fits as pyfits
+    from synthetic_yip import write_synthetic_yip
+
+    from yippy import Coronagraph
+
+    package = write_synthetic_yip(tmp_path / "shifted", npix=8, kind="1d")
+    with pyfits.open(package.path / "offax_psf.fits", mode="update") as hdul:
+        hdul[0].header["XCENTER"] = hdul[0].header["XCENTER"] + 1.0
+    with pytest.raises(ValueError, match="off-axis PSF grid differs"):
+        Coronagraph(package.path)

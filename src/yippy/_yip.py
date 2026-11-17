@@ -208,6 +208,21 @@ class _YIPData:
             package_path, stellar_intens_file, stellar_diam_file
         )
 
+        self.offaxis_header = (
+            delivery.header
+            if delivery is not None
+            else HeaderData.from_fits_header(
+                pyfits.getheader(package_path / offax_data_file)
+            )
+        )
+        if delivery is None and (
+            self.offaxis_header.pixel_grid() != self.header.pixel_grid()
+        ):
+            raise ValueError(
+                f"{yip_path.stem}: the off-axis PSF grid differs from the stellar "
+                "intensity grid; a YIP stores both on one native grid"
+            )
+
         # Offaxis PSF of the planet as function of separation from the star
         self.offax = (
             backend
@@ -216,22 +231,15 @@ class _YIPData:
                 yip_path,
                 offax_data_file,
                 offax_offsets_file,
-                self.pixel_scale_arcsec,
+                self.offaxis_header.pixscale,
                 x_symmetric,
                 y_symmetric,
                 downsample_shape=downsample_shape,
-                grid=self.header.pixel_grid(),
+                grid=self.offaxis_header.pixel_grid(),
             )
         )
 
         self.grid = self.offax.grid
-        self.offaxis_header = (
-            delivery.header
-            if delivery is not None
-            else HeaderData.from_fits_header(
-                pyfits.getheader(package_path / offax_data_file)
-            )
-        )
 
         if delivery is not None:
             self.stellar_header = self.header
