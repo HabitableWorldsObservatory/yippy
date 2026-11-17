@@ -289,29 +289,22 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     )
 
 
-def test_detector_aperture_converges_to_performance(syn_coro_1d):
+def test_detector_aperture_converges_to_encircled_flux(syn_coro_1d, synthetic_1d):
     """Fails if detector rendering silently uses linear PSF reconstruction.
 
     Solution verification: refine detector pitch by two at fixed angular extent.
     Pixel-box integration and fractional aperture coverage give second-order
-    error against the performance code's subpixel intensity integral. Spike
+    error against the analytic Gaussian encircled flux. Spike
     basis: the synthetic Gaussian's error/pitch**2 is below 0.16; allow 0.18.
     The observed-order band permits aperture-edge phase and reference quadrature
     error, while rejecting the nonvanishing linear-reconstruction bias.
     """
     import jax
     from optixstuff.apertures import Circular
-    from optixstuff.performance import performance_curves
 
     with jax.enable_x64():
         rule, separation = Circular(0.7), 2.0
-        record = performance_curves(
-            lambda s: syn_coro_1d.off_axis_psf(None, s, None),
-            syn_coro_1d.stellar_map(None, 0.0, grid=None),
-            rule,
-            separations_lod=[separation],
-        )
-        expected = record.evaluate("throughput", separation)
+        expected = synthetic_1d.expected_throughput(separation, rule.radius_lod)
         errors, sums = [], []
         pitches = (0.24, 0.12, 0.06)
         for pitch, size in zip(pitches, (32, 64, 128), strict=True):
@@ -358,3 +351,67 @@ def test_public_package_optical_axis_evidence(shipped_coro):
         a, b, c = np.log(psf[row, col - 1 : col + 2])
         peak_x = col + 0.5 * (a - c) / (a - 2 * b + c)
         assert abs(peak_x - (127.5 + separation / 0.25)) < 0.1
+
+
+@pytest.mark.parametrize("fixture", ["syn_coro_1d", "syn_coro_2d", "shipped_coro"])
+def test_matched_background_limited_exposure(request, fixture):
+    """Matched saves 10-30 percent outside the inner working angle.
+
+    For unit QE, independent photons and zero residual floor, the live time
+    to a common S/N is proportional to variance rate / planet rate squared.
+    Incident rates per second are 0.01 planet, 1e8 stellar and 0.1 diffuse
+    per square lambda/D after transmission.
+    """
+    from optixstuff.apertures import Circular, Matched
+
+    circular, matched = Circular(0.7), Matched()
+    coro = request.getfixturevalue(fixture).with_rules((circular, matched))
+    public = fixture == "shipped_coro"
+    separations = np.array([2.0, 3.0, 5.0, 10.0] if public else [2.0, 3.0, 5.0])
+    durations = []
+    for rule in (circular, matched):
+        record = coro.curves(rule)
+        signal = 0.01 * record.evaluate("throughput", separations)
+        variance = (
+            0.01 * record.evaluate("throughput_variance", separations)
+            + 1e8 * record.evaluate("leakage_fraction_variance", separations)
+            + 0.1 * record.evaluate("core_area_variance_lod2", separations)
+        )
+        durations.append(np.ceil(7**2 * variance / signal**2))
+    savings = 1 - durations[1] / durations[0]
+    if public:
+        # The AAVC PSF inside the IWA gives larger improvements at 2 and 3 lod.
+        np.testing.assert_allclose(savings[:2], [0.5313, 0.4052], atol=0.001)
+        savings = savings[2:]
+    assert np.all((0.10 < savings) & (savings < 0.30))
+
+
+def test_public_geometric_leakage_change(shipped_coro):
+    """Pin the change from coverage-weighted stellar pixels at four separations.
+
+    The comparison uses the first stellar diameter and native YIP records
+    interpolated at 2, 3, 5 and 10 lod. Allow 0.01 percentage point for
+    rounding of the references and the active YIP storage precision.
+    """
+    from optixstuff.apertures import Circular, HalfMaximum
+
+    from yippy._yip import _YIPData
+
+    host = _YIPData(shipped_coro.yip_path)
+    for rule, native_leakage, change_percent in (
+        (
+            Circular(0.7),
+            [1.62776811e-11, 2.10543705e-11, 3.61032578e-12, 3.63004298e-12],
+            [-1.204, 1.137, -0.846, 7.988],
+        ),
+        (
+            HalfMaximum(),
+            [1.88133875e-11, 2.48969389e-11, 4.51811543e-12, 3.34974016e-12],
+            [-1.610, 0.300, -0.030, 8.146],
+        ),
+    ):
+        record = host._prepare_record(rule)
+        leakage = record.evaluate("leakage_fraction", np.array([2.0, 3.0, 5.0, 10.0]))
+        np.testing.assert_allclose(
+            100 * (leakage / native_leakage - 1), change_percent, atol=0.01, rtol=0
+        )

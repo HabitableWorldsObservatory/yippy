@@ -492,3 +492,31 @@ def test_global_peak_only_safeguard_covers_the_image(value, ratio, nominal, dtyp
             )
             assert float(area) == pytest.approx(32**2 * 0.25**2)
             assert float(flux) == pytest.approx(32**2 * value)
+
+
+def test_matched_airy_sampling_and_peak_normalization():
+    """Keep a fixed 48-lod field as the detector pitch changes.
+
+    The squared-density integral agrees to 20 ppb across pitches and phases.
+    A 2 ppm throughput tolerance allows finite-crop DFT error in the peak.
+    The mean area includes the cropped wings, so allow 20 ppm across phases.
+    """
+    from optixstuff.apertures import Matched
+
+    powers, throughputs = [], []
+    with jax.enable_x64():
+        for pitch in (0.5, 0.25, 0.125):
+            areas = []
+            for phase in (0.0, 0.25, 0.5):
+                psf = airy_psf(pitch, phase, size=int(48 / pitch))
+                powers.append(np.sum(psf**2) / pitch**2)
+                record = performance_curves(
+                    *image_source(psf, pitch), Matched(), separations_lod=[0.0]
+                )
+                throughputs.append(record.throughput[0])
+                areas.append(
+                    [record.core_area_lod2[0], record.core_area_variance_lod2[0]]
+                )
+            assert np.all(np.ptp(areas, axis=0) / areas[0] < 2e-5)
+    assert np.ptp(powers) / powers[0] < 2e-8
+    assert np.ptp(throughputs) / throughputs[0] < 2e-6

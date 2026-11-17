@@ -8,6 +8,19 @@ import astropy.io.fits as fits
 import numpy as np
 from hwoutils.grids import Frame
 
+PERFORMANCE_VERSION = 6
+PERFORMANCE_FIELDS = (
+    "throughput",
+    "throughput_variance",
+    "core_area_lod2",
+    "core_area_variance_lod2",
+    "leakage_fraction",
+    "leakage_fraction_variance",
+    "leakage_density_lod2",
+    "leakage_density_variance_lod2",
+    "raw_contrast",
+)
+
 
 def _canonical_cache_value(value):
     """Normalize a cache identity value to a JSON-stable form.
@@ -50,7 +63,7 @@ def save_coro_performance_to_fits(
     from dataclasses import asdict
 
     header = fits.Header()
-    header["PERFVER"] = 4
+    header["PERFVER"] = PERFORMANCE_VERSION
     header["APERRULE"] = type(record.rule).__name__
     header["RULEJSON"] = json.dumps(asdict(record.rule), sort_keys=True)
     header["LEAKRULE"] = record.leakage_rule
@@ -62,18 +75,10 @@ def save_coro_performance_to_fits(
     if identity is not None:
         header["CACHEKEY"] = cache_identity_digest(identity)
         header["CACHEID"] = cache_identity_json(identity)
-    names = (
-        "separation_lod",
-        "throughput",
-        "core_area_lod2",
-        "leakage_fraction",
-        "leakage_density_lod2",
-        "raw_contrast",
-    )
     table = fits.BinTableHDU.from_columns(
         [
             fits.Column(name=name, format="D", array=getattr(record, name))
-            for name in names
+            for name in ("separation_lod", *PERFORMANCE_FIELDS)
         ],
         name="PERFORMANCE",
     )
@@ -94,7 +99,11 @@ def read_performance_cache_key(path: Path) -> str | None:
     """Identity digest, or None for missing/unreadable/old-format records."""
     try:
         header = fits.getheader(path, 0)
-        return header.get("CACHEKEY") if header.get("PERFVER") == 4 else None
+        return (
+            header.get("CACHEKEY")
+            if header.get("PERFVER") == PERFORMANCE_VERSION
+            else None
+        )
     except (OSError, ValueError):
         return None
 
@@ -106,8 +115,10 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
 
     with fits.open(Path(indir) / filename) as hdus:
         header = hdus[0].header
-        if header.get("PERFVER") != 4:
-            raise ValueError("performance cache requires PERFVER=4")
+        if header.get("PERFVER") != PERFORMANCE_VERSION:
+            raise ValueError(
+                f"performance cache requires PERFVER={PERFORMANCE_VERSION}"
+            )
         rule_type = {
             "Circular": Circular,
             "HalfMaximum": HalfMaximum,
@@ -116,14 +127,7 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
         rule = rule_type(**json.loads(header["RULEJSON"]))
         fields = {
             name: np.array(hdus["PERFORMANCE"].data[name], dtype=float)
-            for name in (
-                "separation_lod",
-                "throughput",
-                "core_area_lod2",
-                "leakage_fraction",
-                "leakage_density_lod2",
-                "raw_contrast",
-            )
+            for name in ("separation_lod", *PERFORMANCE_FIELDS)
         }
         iwa = header["IWA_LOD"]
         return PerformanceCurves(

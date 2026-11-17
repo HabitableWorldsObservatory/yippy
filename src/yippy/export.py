@@ -29,6 +29,9 @@ def export_exosims(
     requested separations (its knots by default). ``arcsec`` converts both
     separation and aperture area. The EXOSIMS core-mean-intensity file retains
     per-stellar-pixel flux fractions; LEAKRULE identifies the averaging rule.
+    With Matched weights, core area is pixel area times sum(w), throughput
+    is sum(w*p), and aperture-mean intensity is mean stellar leakage per
+    unit collecting area times one stellar pixel area.
     Array extent is not an outer working angle and is not exported as one.
     """
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
@@ -133,6 +136,12 @@ def export_ayo_csv(
     separations_lod=None,
 ) -> Path:
     """Write AYO columns using the selected record's interpolation policy.
+
+    Matched weights use the band-limited peak. Core throughput is sum(w*p).
+    Point-source contrast is the selected mean leakage density times the
+    mean collecting area divided by throughput. The noise-floor column is
+    this contrast divided by ppf, including any requested contrast floor.
+    Skytrans is the radial sky transmission.
 
     Separations are in lambda/D. A contrast floor applies only when explicitly
     requested and does not change the performance record. Seventeen significant

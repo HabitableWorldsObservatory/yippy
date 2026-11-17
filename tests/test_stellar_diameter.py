@@ -168,7 +168,13 @@ def test_finite_leakage_record_reference(finite_coro, rule, leakage_rule):
         }
         positions = [(float(x), float(ys[iy])) for x in record.separation_lod]
         expected = []
-        names = ("leakage_fraction", "leakage_density_lod2", "raw_contrast")
+        names = (
+            "leakage_fraction",
+            "leakage_density_lod2",
+            "raw_contrast",
+            "leakage_fraction_variance",
+            "leakage_density_variance_lod2",
+        )
         for d in diameters:
             reference = (
                 record
@@ -191,7 +197,17 @@ def test_finite_leakage_record_reference(finite_coro, rule, leakage_rule):
                     getattr(c, name)(
                         s, stellar_diam_lod=d, rule=rule, leakage_rule=leakage_rule
                     )
-                    for name in names
+                    for name in names[:3]
+                ]
+                + [
+                    method(
+                        s,
+                        stellar_diam_lod=d,
+                        rule=rule,
+                        leakage_rule=leakage_rule,
+                        variance=True,
+                    )
+                    for method in (c.leakage_fraction, c.leakage_density_lod2)
                 ]
             )
 
@@ -228,6 +244,6 @@ def test_finite_leakage_record_reference(finite_coro, rule, leakage_rule):
             aperture_area_lod2=1.0,
             stellar_leakage_density_lod2=1e-9,
         )
-        for name in names:
+        for name in ("leakage_fraction", "leakage_density_lod2", "raw_contrast"):
             with pytest.raises(ValueError, match="finite stellar diameter"):
                 getattr(scalar, name)(1.0, stellar_diam_lod=0.1)

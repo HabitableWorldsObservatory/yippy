@@ -21,7 +21,9 @@ Smaller contrast means better suppression, so the engineering floor is a
 lower bound: `max(abs(raw_contrast), contrast_floor) / ppf` gives the
 EXOSIMS noise convention. It changes neither the stored curve nor the PSFs,
 aperture throughput, aperture area, stellar leakage, or sky transmission.
-AYO density noise is `coro.leakage_density_lod2(separations) / ppf`;
+The AYO CSV noise-floor column gives the exported point-source contrast
+divided by `ppf`. The corresponding residual density is
+`coro.leakage_density_lod2(separations) / ppf`;
 per-stellar-pixel ring intensity is read with
 `yippy.performance.stellar_intensity_curves` as
 `stellar_intensity_curves(coro).evaluate("core_mean_intensity", separations)`.

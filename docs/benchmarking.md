@@ -22,7 +22,9 @@ Select an aperture with `Circular(radius_lod, centre="source")`,
 position, keeping the aperture centre fixed in angle independently of
 pixelization. Use `centre="peak"` for a circle following the refined local PSF
 peak. HalfMaximum includes only the region connected to the source peak;
-Matched uses the PSF as a weighted template and reports a noise-equivalent area.
+Matched uses the peak-normalized PSF as its template. Its mean collecting
+area is pixel area times the sum of the weights, and its variance area is
+pixel area times the sum of squared weights.
 Declare the rules with `Coronagraph(path, rules=(...))`. Select a prepared
 record with `record = coro.curves(rule)` and evaluate every curve with
 `record.evaluate(name, separation_lod)`, including export samples. Generic

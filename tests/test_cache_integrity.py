@@ -61,11 +61,11 @@ def test_circular_centres_have_distinct_complete_cache_records(
         path = obj._perf_dir / obj._perf_filename()
         paths.append(path)
         header = fits.getheader(path)
-        assert header["PERFVER"] == 4
+        assert header["PERFVER"] == 6
         assert json.loads(header["RULEJSON"])["centre"] == centre
         identity = json.loads(header["CACHEID"])
         assert identity["rule"]["centre"] == centre
-        assert float.fromhex(identity["performance_record"]) == 4
+        assert float.fromhex(identity["performance_record"]) == 6
         assert record.rule.centre == centre
     assert paths[0] != paths[1]
     assert all(p.exists() for p in paths)
@@ -76,9 +76,13 @@ def test_circular_centres_have_distinct_complete_cache_records(
         for name in (
             "separation_lod",
             "throughput",
+            "throughput_variance",
             "core_area_lod2",
+            "core_area_variance_lod2",
             "leakage_fraction",
+            "leakage_fraction_variance",
             "leakage_density_lod2",
+            "leakage_density_variance_lod2",
             "raw_contrast",
         ):
             np.testing.assert_array_equal(
@@ -94,10 +98,10 @@ def test_circular_centres_have_distinct_complete_cache_records(
             assert getattr(loaded, name) == getattr(original, name)
     legacy = tmp_path / "legacy.fits"
     with fits.open(paths[0]) as hdus:
-        hdus[0].header["PERFVER"] = 3
+        hdus[0].header["PERFVER"] = 5
         hdus.writeto(legacy)
     assert read_performance_cache_key(legacy) is None
-    with pytest.raises(ValueError, match="PERFVER=4"):
+    with pytest.raises(ValueError, match="PERFVER=6"):
         load_coro_performance_from_fits(legacy.name, legacy.parent)
 
 
@@ -666,9 +670,13 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
         ),
         rule=HalfMaximum(0.304),
         throughput=throughput,
+        throughput_variance=0.5 * throughput,
         core_area_lod2=np.array([1.123456789012345, 2.123456789012345]),
+        core_area_variance_lod2=0.5 * np.array([1.123456789012345, 2.123456789012345]),
         leakage_fraction=contrast * throughput,
+        leakage_fraction_variance=0.5 * contrast * throughput,
         leakage_density_lod2=contrast,
+        leakage_density_variance_lod2=0.5 * contrast,
         raw_contrast=contrast,
         iwa_lod=1.23456789012345,
         data_extent_lod=16.0,
@@ -680,9 +688,13 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
     for name in (
         "separation_lod",
         "throughput",
+        "throughput_variance",
         "core_area_lod2",
+        "core_area_variance_lod2",
         "leakage_fraction",
+        "leakage_fraction_variance",
         "leakage_density_lod2",
+        "leakage_density_variance_lod2",
         "raw_contrast",
     ):
         np.testing.assert_array_equal(getattr(loaded, name), getattr(record, name))

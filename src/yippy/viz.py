@@ -10,6 +10,13 @@ __all__ = ["plot_core_mean_intensity", "plot_performance_curve"]
 
 _METRICS = {
     "throughput": ("Throughput", False),
+    "throughput_variance": ("Planet shot-noise fraction", False),
+    "core_area_variance_lod2": (r"Variance area [$(\lambda/D)^2$]", False),
+    "leakage_fraction_variance": ("Stellar shot-noise fraction", True),
+    "leakage_density_variance_lod2": (
+        r"Stellar shot-noise density [$(\lambda/D)^{-2}$]",
+        True,
+    ),
     "core_area_lod2": (r"Core area [$(\lambda/D)^2$]", False),
     "leakage_fraction": ("Stellar leakage fraction", True),
     "leakage_density_lod2": (r"Stellar leakage density [$(\lambda/D)^{-2}$]", True),
@@ -43,9 +50,9 @@ def plot_performance_curve(
     Args:
         curves_or_separations: PerformanceCurves or separations in lambda/D.
         values: Curve values when passing bare separations; omit for a record.
-        metric: Throughput, core_area_lod2, leakage_fraction,
-            leakage_density_lod2, raw_contrast, or occulter_transmission.
-            The last is array-only because it is not part of PerformanceCurves.
+        metric: Record field for throughput, collecting area, leakage fraction
+            or leakage density (mean or variance), or raw_contrast. Use
+            occulter_transmission with bare curve arrays.
         ax: Optional single destination axes; None creates a figure and axes.
         label: Optional series label for caller-managed legends or labels.
         line_kw: Properties routed to the eyepiece line primitive.

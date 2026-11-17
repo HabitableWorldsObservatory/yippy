@@ -189,10 +189,14 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
         Coronagraph(coro.yip_path, interp_order=1)
     for name in (
         "throughput",
+        "throughput_variance",
         "core_area_lod2",
+        "core_area_variance_lod2",
         "raw_contrast",
         "leakage_fraction",
+        "leakage_fraction_variance",
         "leakage_density_lod2",
+        "leakage_density_variance_lod2",
     ):
         values = getattr(record, name)
         is_log = record.interpolation[name] == "log"
@@ -241,13 +245,17 @@ def test_default_preserves_a_steep_monotone_rise():
         nodes,
         Frame(500, 6, "circumscribed"),
         Circular(0.7),
-        values,
-        np.ones_like(values),
-        values,
-        values,
-        values,
-        3.0,
-        14.0,
+        throughput=values,
+        throughput_variance=values,
+        core_area_lod2=np.ones_like(values),
+        core_area_variance_lod2=np.ones_like(values),
+        leakage_fraction=values,
+        leakage_fraction_variance=values,
+        leakage_density_lod2=values,
+        leakage_density_variance_lod2=values,
+        raw_contrast=values,
+        iwa_lod=3.0,
+        data_extent_lod=14.0,
     )
     got = record.evaluate("throughput", grid)
     wrong = make_interp_spline(nodes, values, k=3)(grid)

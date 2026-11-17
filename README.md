@@ -111,6 +111,9 @@ image = coro.extended_scene(scene_image, None, grid=detector_grid)
 `coro.curves(rule)` returns an `optixstuff.PerformanceCurves` containing
 `separation_lod`, `throughput`, `core_area_lod2`, `leakage_fraction`,
 `leakage_density_lod2`, `raw_contrast`, `iwa_lod`, and `data_extent_lod`.
+The corresponding variance moments are `throughput_variance`,
+`core_area_variance_lod2`, `leakage_fraction_variance`, and
+`leakage_density_variance_lod2`.
 Use `record.evaluate(field, separation_lod)` to interpolate. Throughput and
 area use linear-value PCHIP; leakage and contrast use log-value PCHIP. The
 fields interpolate independently. Their contrast identity holds at measured
@@ -118,9 +121,12 @@ knots: contrast = leakage_density * core_area / throughput.
 
 `Circular(radius_lod, centre="source")` fixes the aperture at the supplied
 source position. `centre="peak"` follows the local PSF peak. `HalfMaximum(f)`
-selects the connected core above fraction `f` of its peak. `Matched()` uses
-PSF weights and reports noise-equivalent area. Flux and area share the same
-aperture weights, derived from the band-limited PSF reconstruction.
+selects the connected core above fraction `f` of its peak. Both integrate
+planet and stellar intensity over the same region and have identical mean
+and variance moments. `Matched()` uses native PSF samples divided by the
+band-limited subpixel peak. Mean collecting area is pixel area times
+`sum(w)`, and variance area is pixel area times `sum(w**2)`. The same weight
+powers select the corresponding planet and stellar moments.
 
 Default records measure the shipped non-negative off-axis samples. For
 standalone aperture measurements on another separation axis, use
@@ -156,7 +162,10 @@ coro.dump_ayo_csv("output.csv")
 
 `jaxedith.PostProcessing.speckle_residual_fraction` owns the residual fraction
 `1 / ppf`. Exports use the first prepared record and only apply a floor when
-explicitly requested.
+explicitly requested. For `Matched()`, the AYO core throughput column gives
+`sum(w*p)` and the default aperture-mean point-source contrast gives
+`sum(w*s)/sum(w*p)` at measured knots. The noise-floor column gives the
+exported contrast divided by `ppf`. Sky transmission is independent of the aperture.
 
 ## Example data
 

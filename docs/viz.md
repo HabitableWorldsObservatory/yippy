@@ -21,7 +21,8 @@ also accepts a `PerformanceCurves` record and a `metric` name. They return
 eyepiece `PlotResult` objects and draw into a single caller-supplied `ax`, or
 create an axes when it is omitted. They never show or save figures themselves.
 
-This example uses synthetic arrays with a known constant stellar density.
+This example uses synthetic arrays with a constant stellar density. For illustration, the variance area
+and planet variance throughput are each half their mean counterparts.
 
 ```{code-cell} python
 import hwostyle
@@ -42,9 +43,13 @@ curves = PerformanceCurves(
     frame=Frame(500, 6, "circumscribed"),
     rule=DEFAULT_APERTURE_RULE,
     throughput=throughput,
+    throughput_variance=throughput / 2,
     core_area_lod2=area,
+    core_area_variance_lod2=area / 2,
     leakage_fraction=density * area,
+    leakage_fraction_variance=density * area / 2,
     leakage_density_lod2=density,
+    leakage_density_variance_lod2=density,
     raw_contrast=density * area / throughput,
     iwa_lod=2 * np.sqrt(np.log(2)),
     data_extent_lod=8,

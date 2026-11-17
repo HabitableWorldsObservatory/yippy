@@ -371,7 +371,7 @@ class Coronagraph(AbstractTableCoronagraph):
         *,
         separations_lod=None,
     ):
-        """Export the first prepared record to an AYO CSV table."""
+        """Write AYO point-source photometry and sky transmission."""
         return export_ayo_csv(
             self,
             output_path,

@@ -27,13 +27,17 @@ def curves():
         separation,
         Frame(500, 6, "circumscribed"),
         DEFAULT_APERTURE_RULE,
-        throughput,
-        area,
-        density * area,
-        density,
-        density * area / throughput,
-        0.75,
-        4.0,
+        throughput=throughput,
+        throughput_variance=throughput / 2,
+        core_area_lod2=area,
+        core_area_variance_lod2=area / 2,
+        leakage_fraction=density * area,
+        leakage_fraction_variance=density * area / 2,
+        leakage_density_lod2=density,
+        leakage_density_variance_lod2=density,
+        raw_contrast=density * area / throughput,
+        iwa_lod=0.75,
+        data_extent_lod=4.0,
         stellar_diameter=0.0,
     )
 
@@ -107,10 +111,14 @@ def test_viz_records_arrays_and_axes(curves):
         fig, axes = plt.subplots(1, 2, layout="constrained")
         for metric in (
             "throughput",
+            "throughput_variance",
             "core_area_lod2",
+            "core_area_variance_lod2",
             "raw_contrast",
             "leakage_fraction",
+            "leakage_fraction_variance",
             "leakage_density_lod2",
+            "leakage_density_variance_lod2",
         ):
             result = viz.plot_performance_curve(curves, metric=metric, ax=axes[0])
             assert isinstance(result, ep.plot.PlotResult)

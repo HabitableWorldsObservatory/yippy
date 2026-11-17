@@ -30,6 +30,8 @@ from .performance import _iter_xaxis_positions
 from .sky_trans import SkyTrans
 from .stellar_intens import StellarIntens
 from .util import (
+    PERFORMANCE_FIELDS,
+    PERFORMANCE_VERSION,
     cache_identity_digest,
     load_coro_performance_from_fits,
     read_performance_cache_key,
@@ -342,16 +344,7 @@ class _YIPData:
     def _profile_record(self, separation, name, values):
         """Put ancillary sampled quantities through the common curve evaluator."""
         base = self.performance
-        fields = {
-            key: base.evaluate(key, separation)
-            for key in (
-                "throughput",
-                "core_area_lod2",
-                "leakage_fraction",
-                "leakage_density_lod2",
-                "raw_contrast",
-            )
-        }
+        fields = {key: base.evaluate(key, separation) for key in PERFORMANCE_FIELDS}
         return PerformanceCurves(
             separation,
             base.frame,
@@ -740,7 +733,7 @@ class _YIPData:
     def _perf_identity(
         self, rule, leakage_rule, stellar_diameter, separations_lod=None
     ):
-        """Complete identity of a single-axis photometry record (schema 4)."""
+        """Complete identity of a weighted photometry record."""
         from dataclasses import asdict
 
         identity = self._cache_identity_base(
@@ -749,8 +742,8 @@ class _YIPData:
         )
         identity.update(
             {
-                "performance_record": 4,
-                "aperture_algorithm": "local_component_native_leakage_v1",
+                "performance_record": PERFORMANCE_VERSION,
+                "aperture_algorithm": "continuum_region_dft_peak_v1",
                 "yippy_version": __version__,
                 "table_storage": "float64",
                 "rule": {"name": type(rule).__name__, **asdict(rule)},
@@ -792,7 +785,7 @@ class _YIPData:
     ):
         """Build/select one complete record; explicitly imported metadata must match.
 
-        Persistent records store all five quantities on one axis, plus aperture,
+        Persistent records store all photometry fields on one axis, plus aperture,
         averaging rule, stellar diameter and frame. Corrupt automatic entries
         are cache misses. Explicit imports fail clearly instead of silently
         overriding their physical definitions.
