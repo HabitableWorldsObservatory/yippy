@@ -24,12 +24,8 @@ from .offjax import OffJAX
 from .performance import (
     CORE_OVERSAMPLE,
     PerformanceCurves,
-    compute_core_area_curve,
     compute_core_mean_intensity_curve,
     compute_occ_trans_curve,
-    compute_raw_contrast_curve,
-    compute_throughput_curve,
-    core_mean_intensity_profile,
     performance_curves,
 )
 from .sky_trans import SkyTrans
@@ -109,7 +105,6 @@ class Coronagraph:
         use_quarter_psf_datacube: bool = True,
         downsample_shape: tuple[int, int] | None = None,
         rule=DEFAULT_APERTURE_RULE,
-        contrast_floor: float | None = None,
         leakage_rule: str = "aperture_mean",
         *,
         interpolation: str = "blend",
@@ -156,8 +151,6 @@ class Coronagraph:
                 Default is None (no downsampling).
             rule: Static Circular, HalfMaximum or Matched photometric rule.
             leakage_rule: aperture_mean or azimuthal_ring_mean for the density.
-            contrast_floor: Optional floor applied by the contrast accessor;
-                the physical record and cache always retain unfloored values.
             interpolation (str):
                 Off-axis backend: blend (default), auto, or strict sinc. Legacy
                 blend loading and caches are unchanged. Versioned quadrant
@@ -204,7 +197,6 @@ class Coronagraph:
         # Store performance curve parameters
         self.rule = rule
         self.leakage_rule = leakage_rule
-        self.contrast_floor = contrast_floor
         self.curves_by_rule = {}
 
         # Get header and calculate the lambda/D value
@@ -339,16 +331,6 @@ class Coronagraph:
         """Select the current rule's complete record from a validated cache."""
         return self.compute_all_performance_curves()
 
-    @property
-    def iwa_lod(self):
-        """Half-maximum-throughput inner working angle of the selected rule."""
-        return self.performance.iwa_lod
-
-    @property
-    def data_extent_lod(self):
-        """Array half-width; no outer working angle is inferred from data support."""
-        return self.performance.data_extent_lod
-
     def _profile_record(self, separation, name, values):
         """Put ancillary sampled quantities through the common curve evaluator."""
         base = self.performance
@@ -375,13 +357,12 @@ class Coronagraph:
 
     def _initialize_profiles(self):
         sep, values = compute_occ_trans_curve(self)
-        self._occultation_record = self._profile_record(
+        self.occultation_record: PerformanceCurves = self._profile_record(
             sep, "occulter_transmission", values
         )
         sep, profiles = compute_core_mean_intensity_curve(self)
         self.core_intensity_dict = profiles
         self.core_intensity_separations = sep
-        self._core_intensity_cache = {}
         self._core_intensity_interpolation = "keys"
         self._core_intensity_diameter = float(self.stellar_intens.diams[0].value)
         self._intensity_record = self._profile_record(
@@ -645,8 +626,8 @@ class Coronagraph:
 
         if hasattr(self, "performance"):
             base_str += f"\nAperture: {self.rule}; leakage: {self.leakage_rule}"
-            base_str += f"\nInner working angle: {self.iwa_lod:.2f} lod"
-            base_str += f"\nData half-width: {self.data_extent_lod:.2f} lod"
+            base_str += f"\nInner working angle: {self.performance.iwa_lod:.2f} lod"
+            base_str += f"\nData half-width: {self.performance.data_extent_lod:.2f} lod"
 
         if self.has_psf_datacube:
             base_str += "\nPSF datacube loaded"
@@ -880,382 +861,6 @@ class Coronagraph:
         self.performance = record
         self.curves_by_rule[rule] = record
         return record
-
-    def occulter_transmission_curve(self):
-        """Compute occulter transmission curve.
-
-        Delegates to :func:`yippy.performance.compute_occ_trans_curve`.
-        """
-        sep, occ = compute_occ_trans_curve(self)
-        return sep, occ
-
-    def core_mean_intensity_curve(self, stellar_diam_values=None, interpolation="keys"):
-        """Compute core mean intensity curves.
-
-        Delegates to :func:`yippy.performance.compute_core_mean_intensity_curve`.
-        ``interpolation`` selects the spatial reader (``"keys"`` or ``"quintic"``).
-        """
-        sep, intensities = compute_core_mean_intensity_curve(
-            self,
-            stellar_diam_values=stellar_diam_values,
-            interpolation=interpolation,
-        )
-        return sep, intensities
-
-    # ------------------------------------------------------------------
-    # Performance metric accessors (use pre-computed interpolators)
-    # ------------------------------------------------------------------
-
-    def _convert_separation_to_lod(self, separation):
-        """Convert separation value(s) to lambda/D units (scalar or array).
-
-        Args:
-            separation (float, Quantity, or array-like):
-                The separation value(s), either as scalar(s) in lambda/D or Quantity.
-
-        Returns:
-            numpy.ndarray: The separation value(s) in lambda/D.
-
-        Raises:
-            ValueError: If the separation has units that are not lambda/D.
-        """
-        if hasattr(separation, "unit"):
-            if separation.unit == lod:
-                separation_val = separation.value
-            else:
-                raise ValueError(
-                    f"Separation must be in lambda/D, not {separation.unit}"
-                )
-        else:
-            separation_val = separation
-
-        sep_array = np.atleast_1d(separation_val)
-
-        return sep_array
-
-    def _is_scalar_input(self, sep_values, separation):
-        """Check if the original input was scalar."""
-        return (len(sep_values) == 1 and np.isscalar(separation)) or (
-            hasattr(separation, "shape") and len(separation.shape) == 0
-        )
-
-    def throughput(self, separation):
-        """Return the throughput at the given separation(s).
-
-        Args:
-            separation: Separation(s) in lambda/D (float, Quantity, or array).
-
-        Returns:
-            float or numpy.ndarray: The throughput value(s).
-        """
-        sep_values = self._convert_separation_to_lod(separation)
-        result = self.performance.evaluate("throughput", sep_values)
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def raw_contrast(self, separation):
-        """Return the raw contrast at the given separation(s).
-
-        Args:
-            separation: Separation(s) in lambda/D (float, Quantity, or array).
-
-        Returns:
-            float or numpy.ndarray: The raw contrast value(s).
-        """
-        sep_values = self._convert_separation_to_lod(separation)
-        result = self.performance.evaluate("raw_contrast", sep_values)
-        if self.contrast_floor is not None:
-            result = np.maximum(result, self.contrast_floor)
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def noise_floor_exosims(self, separation, contrast_floor=1e-10, ppf=30.0):
-        """Return the noise floor in EXOSIMS contrast convention.
-
-        Computes ``max(|raw_contrast|, floor) / ppf``.  The result is in
-        contrast-normalized units (per-aperture, divided by throughput).
-        EXOSIMS multiplies this by core_thruput to recover C_sr.
-
-        See :doc:`/examples/06_Noise_Floor_Conventions` for details.
-
-        Args:
-            separation: Separation(s) in lambda/D.
-            contrast_floor (float): Minimum contrast value. Default is 1e-10.
-            ppf (float): Post-processing factor. Default is 30.0.
-
-        Returns:
-            float or numpy.ndarray: Noise floor in EXOSIMS convention.
-        """
-        sep_values = self._convert_separation_to_lod(separation)
-        raw = self.raw_contrast(separation)
-        if np.isscalar(raw):
-            raw = np.array([raw])
-        contrast = np.maximum(raw, contrast_floor)
-        result = contrast / ppf
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def noise_floor_ayo(self, separation, ppf=30.0, interpolation="keys"):
-        """Return the noise floor in AYO/pyEDITH per-pixel convention.
-
-        Computes ``core_mean_intensity(sep) / ppf``.  The result is in
-        per-pixel intensity units.  AYO and pyEDITH multiply this by
-        ``omega / pixscale**2`` to get the per-aperture noise.
-
-        See :doc:`/examples/06_Noise_Floor_Conventions` for details.
-
-        Args:
-            separation: Separation(s) in lambda/D.
-            ppf (float): Post-processing factor. Default is 30.0.
-            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
-
-        Returns:
-            float or numpy.ndarray: Noise floor in AYO/pyEDITH convention.
-        """
-        intensity = self.core_mean_intensity(separation, interpolation=interpolation)
-        if np.isscalar(intensity):
-            return intensity / ppf
-        return np.asarray(intensity) / ppf
-
-    def occulter_transmission(self, separation):
-        """Return the occulter transmission at the given separation(s).
-
-        Args:
-            separation: Separation(s) in lambda/D.
-
-        Returns:
-            float or numpy.ndarray: The occulter transmission value(s).
-        """
-        sep_values = self._convert_separation_to_lod(separation)
-        result = self._occultation_record.evaluate("occulter_transmission", sep_values)
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def core_area(self, separation):
-        """Return the core area at the given separation(s).
-
-        Args:
-            separation: Separation(s) in lambda/D.
-
-        Returns:
-            float or numpy.ndarray: Core area in (lambda/D)^2.
-        """
-        sep_values = self._convert_separation_to_lod(separation)
-        result = self.performance.evaluate("core_area_lod2", sep_values)
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def core_mean_intensity(
-        self, separation, stellar_diam=0.0 * lod, interpolation="keys"
-    ):
-        """Return core mean intensity at the given separation(s).
-
-        At a nonzero stellar diameter the profile is the azimuthal mean of
-        the stellar intensity map interpolated to that diameter
-        (:meth:`stellar_intens`), so the curve and the map describe the same
-        star at every diameter, not only at the tabulated ones. The profile is
-        computed on first use for each diameter and kept. The default
-        diameter (point source), or a package with a single diameter, uses
-        the precomputed profile when its spatial reader matches the request.
-
-        Diameters outside the tabulated range return ``NaN``.
-
-        Args:
-            separation: Separation(s) in lambda/D.
-            stellar_diam: Stellar angular diameter (Quantity in lod
-                units, float in lod, or array-like).  Default is
-                0.0*lod (point source).
-            interpolation: Spatial reader, ``"keys"`` (default) or
-                ``"quintic"``. Profiles are cached separately by reader.
-
-        Returns:
-            float or numpy.ndarray: Core mean intensity value(s): the
-            azimuthal mean, about the optical axis, of the fraction of the
-            star's light falling on one pixel. The unit is per pixel of
-            ``pixel_scale_arcsec`` (lambda/D per pixel), not per unit solid
-            angle; divide by the squared pixel scale for (lambda/D)^-2.
-        """
-        if interpolation not in ("keys", "quintic"):
-            raise ValueError("interpolation must be 'keys' or 'quintic'")
-        sep_values = self._convert_separation_to_lod(separation)
-
-        # Extract unitless diameter value
-        if hasattr(stellar_diam, "value"):
-            diam_val = float(stellar_diam.value)
-        else:
-            diam_val = float(stellar_diam)
-
-        diams = np.asarray(self.stellar_intens.diams.value)
-        stored_reader = getattr(self, "_core_intensity_interpolation", "keys")
-        if interpolation != stored_reader:
-            if diam_val == 0.0 or len(diams) < 2:
-                diam_val = getattr(self, "_core_intensity_diameter", float(diams[0]))
-            if not diams.min() <= diam_val <= diams.max():
-                result = np.full(np.shape(sep_values), np.nan)
-            else:
-                result = self._core_intensity_interp_at(
-                    diam_val, interpolation=interpolation
-                )(sep_values)
-        elif diam_val == 0.0 or len(diams) < 2:
-            result = self._intensity_record.evaluate("core_mean_intensity", sep_values)
-        elif not diams.min() <= diam_val <= diams.max():
-            result = np.full(np.shape(sep_values), np.nan)
-        else:
-            result = self._core_intensity_interp_at(
-                diam_val, interpolation=interpolation
-            )(sep_values)
-
-        if self._is_scalar_input(sep_values, separation):
-            return float(result[0])
-        return result
-
-    def _core_intensity_interp_at(self, diam_val: float, interpolation="keys"):
-        """Separation interpolator of the core mean intensity at one diameter."""
-        key = diam_val if interpolation == "keys" else (diam_val, interpolation)
-        interp = self._core_intensity_cache.get(key)
-        if interp is None:
-            profile = core_mean_intensity_profile(
-                self, diam_val * lod, interpolation=interpolation
-            )
-            interp = self._profile_record(
-                self.core_intensity_separations, "core_mean_intensity", profile
-            )
-            self._core_intensity_cache[key] = interp
-        return lambda separation: interp.evaluate("core_mean_intensity", separation)
-
-    # ------------------------------------------------------------------
-    # 2D map projections
-    # ------------------------------------------------------------------
-
-    def separation_map(self):
-        """Pixel-grid separations from the optical axis in lam/D.
-
-        The axis is the one the core mean intensity profile is measured about
-        (the shared pixel grid): half a pixel before
-        the header's ``XCENTER`` and ``YCENTER``, between the four central
-        pixels of an even-sized map. The 2D map projections built on this
-        grid therefore agree with their 1D curves.
-
-        Returns:
-            numpy.ndarray: (npix, npix) array of separations.
-        """
-        npix = self.npixels
-        cy, cx = self.grid.center_y, self.grid.center_x
-        y, x = np.mgrid[:npix, :npix]
-        r_pix = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-        return r_pix * self.pixel_scale_arcsec.value
-
-    def core_mean_intensity_map(self, stellar_diam=0.0 * lod, interpolation="keys"):
-        """Azimuthally averaged stellar intensity projected onto the pixel grid.
-
-        Equivalent to computing a radial profile of stellar_intens, fitting a
-        1D interpolator, and evaluating it at every pixel's separation. This
-        replaces the rotate-and-average approach with a faster, artifact-free
-        result.
-
-        See :doc:`/azimuthal_averaging` for the comparison.
-
-        Args:
-            stellar_diam: Stellar angular diameter. Default 0.0 lam/D.
-            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
-
-        Returns:
-            numpy.ndarray: (npix, npix) core mean intensity values.
-        """
-        if self._sinc_delivery is None:
-            r = self.separation_map()
-        else:
-            cy, cx = (
-                self.stellar_intens.grid.center_y,
-                self.stellar_intens.grid.center_x,
-            )
-            yy, xx = np.indices(self.stellar_intens.psfs.shape[-2:])
-            r = np.hypot(xx - cx, yy - cy) * self.stellar_pixel_scale_arcsec.value
-        return np.asarray(
-            self.core_mean_intensity(r.ravel(), stellar_diam, interpolation)
-        ).reshape(r.shape)
-
-    def noise_floor_ayo_map(
-        self, ppf=30.0, stellar_diam=0.0 * lod, interpolation="keys"
-    ):
-        """Noise floor in AYO/pyEDITH per-pixel convention on the pixel grid.
-
-        Computes ``core_mean_intensity_map / ppf``.
-
-        Args:
-            ppf (float): Post-processing factor. Default 30.0.
-            stellar_diam: Stellar angular diameter. Default 0.0 lam/D.
-            interpolation: Spatial reader, ``"keys"`` or ``"quintic"``.
-
-        Returns:
-            numpy.ndarray: (npix, npix) noise floor values.
-        """
-        return self.core_mean_intensity_map(stellar_diam, interpolation) / ppf
-
-    def throughput_map(self, rules=None):
-        """Project selected throughput, or stack requested rules on the last axis."""
-        radius = self.separation_map()
-        if rules is None:
-            return self.performance.evaluate("throughput", radius)
-        original = self.performance
-        records = [self.compute_all_performance_curves(rule) for rule in rules]
-        self.performance, self.rule, self.leakage_rule = (
-            original,
-            original.rule,
-            original.leakage_rule,
-        )
-        return np.stack([r.evaluate("throughput", radius) for r in records], axis=-1)
-
-    def core_area_map(self, rules=None):
-        """Project selected area, or stack requested rules on the last axis."""
-        radius = self.separation_map()
-        if rules is None:
-            return self.performance.evaluate("core_area_lod2", radius)
-        original = self.performance
-        records = [self.compute_all_performance_curves(rule) for rule in rules]
-        self.performance, self.rule, self.leakage_rule = (
-            original,
-            original.rule,
-            original.leakage_rule,
-        )
-        return np.stack(
-            [r.evaluate("core_area_lod2", radius) for r in records], axis=-1
-        )
-
-    def throughput_curve(
-        self,
-        rule=DEFAULT_APERTURE_RULE,
-        oversample=CORE_OVERSAMPLE,
-    ):
-        """Tabulate the requested rule's throughput."""
-        return compute_throughput_curve(self, rule, oversample)
-
-    def raw_contrast_curve(
-        self,
-        stellar_diam=0 * lod,
-        rule=DEFAULT_APERTURE_RULE,
-        oversample=CORE_OVERSAMPLE,
-    ):
-        """Tabulate the requested rule's raw contrast."""
-        return compute_raw_contrast_curve(self, stellar_diam, rule, oversample)
-
-    def core_area_curve(
-        self,
-        rule=DEFAULT_APERTURE_RULE,
-        fit_gaussian=False,
-        oversample=CORE_OVERSAMPLE,
-    ):
-        """Tabulate the requested rule's area."""
-        return compute_core_area_curve(self, rule, fit_gaussian, oversample)
-
-    # ------------------------------------------------------------------
-    # Export (delegates to yippy.export)
-    # ------------------------------------------------------------------
 
     def to_exosims(self, units="LAMBDA/D", *, separations_lod=None):
         """Write the selected record through the common evaluator."""

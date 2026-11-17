@@ -84,7 +84,9 @@ def export_exosims(
             performance.evaluate("leakage_density_lod2", separations)
         )
         * stellar_pixel_area_lod2,
-        "occ_trans": coro.occulter_transmission(separations),
+        "occ_trans": coro.occultation_record.evaluate(
+            "occulter_transmission", separations
+        ),
     }
     for name, values in curves.items():
         curve_header = header.copy()
@@ -147,7 +149,7 @@ def export_ayo_csv(
     if contrast_floor is not None:
         contrast = np.maximum(contrast, contrast_floor)
     throughput = coro.performance.evaluate("throughput", separations)
-    occ_trans = coro.occulter_transmission(separations)
+    occ_trans = coro.occultation_record.evaluate("occulter_transmission", separations)
     columns = np.column_stack(
         (separations, contrast, contrast / ppf, throughput, occ_trans)
     )

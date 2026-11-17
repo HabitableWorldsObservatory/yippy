@@ -54,10 +54,16 @@ from yippy import Coronagraph, HalfMaximum
 coro = Coronagraph(yip_path, rule=HalfMaximum(0.3),
                    leakage_rule="azimuthal_ring_mean")
 
-# Already available: coro.core_mean_intensity(separation)
+# Configure the query front end for a loaded yippy Coronagraph
+from optixstuff import YippyCoronagraph
+from yippy import EqxCoronagraph, stellar_intensity_curves
+
+backend = EqxCoronagraph(yippy_coro=coro)
+optics = YippyCoronagraph(backend=backend)
+radial = stellar_intensity_curves(backend)
 # To get a 2D map:
-r_lod = coro.separation_map()  # (npix, npix) separations in lam/D
-istar_az_avg = coro.core_mean_intensity(r_lod)
+r_lod = optics.separation_map()  # (npix, npix) separations in lam/D
+istar_az_avg = radial.evaluate("core_mean_intensity", r_lod)
 ```
 
 This approach:
@@ -108,16 +114,21 @@ so the curve and the map an image simulator renders describe the same star.
 
 ## Recommendation
 
-Use yippy's `core_mean_intensity` (radial profile) instead of the
+Evaluate `core_mean_intensity` on the radial `PerformanceCurves` record instead of the
 rotate-and-average approach. It is faster, more accurate, and produces
 cleaner azimuthal averages.
 
-For the noise floor, divide by the post-processing factor:
+For a residual density, divide the aperture record by the post-processing
+factor. The aperture-mean density convention differs from the ring mean above:
 
-This example needs a configured coronagraph, separation, and post-processing factor.
+This example needs an optixstuff coronagraph `optics`, an aperture `rule`,
+a separation, and a post-processing factor `ppf`.
 
 ```python notest
-noise_floor_ayo = coro.core_mean_intensity(separation) / ppf
+residual_density = optics.curves(rule).evaluate("leakage_density_lod2", separation) / ppf
 ```
 
 See also: [Noise Floor Conventions](examples/06_Noise_Floor_Conventions.ipynb)
+
+The residual fraction is `1 / ppf` in this convention and belongs to
+`jaxedith.PostProcessing.speckle_residual_fraction`.

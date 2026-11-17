@@ -3,6 +3,7 @@
 import importlib.util
 import os
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import settings
@@ -10,6 +11,7 @@ from hypothesis import settings
 from yippy import Coronagraph
 from yippy._precision import float_dtype
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
+from yippy.performance import stellar_intensity_curves
 
 # Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []
@@ -25,8 +27,8 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
     """Assert every stored/forward float array on an EqxCoronagraph is the active dtype.
 
     Checks a directly stored array (``sky_trans``) plus forward evaluations that
-    exercise the stellar-intensity spline, a performance interpolator, and the 2D
-    core-intensity interpolant. The forward-output dtype doubles as the
+    exercise the stellar-intensity spline, a performance interpolator, and a
+    radial intensity record with JAX inputs. The forward-output dtype doubles as the
     no-float32-leak guard. Shared by the float32 and float64 precision suites.
 
     Args:
@@ -37,9 +39,14 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
     assert np.dtype(eqx_coro.stellar_intens(0.0).data.dtype) == expected, (
         "stellar_intens"
     )
-    assert np.dtype(eqx_coro.throughput(5.0).dtype) == expected, "throughput"
+    assert (
+        np.dtype(eqx_coro.performance.evaluate("throughput", jnp.asarray(5.0)).dtype)
+        == expected
+    ), "throughput"
     if eqx_coro._core_intensity_varies_with_diameter:
-        out_2d = eqx_coro.core_mean_intensity(5.0, 1e-3)
+        out_2d = stellar_intensity_curves(
+            eqx_coro, 1e-3, interpolation="keys"
+        ).evaluate("core_mean_intensity", jnp.asarray(5.0))
         assert np.dtype(out_2d.dtype) == expected, "core_mean_intensity_2d"
 
 
@@ -109,9 +116,9 @@ def syn_coro_2d(synthetic_2d):
 def syn_eqx_1d(syn_coro_1d):
     """The JAX-facing view of the radially symmetric analytic package.
 
-    ``Coronagraph`` is the loader and uses scipy interpolants, so its
-    performance methods are not traceable. ``EqxCoronagraph`` is the array-only
-    view a consumer calls from inside ``jit``, ``vmap`` or ``grad``.
+    ``Coronagraph`` builds the host records. ``EqxCoronagraph`` holds their
+    JAX leaves for record evaluation and PSF synthesis inside ``jit``,
+    ``vmap`` or ``grad``.
     """
     from yippy.eqx_coronagraph import EqxCoronagraph
 

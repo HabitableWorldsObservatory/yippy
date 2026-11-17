@@ -16,7 +16,9 @@ package instead, in ``test_analytic_yip.py``.
 import astropy.io.fits as pyfits
 import numpy as np
 import pytest
+from hwoutils.grids import PixelGrid
 from lod_unit import lod
+from optixstuff import YippyCoronagraph
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -156,9 +158,9 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro, centre, expected):
 def test_data_extent_is_the_array_half_width(shipped_coro):
     """Fails if the array half-width is mislabeled as an outer working angle."""
     expected = min(shipped_coro.grid.shape) / 2 * shipped_coro.grid.step
-    assert shipped_coro.data_extent_lod == pytest.approx(expected)
+    assert shipped_coro.performance.data_extent_lod == pytest.approx(expected)
     assert not hasattr(shipped_coro, "OWA")
-    assert shipped_coro.data_extent_lod > shipped_coro.iwa_lod
+    assert shipped_coro.performance.data_extent_lod > shipped_coro.performance.iwa_lod
 
 
 def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
@@ -169,13 +171,13 @@ def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
     the new API makes that distinction explicit and retains this physical
     counterexample. A factor of ten is deliberately below the measured rise.
     """
-    extent = shipped_coro.data_extent_lod
+    extent = shipped_coro.performance.data_extent_lod
     reference = max(
-        float(shipped_coro.raw_contrast(s))
-        for s in np.linspace(shipped_coro.iwa_lod + 1.0, 0.75 * extent, 8)
+        float(shipped_coro.performance.evaluate("raw_contrast", s))
+        for s in np.linspace(shipped_coro.performance.iwa_lod + 1.0, 0.75 * extent, 8)
     )
     probes = np.linspace(0.75 * extent, extent, 9)
-    values = np.asarray(shipped_coro.raw_contrast(probes))
+    values = np.asarray(shipped_coro.performance.evaluate("raw_contrast", probes))
     assert np.all(np.isfinite(values))
     assert values.max() > 10.0 * reference
     assert not hasattr(shipped_coro, "OWA")
@@ -248,14 +250,19 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         view.create_psfs(jnp.array([1.0]), jnp.array([0.0])),
         eqx.filter_jit(view.stellar_intens)(0.1),
         view.stellar_intens(jnp.array([0.0, 0.1])),
-        view.source_psfs(
+        YippyCoronagraph(backend=view).source_psfs(
             500,
             jnp.array([1.0]),
             jnp.array([0.0]),
-            pixel_scale_lod=0.25,
-            shape=grid.shape,
+            grid=PixelGrid.regular(grid.shape, 0.25, "lod", frame=view.grid.frame),
         ),
-        view.stellar_map(500, 0.1, pixel_scale_lod=0.25, shape=grid.shape),
+        YippyCoronagraph(backend=view).stellar_map(
+            500,
+            0.1,
+            grid=PixelGrid.regular(
+                grid.shape, 0.25, "lod", frame=view.stellar_grid.frame
+            ),
+        ),
     ]
     for image in images:
         assert isinstance(image, Image)
@@ -267,7 +274,10 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
     for image in (
         coro.sky_trans(),
         view.sky_trans,
-        view.background_transmission(500, pixel_scale_lod=0.25, shape=grid.shape),
+        YippyCoronagraph(backend=view).background_transmission(
+            500,
+            grid=PixelGrid.regular(grid.shape, 0.25, "lod", frame=view.sky_grid.frame),
+        ),
     ):
         assert isinstance(image, Image) and image.grid == grid
         assert image.data.shape == grid.shape
@@ -278,7 +288,13 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
     for image in (
         coro.stellar_intens(0.1 * lod),
         view.stellar_intens(jnp.array([0.0, 0.1])),
-        view.stellar_map(500, 0.1, pixel_scale_lod=0.25, shape=grid.shape),
+        YippyCoronagraph(backend=view).stellar_map(
+            500,
+            0.1,
+            grid=PixelGrid.regular(
+                grid.shape, 0.25, "lod", frame=view.stellar_grid.frame
+            ),
+        ),
     ):
         assert image.outside == "reflect"
     for image in (
@@ -288,14 +304,17 @@ def test_public_images_carry_header_grid(syn_coro_1d, syn_eqx_1d):
         assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     for image in (
-        view.source_psfs(
+        YippyCoronagraph(backend=view).source_psfs(
             500,
             jnp.array([1.0]),
             jnp.array([0.0]),
-            pixel_scale_lod=0.5,
-            shape=(32, 32),
+            grid=PixelGrid.regular((32, 32), 0.5, "lod", frame=view.grid.frame),
         ),
-        view.stellar_map(500, 0.1, pixel_scale_lod=0.5, shape=(32, 32)),
+        YippyCoronagraph(backend=view).stellar_map(
+            500,
+            0.1,
+            grid=PixelGrid.regular((32, 32), 0.5, "lod", frame=view.stellar_grid.frame),
+        ),
     ):
         assert image.reconstruction == "linear"
     actual = np.asarray(coro.create_psf(1.0, 0.0).data)
@@ -337,12 +356,13 @@ def test_detector_aperture_converges_to_performance(syn_coro_1d, syn_eqx_1d):
         errors, sums = [], []
         pitches = (0.24, 0.12, 0.06)
         for pitch, size in zip(pitches, (32, 64, 128), strict=True):
-            stack = syn_eqx_1d.source_psfs(
+            stack = YippyCoronagraph(backend=syn_eqx_1d).source_psfs(
                 500.0,
                 np.array([separation]),
                 np.array([0.0]),
-                pixel_scale_lod=pitch,
-                shape=(size, size),
+                grid=PixelGrid.regular(
+                    (size, size), pitch, "lod", frame=syn_eqx_1d.grid.frame
+                ),
             )
             psf = replace(stack, data=stack.data[0], leading_axes=())
             assert psf.reconstruction == "band_limited"

@@ -45,10 +45,9 @@ def curves():
 def test_default_curve_calls_return_data(curves, tmp_path, monkeypatch):
     """Fails if any default curve call plots, drops data or uses a missing helper.
 
-    Basis: exact algebra and mutation. Stub only the numerical producers with
-    independently specified arrays; exercise every formerly plotting boundary,
-    including default FITS persistence. The numerical producers have separate
-    analytic coverage. No earlier test calls all these wrappers by default.
+    Basis: exact algebra and mutation. Stub the numerical producer with
+    independently specified arrays and exercise default FITS persistence.
+    The numerical producers have separate analytic coverage.
     """
     module = importlib.import_module("yippy.coronagraph")
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", None)
@@ -72,28 +71,6 @@ def test_default_curve_calls_return_data(curves, tmp_path, monkeypatch):
     )
     assert record is curves
     assert list(coro._perf_dir.glob("*.fits"))
-    for method, producer, expected in (
-        ("throughput_curve", "compute_throughput_curve", [0.1, 0.5]),
-        ("raw_contrast_curve", "compute_raw_contrast_curve", curves.raw_contrast),
-        ("core_area_curve", "compute_core_area_curve", curves.core_area_lod2),
-        ("occulter_transmission_curve", "compute_occ_trans_curve", [0.0, 1.0]),
-        (
-            "core_mean_intensity_curve",
-            "compute_core_mean_intensity_curve",
-            {0.0 * lod: np.array([1e-8, 1e-8])},
-        ),
-    ):
-        returned = (np.array([0.0, 2.0]), expected)
-        monkeypatch.setattr(module, producer, lambda *a, _r=returned, **kw: _r)
-        actual = getattr(coro, method)()
-        assert "plot" not in inspect.signature(getattr(coro, method)).parameters
-        np.testing.assert_array_equal(actual[0], [0.0, 2.0])
-        if isinstance(expected, dict):
-            assert actual[1].keys() == expected.keys()
-            for diameter, profile in expected.items():
-                np.testing.assert_array_equal(actual[1][diameter], profile)
-        else:
-            np.testing.assert_array_equal(actual[1], expected)
     assert not hasattr(yippy, "plot_performance_curve")
     assert not hasattr(performance, "plot_performance_curve")
 

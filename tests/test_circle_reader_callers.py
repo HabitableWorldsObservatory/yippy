@@ -10,7 +10,11 @@ from scipy.special import j1
 from synthetic_yip import write_synthetic_yip
 
 from yippy import Coronagraph, EqxCoronagraph
-from yippy.performance import azimuthal_mean_profile
+from yippy.performance import (
+    azimuthal_mean_profile,
+    compute_core_mean_intensity_curve,
+    stellar_intensity_curves,
+)
 
 
 @pytest.fixture(
@@ -56,7 +60,15 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
     coro = reader_coro
     separation = np.array([1.0, 2.0, 3.0])
     with jax.enable_x64():
-        keys_before = coro.core_mean_intensity(separation, diameter).copy()
+        keys_before = (
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro),
+                getattr(diameter, "value", diameter),
+                interpolation="keys",
+            )
+            .evaluate("core_mean_intensity", separation)
+            .copy()
+        )
         expected = np.asarray(
             eqx.filter_jit(azimuthal_mean_profile)(
                 coro.stellar_intens(diameter * lod).data,
@@ -65,18 +77,32 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
                 interpolation="quintic",
             )
         )
-        actual = coro.core_mean_intensity(separation, diameter, interpolation="quintic")
+        actual = stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=coro),
+            getattr(diameter, "value", diameter),
+            interpolation="quintic",
+        ).evaluate("core_mean_intensity", separation)
         view = EqxCoronagraph(yippy_coro=coro)
         traced = np.asarray(
-            eqx.filter_jit(view.core_mean_intensity)(
-                separation, diameter, interpolation="quintic"
-            )
+            eqx.filter_jit(
+                (
+                    lambda separation, diameter=0.0, interpolation="keys": (
+                        stellar_intensity_curves(
+                            view, diameter, interpolation=interpolation
+                        ).evaluate("core_mean_intensity", separation)
+                    )
+                )
+            )(separation, diameter, interpolation="quintic")
         )
-        keys_after = coro.core_mean_intensity(separation, diameter)
+        keys_after = stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=coro),
+            getattr(diameter, "value", diameter),
+            interpolation="keys",
+        ).evaluate("core_mean_intensity", separation)
     np.testing.assert_allclose(actual, expected, rtol=1e-12)
     np.testing.assert_allclose(traced, expected, rtol=1e-12)
     np.testing.assert_array_equal(
-        keys_before.view(np.uint64), keys_after.view(np.uint64)
+        np.asarray(keys_before).view(np.uint64), np.asarray(keys_after).view(np.uint64)
     )
     assert np.max(np.abs(keys_before / expected - 1)) > 1e-3
 
@@ -85,25 +111,47 @@ def test_curve_and_noise_callers_forward_reader(reader_coro):
     """Curve, map and noise helpers propagate the opt-in spatial reader."""
     coro = reader_coro
     with jax.enable_x64():
-        sep, curves = coro.core_mean_intensity_curve(interpolation="quintic")
+        sep, curves = compute_core_mean_intensity_curve(coro, interpolation="quintic")
         diameter = coro.stellar_intens.diams[0]
         np.testing.assert_allclose(
-            coro.core_mean_intensity(sep, diameter, interpolation="quintic"),
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro),
+                getattr(diameter, "value", diameter),
+                interpolation="quintic",
+            ).evaluate("core_mean_intensity", sep),
             curves[diameter],
             rtol=1e-12,
         )
-        expected = coro.core_mean_intensity(
-            np.array([1.0, 2.0, 3.0]), interpolation="quintic"
-        )
+        expected = stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="quintic"
+        ).evaluate("core_mean_intensity", np.array([1.0, 2.0, 3.0]))
         np.testing.assert_allclose(
-            coro.noise_floor_ayo(np.array([1.0, 2.0, 3.0]), interpolation="quintic")
+            (
+                stellar_intensity_curves(
+                    EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="quintic"
+                ).evaluate("core_mean_intensity", np.array([1.0, 2.0, 3.0]))
+                / 30
+            )
             * 30,
             expected,
             rtol=1e-12,
         )
         np.testing.assert_allclose(
-            coro.noise_floor_ayo_map(interpolation="quintic") * 30,
-            coro.core_mean_intensity_map(interpolation="quintic"),
+            (
+                stellar_intensity_curves(
+                    EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="quintic"
+                ).evaluate(
+                    "core_mean_intensity",
+                    np.hypot(*coro.stellar_intens.grid.coordinates()),
+                )
+                / 30.0
+            )
+            * 30,
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="quintic"
+            ).evaluate(
+                "core_mean_intensity", np.hypot(*coro.stellar_intens.grid.coordinates())
+            ),
             rtol=1e-12,
         )
 
@@ -114,23 +162,49 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
     separation = np.array([1.0, 2.0, 3.0])
     with jax.enable_x64():
         diameter = coro.stellar_intens.diams[-1]
-        before = coro.core_mean_intensity(separation, diameter).copy()
+        before = (
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro),
+                getattr(diameter, "value", diameter),
+                interpolation="keys",
+            )
+            .evaluate("core_mean_intensity", separation)
+            .copy()
+        )
         # Opt-in spatial profiles and aperture records have separate meanings.
-        coro.core_mean_intensity_curve(interpolation="quintic")
+        compute_core_mean_intensity_curve(coro, interpolation="quintic")
         coro.compute_all_performance_curves(
             save_to_fits=False,
             stellar_diameter=diameter,
         )
         view = EqxCoronagraph(yippy_coro=coro)
         actual = np.asarray(
-            eqx.filter_jit(view.core_mean_intensity)(separation, diameter.to_value(lod))
+            eqx.filter_jit(
+                (
+                    lambda separation, diameter=0.0, interpolation="keys": (
+                        stellar_intensity_curves(
+                            view, diameter, interpolation=interpolation
+                        ).evaluate("core_mean_intensity", separation)
+                    )
+                )
+            )(separation, diameter.to_value(lod))
         )
         np.testing.assert_allclose(actual, before, rtol=1e-12)
         np.testing.assert_allclose(
-            coro.core_mean_intensity(separation, diameter), before, rtol=1e-12
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro),
+                getattr(diameter, "value", diameter),
+                interpolation="keys",
+            ).evaluate("core_mean_intensity", separation),
+            before,
+            rtol=1e-12,
         )
         np.testing.assert_allclose(
-            coro.core_mean_intensity(separation, interpolation="quintic"),
-            view.core_mean_intensity(separation, interpolation="quintic"),
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="quintic"
+            ).evaluate("core_mean_intensity", separation),
+            stellar_intensity_curves(view, 0.0, interpolation="quintic").evaluate(
+                "core_mean_intensity", separation
+            ),
             rtol=1e-12,
         )

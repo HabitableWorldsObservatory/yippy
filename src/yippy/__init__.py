@@ -38,6 +38,7 @@ __all__ = [
     "logger",
     "performance_curves",
     "profile_radii",
+    "stellar_intensity_curves",
     "truncation_core",
     "yip_exists",
     "yip_info",
@@ -81,5 +82,6 @@ from .performance import (
     core_window_half_width_pix,
     performance_curves,
     profile_radii,
+    stellar_intensity_curves,
     truncation_core,
 )

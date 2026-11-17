@@ -64,7 +64,7 @@ plt.show()
 ```
 
 `plot_core_mean_intensity` consumes the separation array and diameter-to-profile
-mapping returned by `coro.core_mean_intensity_curve()`. Values are per pixel,
+mapping returned by `compute_core_mean_intensity_curve(coro)`. Values are per pixel,
 not per unit angular area. Distinct colors and markers distinguish diameters.
 
 ```{code-cell} python

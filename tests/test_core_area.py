@@ -1,10 +1,10 @@
 """The core area and throughput are those of the PSF the image simulator renders.
 
 With a PSF truncation ratio ``r`` the core of an off-axis PSF is the region
-where its intensity exceeds ``r`` times its peak. ``Coronagraph.core_area`` is
-the solid angle of that region in (lambda/D)^2, the photometric aperture an
+where its intensity exceeds ``r`` times its peak. The record
+``core_area_lod2`` is that region's solid angle in (lambda/D)^2, the aperture an
 exposure-time calculator multiplies the leaked starlight and the background by,
-and ``Coronagraph.throughput`` is the fraction of the source's light inside it,
+and ``PerformanceCurves.throughput`` is the fraction of the source's light inside it,
 which sets the planet count rate. At every separation, on or between the
 tabulated offsets, the default curves interpolate the measurements of the
 package PSFs. Explicit separation steps opt into synthesized-PSF measurements.
@@ -88,7 +88,12 @@ def test_core_area_of_a_gaussian_is_its_closed_form(gaussian_package, ratio):
     """
     coro = Coronagraph(gaussian_package.path, rule=HalfMaximum(ratio))
     expected = gaussian_core_area(gaussian_package.psf_sigma_lod, ratio)
-    got = np.array([coro.core_area(s) for s in GAUSSIAN_SEPARATIONS_LOD])
+    got = np.array(
+        [
+            coro.performance.evaluate("core_area_lod2", s)
+            for s in GAUSSIAN_SEPARATIONS_LOD
+        ]
+    )
     err = np.abs(got / expected - 1.0)
     assert err.max() <= AREA_TOL, (
         f"core area departs from 2 pi sigma^2 ln(1/r) = {expected:.5f} by "
@@ -187,7 +192,9 @@ def test_core_area_follows_the_synthesized_psf_between_offsets(growth_package, r
     expected = np.array(
         [mixture_core_area(growth_package, s, ratio) for s in separations]
     )
-    got = np.array([coro.core_area(s) for s in separations])
+    got = np.array(
+        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
+    )
     err = np.abs(got / expected - 1.0)
     assert err.max() <= AREA_TOL, (
         f"core area departs from the synthesized PSF's by {err.max():.4f} at "
@@ -289,7 +296,7 @@ def test_shipped_core_area_matches_the_band_limited_psf(
         for s in stencil
     ]
     expected = PchipInterpolator(stencil, values)(separation_lod)
-    got = coro.core_area(separation_lod)
+    got = coro.performance.evaluate("core_area_lod2", separation_lod)
     assert got == pytest.approx(expected, rel=AREA_TOL)
 
 
@@ -311,7 +318,9 @@ def test_core_throughput_of_a_gaussian_is_its_closed_form(gaussian_package, rati
         gaussian_package.psf_flux * gaussian_package.occulter(nodes),
     )
     expected = flux * (1.0 - ratio)
-    got = np.array([coro.throughput(s) for s in GAUSSIAN_SEPARATIONS_LOD])
+    got = np.array(
+        [coro.performance.evaluate("throughput", s) for s in GAUSSIAN_SEPARATIONS_LOD]
+    )
     err = np.abs(got / expected - 1.0)
     assert err.max() <= THROUGHPUT_TOL, (
         f"core throughput departs from F (1 - r) by {err.max():.4f} at "
@@ -341,7 +350,7 @@ def test_core_throughput_follows_the_synthesized_psf_between_offsets(
     expected = np.array(
         [mixture_core(growth_package, s, ratio)[1] for s in separations]
     )
-    got = np.array([coro.throughput(s) for s in separations])
+    got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
     err = np.abs(got / expected - 1.0)
     assert err.max() <= THROUGHPUT_TOL, (
         f"core throughput departs from the synthesized PSF's by {err.max():.4f} "
@@ -383,7 +392,7 @@ def test_shipped_core_throughput_matches_the_band_limited_psf(
         for s in stencil
     ]
     expected = PchipInterpolator(stencil, values)(separation_lod)
-    got = coro.throughput(separation_lod)
+    got = coro.performance.evaluate("throughput", separation_lod)
     assert got == pytest.approx(expected, rel=THROUGHPUT_TOL)
 
 
@@ -423,8 +432,10 @@ def test_core_near_the_image_edge_is_its_closed_form(edge_package, ratio):
     coro = Coronagraph(edge_package.path, rule=HalfMaximum(ratio))
     separations = (6.0, 6.5, 7.0)
     t_expected, a_expected = gaussian_core_expected(edge_package, separations, ratio)
-    t_got = np.array([coro.throughput(s) for s in separations])
-    a_got = np.array([coro.core_area(s) for s in separations])
+    t_got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
+    a_got = np.array(
+        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
+    )
     assert np.abs(a_got / a_expected - 1.0).max() <= AREA_TOL, a_got
     assert np.abs(t_got / t_expected - 1.0).max() <= THROUGHPUT_TOL, t_got
 
@@ -444,8 +455,10 @@ def test_core_inside_the_inner_working_angle_is_its_closed_form(
     t_expected, a_expected = gaussian_core_expected(
         gaussian_package, separations, ratio
     )
-    t_got = np.array([coro.throughput(s) for s in separations])
-    a_got = np.array([coro.core_area(s) for s in separations])
+    t_got = np.array([coro.performance.evaluate("throughput", s) for s in separations])
+    a_got = np.array(
+        [coro.performance.evaluate("core_area_lod2", s) for s in separations]
+    )
     assert np.abs(a_got / a_expected - 1.0).max() <= AREA_TOL, a_got
     assert np.abs(t_got / t_expected - 1.0).max() <= THROUGHPUT_TOL, t_got
 

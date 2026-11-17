@@ -10,7 +10,7 @@ from conftest import requires_available_yip
 from lod_unit import lod
 from scipy.interpolate import PchipInterpolator, make_interp_spline
 
-from yippy import Circular, Coronagraph, HalfMaximum, PerformanceCurves
+from yippy import Circular, Coronagraph, EqxCoronagraph, HalfMaximum, PerformanceCurves
 from yippy.performance import (
     _collect_and_sort,
     _oversample_psf,
@@ -23,6 +23,7 @@ from yippy.performance import (
     compute_throughput_curve,
     compute_truncation_core_area_curve,
     compute_truncation_throughput_curve,
+    stellar_intensity_curves,
 )
 
 # =============================================================================
@@ -195,13 +196,14 @@ class TestComputeAllPerformanceCurves:
         assert iwa <= sep[-1]
 
     def test_contrast_floor_applied(self, coro):
-        """When contrast_floor is set, contrast should respect it."""
+        """An explicit engineering floor bounds contrast without changing the record."""
         floor = 1e-9
-        coro.contrast_floor = floor
         result = compute_all_performance_curves(coro, save_to_fits=False)
-        assert np.all(coro.raw_contrast(result.separation_lod) >= floor)
+        assert np.all(
+            np.maximum(result.evaluate("raw_contrast", result.separation_lod), floor)
+            >= floor
+        )
         assert np.any(result.raw_contrast < floor)
-        coro.contrast_floor = None  # clean up
 
 
 @pytest.fixture(scope="module")
@@ -252,7 +254,11 @@ def test_performance_interpolation_linear_tails(performance_interpolation):
         if is_log:
             expected = 10**expected
         np.testing.assert_allclose(record.evaluate(name, grid), expected, rtol=1e-13)
-    assert np.isnan(coro.core_mean_intensity(2.0, stellar_diam=0.3))
+    assert np.isnan(
+        stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=coro), 0.3, interpolation="keys"
+        ).evaluate("core_mean_intensity", 2.0)
+    )
 
 
 def test_default_preserves_a_steep_monotone_rise():
@@ -311,7 +317,9 @@ def test_zero_on_axis_psf_builds_finite_curves(tmp_path, rule):
     assert data.separation_lod[zero] == 0.0
     assert data.raw_contrast[zero] == 1e20
     assert np.all(np.isfinite(data.raw_contrast))
-    assert float(coro.throughput(0.0 * lod)) == pytest.approx(0.0, abs=1e-12)
+    assert float(coro.performance.evaluate("throughput", 0.0)) == pytest.approx(
+        0.0, abs=1e-12
+    )
     far = 5.0 * lod
     # A Gaussian half-maximum core encloses (1-fraction) of its total flux;
     # the circle instead uses the package's analytic encircled-energy formula.
@@ -320,5 +328,7 @@ def test_zero_on_axis_psf_builds_finite_curves(tmp_path, rule):
         if isinstance(rule, HalfMaximum)
         else yip.expected_throughput(5.0)
     )
-    np.testing.assert_allclose(float(coro.throughput(far)), expected, rtol=0.05)
-    assert np.isfinite(float(coro.raw_contrast(far)))
+    np.testing.assert_allclose(
+        float(coro.performance.evaluate("throughput", far)), expected, rtol=0.05
+    )
+    assert np.isfinite(float(coro.performance.evaluate("raw_contrast", far)))

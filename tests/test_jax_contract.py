@@ -24,6 +24,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from lod_unit import lod
+from optixstuff import YippyCoronagraph
+
+from yippy.performance import stellar_intensity_curves
 
 # Positions spanning the tabulated range, including one in a negative quadrant
 # so that the mirroring path is exercised alongside the direct one.
@@ -74,10 +77,16 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
     different branches of the ``lax.cond`` that selects the interpolant, and
     each branch has to give the eager answer.
     """
-    eager = float(syn_eqx_1d.core_mean_intensity(5.0, diameter))
-    traced = eqx.filter_jit(lambda d: syn_eqx_1d.core_mean_intensity(5.0, d))(
-        jnp.asarray(diameter)
+    eager = float(
+        stellar_intensity_curves(
+            syn_eqx_1d, getattr(diameter, "value", diameter), interpolation="keys"
+        ).evaluate("core_mean_intensity", 5.0)
     )
+    traced = eqx.filter_jit(
+        lambda d: stellar_intensity_curves(
+            syn_eqx_1d, d, interpolation="keys"
+        ).evaluate("core_mean_intensity", 5.0)
+    )(jnp.asarray(diameter))
 
     assert float(traced) == pytest.approx(eager, rel=1e-6), (
         "core_mean_intensity under filter_jit disagrees with its eager value"
@@ -87,7 +96,7 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
 def test_a_traced_separation_runs_and_matches_eager(syn_eqx_1d):
     """The performance curves stay correct when the separation is traced."""
     for name in ("throughput", "raw_contrast", "core_area", "occulter_transmission"):
-        method = getattr(syn_eqx_1d, name)
+        method = getattr(YippyCoronagraph(backend=syn_eqx_1d), name)
         eager = float(method(3.0))
         traced = float(eqx.filter_jit(lambda s: method(s))(jnp.asarray(3.0)))  # noqa: B023
         assert traced == pytest.approx(eager, rel=1e-6), f"{name} under filter_jit"
@@ -102,8 +111,17 @@ def test_vmap_over_separations_equals_a_loop(syn_eqx_1d):
     """
     separations = jnp.asarray([1.5, 2.5, 3.5, 4.5])
 
-    looped = np.array([float(syn_eqx_1d.throughput(float(s))) for s in separations])
-    mapped = np.asarray(jax.vmap(lambda s: syn_eqx_1d.throughput(s))(separations))
+    looped = np.array(
+        [
+            float(syn_eqx_1d.performance.evaluate("throughput", float(s)))
+            for s in separations
+        ]
+    )
+    mapped = np.asarray(
+        jax.vmap(lambda s: syn_eqx_1d.performance.evaluate("throughput", s))(
+            separations
+        )
+    )
 
     assert np.allclose(looped, mapped, rtol=1e-6), (
         "vmapped throughput disagrees with the loop it replaces"
@@ -137,7 +155,7 @@ def test_gradients_agree_with_a_central_difference(syn_eqx_1d, name):
     shape of test this suite exists to avoid; the constancy itself is checked
     separately below.
     """
-    method = getattr(syn_eqx_1d, name)
+    method = getattr(YippyCoronagraph(backend=syn_eqx_1d), name)
 
     for separation in (2.25, 3.25, 4.25):
         analytic = float(
@@ -165,7 +183,12 @@ def test_core_area_is_constant_when_every_psf_has_the_same_shape(syn_eqx_1d):
     drifted with separation here would mean the aperture is being placed or
     sized differently at different separations.
     """
-    areas = np.array([float(syn_eqx_1d.core_area(s)) for s in (1.5, 2.5, 3.5, 4.5)])
+    areas = np.array(
+        [
+            float(syn_eqx_1d.performance.evaluate("core_area_lod2", s))
+            for s in (1.5, 2.5, 3.5, 4.5)
+        ]
+    )
     assert np.ptp(areas) / np.mean(areas) < 1e-6, (
         f"core area varies with separation for identical PSFs: {areas}"
     )

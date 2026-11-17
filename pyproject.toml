@@ -52,6 +52,7 @@ path = "README.md"
 sinc = ["sinchole>=0.1.0"]
 viz = ["eyepiece>=0.17.0"]
 docs = [
+  "optixstuff>=3.0.0",
   "eyepiece>=0.17.0",
   "sphinx>=7.2.6",
   "myst-nb>=1.0.0",
@@ -60,6 +61,7 @@ docs = [
   "ipython>=8.18.1",
 ]
 test = [
+  "optixstuff>=3.0.0",
   "eyepiece>=0.17.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",

@@ -11,9 +11,14 @@ all place the axis at index (npix - 1) / 2, half a pixel before the header's
 XCENTER, which counts pixels from the array's outer corner.
 """
 
+import jax
 import numpy as np
 import pytest
 from lod_unit import lod
+from optixstuff import YippyCoronagraph
+
+from yippy import EqxCoronagraph
+from yippy.performance import stellar_intensity_curves
 
 # Positions between tabulated knots, where the reader has to interpolate. The
 # knot spacing of the synthetic package is 0.5 lambda/D.
@@ -117,23 +122,32 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
     sqrt(2) / 2 pixels, not zero, and the map is point-symmetric about the
     array's middle, the same axis the core mean intensity profile uses.
     """
-    npix = synthetic_1d.npix
-    pixel_lod = synthetic_1d.pixscale
-    axis = (npix - 1) / 2.0
-    rows, columns = np.indices((npix, npix))
-    expected = np.hypot(rows - axis, columns - axis) * pixel_lod
+    with jax.enable_x64():
+        npix = synthetic_1d.npix
+        pixel_lod = synthetic_1d.pixscale
+        axis = (npix - 1) / 2.0
+        rows, columns = np.indices((npix, npix))
+        expected = np.hypot(rows - axis, columns - axis) * pixel_lod
 
-    separation_map = np.asarray(syn_coro_1d.separation_map())
+        separation_map = np.asarray(
+            YippyCoronagraph(
+                backend=EqxCoronagraph(yippy_coro=syn_coro_1d)
+            ).separation_map()
+        )
 
-    np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
-    middle = npix // 2
-    central = separation_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
-    np.testing.assert_allclose(central, np.sqrt(0.5) * pixel_lod, rtol=1e-12)
+        np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
+        middle = npix // 2
+        central = separation_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
+        np.testing.assert_allclose(central, np.sqrt(0.5) * pixel_lod, rtol=1e-12)
 
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
     """The map and synthesis share an axis, to the 1e-5 pixel float32 fit floor."""
-    separation_map = np.asarray(syn_coro_1d.separation_map())
+    separation_map = np.asarray(
+        YippyCoronagraph(
+            backend=EqxCoronagraph(yippy_coro=syn_coro_1d)
+        ).separation_map()
+    )
     nearest = np.argwhere(separation_map == separation_map.min())
     map_center = float(np.mean(nearest[:, 1]))
 
@@ -233,7 +247,14 @@ def test_core_mean_intensity_is_measured_about_the_optical_axis(axis_ring_coro):
     radii_pix = AXIS_RING_RADIUS_PIX + AXIS_RING_WIDTH_PIX * np.array(
         [-2.0, -1.0, -0.5, 0.0, 0.3, 0.5, 1.0, 2.0]
     )
-    got = np.array([coro.core_mean_intensity(r * pixel_lod) for r in radii_pix])
+    got = np.array(
+        [
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
+            ).evaluate("core_mean_intensity", r * pixel_lod)
+            for r in radii_pix
+        ]
+    )
     np.testing.assert_allclose(
         got,
         _axis_ring(radii_pix),
@@ -253,15 +274,26 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     header's XCENTER instead puts one of those pixels on zero separation and
     the other three at different radii, so they disagree.
     """
-    coro = axis_concentrated_coro
-    pixel_lod = float(coro.pixel_scale_arcsec.value)
-    intensity_map = np.asarray(coro.core_mean_intensity_map())
-    middle = intensity_map.shape[0] // 2
-    central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
+    with jax.enable_x64():
+        coro = axis_concentrated_coro
+        pixel_lod = float(coro.pixel_scale_arcsec.value)
+        intensity_map = np.asarray(
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
+            ).evaluate(
+                "core_mean_intensity", np.hypot(*coro.stellar_intens.grid.coordinates())
+            )
+        )
+        middle = intensity_map.shape[0] // 2
+        central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
 
-    expected = float(coro.core_mean_intensity(np.sqrt(0.5) * pixel_lod))
-    np.testing.assert_allclose(central, expected, rtol=1e-10)
-    np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
+        expected = float(
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.0, interpolation="keys"
+            ).evaluate("core_mean_intensity", np.sqrt(0.5) * pixel_lod)
+        )
+        np.testing.assert_allclose(central, expected, rtol=1e-10)
+        np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
 
 
 @pytest.mark.parametrize("npix,kind", [(8, "2dq"), (9, "2dq"), (8, "1d")])

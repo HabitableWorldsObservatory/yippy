@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
+import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1520,7 +1521,12 @@ class PerformanceCurves(eqx.Module):
         """Evaluate one named quantity using its declared interpolation space."""
         if name not in self._coefficients:
             raise ValueError(f"quantity {name!r} is not present in this record")
-        xp = jnp if isinstance(separation_lod, (jax.Array, jax.core.Tracer)) else np
+        xp = (
+            jnp
+            if isinstance(separation_lod, (jax.Array, jax.core.Tracer))
+            or isinstance(self._coefficients[name], jax.core.Tracer)
+            else np
+        )
         q = xp.asarray(separation_lod)
         x = xp.asarray(self.separation_lod)
         if len(x) == 1:
@@ -1742,4 +1748,77 @@ def _performance_curves(
         min(grid.shape) * grid.step / 2,
         leakage_rule,
         stellar_diameter,
+    )
+
+
+def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="keys"):
+    """Return a radial per-stellar-pixel intensity record from an Eqx backend.
+
+    This measurement is the ring mean of the stellar map, independent of an
+    aperture rule's local leakage density. A traced diameter recomputes the
+    profile from the interpolated map. A single supplied profile has no
+    diameter dependence; otherwise out-of-range diameters yield NaN.
+    Evaluate ``core_mean_intensity`` on the returned PerformanceCurves.
+    The spatial reader is static under JIT; use ``eqx.filter_jit``.
+    """
+    if interpolation not in ("keys", "quintic"):
+        raise ValueError("interpolation must be 'keys' or 'quintic'")
+    base = backend._intensity_record
+    same_reader = interpolation == backend._core_intensity_interpolation
+    varies = backend._core_intensity_varies_with_diameter
+    if same_reader and not varies:
+        return base
+    low, high = backend._diam_knot_range
+    diameter = jnp.asarray(stellar_diam_lod)
+    if not same_reader:
+        diameter = jnp.where(
+            diameter == 0.0, backend._core_intensity_diameter, diameter
+        )
+        if not varies:
+            diameter = jnp.asarray(backend._core_intensity_diameter)
+    valid = (diameter >= low) & (diameter <= high)
+    if same_reader:
+        valid = valid | (diameter == 0.0)
+
+    def measure():
+        image = backend.stellar_intens(jnp.clip(diameter, low, high)).data
+        profile = azimuthal_mean_profile(
+            image,
+            backend._stellar_axis,
+            backend._profile_radii_pix,
+            interpolation=interpolation,
+        )
+        nodes = base.separation_lod
+        coefficients = interpax.PchipInterpolator(
+            nodes, profile, extrapolate=False, check=False
+        ).c
+        tails = jnp.stack(
+            (
+                profile[0],
+                profile[-1],
+                (profile[1] - profile[0]) / (nodes[1] - nodes[0]),
+                (profile[-1] - profile[-2]) / (nodes[-1] - nodes[-2]),
+            )
+        )
+        return profile, coefficients, tails
+
+    original = (
+        base._extra["core_mean_intensity"],
+        base._coefficients["core_mean_intensity"],
+        base._tails["core_mean_intensity"],
+    )
+    values = (
+        jax.lax.cond(diameter == 0.0, lambda: original, measure)
+        if same_reader
+        else measure()
+    )
+    values = tuple(jnp.where(valid, value, jnp.nan) for value in values)
+    return eqx.tree_at(
+        lambda record: (
+            record._extra["core_mean_intensity"],
+            record._coefficients["core_mean_intensity"],
+            record._tails["core_mean_intensity"],
+        ),
+        base,
+        values,
     )

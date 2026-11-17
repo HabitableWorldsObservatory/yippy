@@ -27,10 +27,9 @@ profile = read(image, center, radii_pix, n_theta=256, interpolation="quintic")
 `interpolation` is a static string under JIT; with raw `jax.jit`, include it
 and `n_theta` in `static_argnames`. Enable JAX float64 for the precision
 reported here. The option is also available on `core_mean_intensity_profile`,
-`compute_core_mean_intensity_curve`, `Coronagraph.core_mean_intensity_curve`,
-and both `Coronagraph.core_mean_intensity` and
-`EqxCoronagraph.core_mean_intensity`. The intensity map and AYO noise-floor
-helpers forward it. This controls spatial interpolation; the resulting profile
+`compute_core_mean_intensity_curve`, and `stellar_intensity_curves`.
+Evaluate `core_mean_intensity` on the latter record for radial queries.
+This controls spatial interpolation; the resulting profile
 uses the shared record evaluator for PCHIP interpolation between radial knots.
 
 The quintic implementation is pure JAX, with no SciPy at read time. It follows

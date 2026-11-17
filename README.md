@@ -18,13 +18,14 @@
 
 A Python and JAX library for loading coronagraph yield input packages (YIPs)
 and computing coronagraph performance metrics. yippy provides Fourier-based
-off-axis PSF interpolation, throughput/contrast/core-area curves, 2D
-performance maps, and export to EXOSIMS and AYO formats.
+off-axis PSF interpolation, aperture performance records, and export to
+EXOSIMS and AYO formats. Query records and render on detector grids through
+`optixstuff.YippyCoronagraph`.
 
 ## Installation
 
 ```bash
-pip install yippy
+pip install yippy optixstuff
 ```
 
 ## Quick Start
@@ -46,21 +47,29 @@ from lod_unit import lod
 offaxis_psf = coro.offax(2 * lod, 5 * lod)
 
 # Performance metrics at any separation
-throughput = coro.throughput(5.0)  # scalar or array
-contrast = coro.raw_contrast(5.0)
-occ_trans = coro.occulter_transmission(5.0)
+from optixstuff import YippyCoronagraph
+from yippy import Circular, EqxCoronagraph
+
+optics = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
+rule = Circular(0.7)
+curves = optics.curves(rule)
+throughput = optics.throughput(5.0, rule=rule)  # scalar or array
+contrast = optics.raw_contrast(5.0)
+occ_trans = optics.occulter_transmission(5.0)
 
 # 2D performance maps (pixel grids)
-throughput_map = coro.throughput_map()
-core_area_map = coro.core_area_map()
+throughput_map = optics.throughput_map()
+core_area_map = optics.core_area_map()
 ```
 
 If you don't have a YIP on hand, see [Example data](#example-data-beta)
 below for a convenience downloader.
 
-## Two-Class Design
+## Loading and Queries
 
-yippy provides two coronagraph classes for different use cases:
+yippy provides a host loader and an array backend. Both supply records to
+`optixstuff.YippyCoronagraph`, the front end for scalar performance and
+detector-grid queries:
 
 | | `Coronagraph` | `EqxCoronagraph` |
 |---|---|---|
@@ -83,28 +92,30 @@ from yippy import Coronagraph
 
 coro = Coronagraph("path/to/yip")
 
-# 1D performance curves (scalar or array separations in lam/D)
-coro.throughput(5.0)
-coro.raw_contrast(5.0)
-coro.occulter_transmission(5.0)
-coro.core_area(5.0)
-coro.core_mean_intensity(5.0)
+from optixstuff import YippyCoronagraph
+from yippy import DEFAULT_APERTURE_RULE, EqxCoronagraph, stellar_intensity_curves
 
-# Noise floors
-coro.noise_floor_exosims(5.0)  # |raw_contrast| / ppf
-coro.noise_floor_ayo(5.0, ppf=30.0)  # core_mean_intensity / ppf
-
-# 2D maps (full pixel grids)
-coro.separation_map()
-coro.throughput_map()
-coro.core_area_map()
-coro.core_mean_intensity_map()
-coro.noise_floor_ayo_map(ppf=30.0)
+optics = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
+rule = DEFAULT_APERTURE_RULE
+curves = optics.curves(rule)
+throughput = optics.throughput(5.0, rule=rule)
+area = curves.evaluate("core_area_lod2", 5.0)
+leakage = curves.evaluate("leakage_fraction", 5.0)
+ppf = 30.0
+contrast_noise = optics.raw_contrast(5.0, rule=rule) / ppf
+density_noise = curves.evaluate("leakage_density_lod2", 5.0) / ppf
+radial = stellar_intensity_curves(EqxCoronagraph(yippy_coro=coro))
+per_pixel_intensity = radial.evaluate("core_mean_intensity", 5.0)  # ring mean
 
 # Export
 coro.to_exosims()
 coro.dump_ayo_csv("output.csv")
 ```
+
+The post-processing convention here is raw contrast divided by `ppf`, or
+leakage density divided by `ppf` in stellar fraction per square lambda/D.
+`jaxedith.PostProcessing.speckle_residual_fraction` owns the residual fraction
+(`1 / ppf`); coronagraphs expose the optical quantities.
 
 ### `EqxCoronagraph` -- JIT-Compatible Simulation
 
@@ -113,6 +124,7 @@ A pure JAX/Equinox module for use inside `jax.jit`-compiled pipelines:
 This example needs a user-supplied YIP directory.
 
 ```python notest
+from optixstuff import YippyCoronagraph
 from yippy import EqxCoronagraph
 import equinox as eqx
 
@@ -125,8 +137,11 @@ coro = EqxCoronagraph("path/to/yip")
 def simulate(coro, x, y):
     psf = coro.create_psf(x, y)
     stellar = coro.stellar_intens(0.01)
-    throughput = coro.throughput(5.0)
-    return psf, stellar, throughput
+    return psf, stellar
+
+
+optics = YippyCoronagraph(backend=coro)
+throughput = optics.throughput(5.0)
 ```
 
 ## Performance Metrics
@@ -154,7 +169,7 @@ separations, contrasts = compute_raw_contrast_curve(coro)
 
 ### PSF Truncation Ratio
 
-When `psf_trunc_ratio` is set (e.g. `Coronagraph(path, psf_trunc_ratio=0.3)`),
+When a `HalfMaximum(0.3)` aperture rule is selected,
 throughput and core area are computed using an adaptive aperture that includes
 all oversampled pixels exceeding `ratio * peak`. This matches AYO's
 `photap_frac` / `omega_lod` calculation and is recommended for ETC integration.
@@ -391,8 +406,9 @@ The adapter selects one monochromatic product and reads stellar and sky data
 from the manifest's separate legacy package. The instance keeps the stellar
 `header`, plus distinct `offaxis_header` and `sky_header` records. In the Equinox
 view, `pixel_scale_lod` is the off-axis pitch; `stellar_pixel_scale_lod` and
-`sky_pixel_scale_lod` describe the other maps. Its `source_psfs`, `stellar_map`
-and `background_transmission` methods resample using their respective pitches.
+`sky_pixel_scale_lod` describe the other maps. The `source_psfs`, `stellar_map`,
+and `background_transmission` methods live on `optixstuff.YippyCoronagraph`
+and accept a target `PixelGrid`.
 Their wavelength argument preserves fixed-product table compatibility and does
 not select another product. Target pitches and coordinates use the respective
 product's reference frame. Wrappers with a single shared pitch must delegate

@@ -105,9 +105,9 @@ def _yip(tmp_path, name, **kwargs):
 
 def _metrics(coro):
     return {
-        "throughput": np.asarray(coro.throughput(SEPS)),
-        "core_area": np.asarray(coro.core_area(SEPS)),
-        "raw_contrast": np.asarray(coro.raw_contrast(SEPS)),
+        "throughput": np.asarray(coro.performance.evaluate("throughput", SEPS)),
+        "core_area": np.asarray(coro.performance.evaluate("core_area_lod2", SEPS)),
+        "raw_contrast": np.asarray(coro.performance.evaluate("raw_contrast", SEPS)),
     }
 
 
@@ -205,17 +205,20 @@ def test_explicit_import_checks_rule_and_leakage(tmp_path):
             )
 
 
-def test_setter_does_not_persist_contrast_floor(tmp_path):
+def test_explicit_floor_does_not_change_cached_contrast(tmp_path):
     """The setter stores unfloored contrast, as the constructor does."""
     path = _yip(tmp_path, "warm")
     contrast_floor = 1e-6
-    seed = Coronagraph(path, contrast_floor=contrast_floor)
+    seed = Coronagraph(path)
     seed.set_aperture_rule(HalfMaximum(0.3))
     warm = Coronagraph(path, rule=HalfMaximum(0.3))
     cold = Coronagraph(_yip(tmp_path, "cold"), rule=HalfMaximum(0.3))
-    assert np.all(cold.raw_contrast(SEPS) < contrast_floor), "floor must bind"
+    assert np.all(cold.performance.evaluate("raw_contrast", SEPS) < contrast_floor), (
+        "floor must bind"
+    )
     np.testing.assert_array_equal(
-        seed.raw_contrast(SEPS), np.full_like(SEPS, contrast_floor)
+        np.maximum(seed.performance.evaluate("raw_contrast", SEPS), contrast_floor),
+        np.full_like(SEPS, contrast_floor),
     )
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
 
@@ -227,7 +230,9 @@ def test_explicit_diameter_conversion_does_not_change_cache(tmp_path):
 
     seed = Coronagraph(path)
     before = seed._perf_filename()
-    seed.throughput(lod_inscribed_to_circumscribed(5.0, seed.grid.frame, 5.0))
+    seed.performance.evaluate(
+        "throughput", lod_inscribed_to_circumscribed(5.0, seed.grid.frame, 5.0)
+    )
     assert seed._perf_filename() == before
     seed.set_aperture_rule(HalfMaximum(0.3))
     warm = Coronagraph(path, rule=HalfMaximum(0.3))
@@ -265,7 +270,11 @@ def test_fine_radius_difference_does_not_alias(tmp_path):
     first = Coronagraph(path, rule=Circular(0.706))
     warm = Coronagraph(path, rule=Circular(0.708))
     cold = Coronagraph(_yip(tmp_path, "cold"), rule=Circular(0.708))
-    assert not np.allclose(first.throughput(SEPS), cold.throughput(SEPS), rtol=RTOL)
+    assert not np.allclose(
+        first.performance.evaluate("throughput", SEPS),
+        cold.performance.evaluate("throughput", SEPS),
+        rtol=RTOL,
+    )
     assert first._perf_filename() != warm._perf_filename()
     _assert_same_metrics(warm, cold)
 
@@ -334,14 +343,20 @@ def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
         intensity = np.exp(-(rows**2 + cols**2) / (2 * 20**2)) / (2 * np.pi * 2**2)
         planet_flux = (weights * intensity).sum() / 10**2 * package.occulter(sep)
         area_pixels = np.pi * 2.8**2
-        assert coro.throughput(sep) == pytest.approx(planet_flux, rel=1e-5)
-        assert coro.core_area(sep) == pytest.approx(area_pixels * package.pixscale**2)
+        assert coro.performance.evaluate("throughput", sep) == pytest.approx(
+            planet_flux, rel=1e-5
+        )
+        assert coro.performance.evaluate("core_area_lod2", sep) == pytest.approx(
+            area_pixels * package.pixscale**2
+        )
     else:
         # Uniform stellar light makes the numerator exactly level times area.
-        planet_flux = coro.throughput(sep)
-        area_pixels = coro.core_area(sep) / package.pixscale**2
+        planet_flux = coro.performance.evaluate("throughput", sep)
+        area_pixels = (
+            coro.performance.evaluate("core_area_lod2", sep) / package.pixscale**2
+        )
         assert not np.isclose(area_pixels, np.pi * 2.8**2, rtol=1e-3)
-    assert coro.raw_contrast(sep) == pytest.approx(
+    assert coro.performance.evaluate("raw_contrast", sep) == pytest.approx(
         package.stellar_level * area_pixels / planet_flux, rel=1e-5
     )
 
@@ -463,7 +478,7 @@ def test_float64_process_uses_separate_entries(tmp_path):
         "c = Coronagraph(sys.argv[1])\n"
         "seps = np.array([float(a) for a in sys.argv[2:]])\n"
         "print(json.dumps({'name': c._perf_filename(),"
-        " 'thr': [float(v) for v in c.throughput(seps)]}))\n"
+        " 'thr': [float(v) for v in c.performance.evaluate('throughput', seps)]}))\n"
     )
     env = dict(os.environ, JAX_ENABLE_X64="1")
     out = subprocess.run(
@@ -477,7 +492,9 @@ def test_float64_process_uses_separate_entries(tmp_path):
     assert result["name"] != f32_file.name
     assert (f32._perf_dir / result["name"]).exists()
     assert f32_file.read_bytes() == f32_bytes
-    assert_allclose(result["thr"], f32.throughput(SEPS), rtol=1e-5)
+    assert_allclose(
+        result["thr"], f32.performance.evaluate("throughput", SEPS), rtol=1e-5
+    )
 
 
 # ---------------------------------------------------------------------------

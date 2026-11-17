@@ -1,7 +1,7 @@
 """The core mean intensity is the azimuthal mean of the stellar map.
 
-``Coronagraph.core_mean_intensity(s, d)`` is the leaked-starlight intensity an
-exposure-time calculator reads, and ``Coronagraph.stellar_intens(d)`` is the
+``stellar_intensity_curves(backend, d)`` records the leaked-starlight intensity
+an exposure-time calculator reads; ``Coronagraph.stellar_intens(d)`` is the
 map an image simulator renders. The two describe the same star, so at every
 separation and every stellar diameter, tabulated or not, the curve must equal
 the mean of the map on the circle of that radius about the optical axis.
@@ -20,7 +20,8 @@ from conftest import REFERENCE_DATA_REQUIRED
 from lod_unit import lod
 from scipy.interpolate import RectBivariateSpline
 
-from yippy import Coronagraph
+from yippy import Coronagraph, EqxCoronagraph
+from yippy.performance import stellar_intensity_curves
 
 # Separations (lambda/D) and stellar diameters (lambda/D) probed on the
 # shipped packages. The diameters fall on, and between, the tabulated ones.
@@ -64,7 +65,10 @@ def relative_errors(coro, diameter_lod, separations_lod):
         separations_lod / pixel_lod,
     )
     curve = np.asarray(
-        coro.core_mean_intensity(separations_lod, diameter_lod * lod), dtype=np.float64
+        stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=coro), diameter_lod, interpolation="keys"
+        ).evaluate("core_mean_intensity", separations_lod),
+        dtype=np.float64,
     )
     return np.abs(curve / reference - 1.0), reference
 
@@ -182,33 +186,53 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
                 nodes[-1] + 2.0,
             ]
         ).reshape(2, 4)
-        evaluate = jax.jit(lambda x, d: eqx_coro.core_mean_intensity(x, d))
+        evaluate = jax.jit(
+            lambda x, d: stellar_intensity_curves(
+                eqx_coro, d, interpolation="keys"
+            ).evaluate("core_mean_intensity", x)
+        )
         for diameter in [0.0, 0.075]:
-            expected = coro.core_mean_intensity(separations, diameter * lod)
-            profile_record = coro._core_intensity_cache.get(diameter)
-            if profile_record is None:
-                coro._core_intensity_interp_at(diameter)
-                profile_record = coro._core_intensity_cache[diameter]
+            from yippy.performance import core_mean_intensity_profile
+
+            profile_record = coro._profile_record(
+                nodes,
+                "core_mean_intensity",
+                core_mean_intensity_profile(coro, diameter * lod),
+            )
+            expected = profile_record.evaluate("core_mean_intensity", separations)
             np.testing.assert_allclose(
                 profile_record.evaluate("core_mean_intensity", separations),
                 expected,
                 rtol=1e-12,
                 atol=1e-24,
             )
-            eager = eqx_coro.core_mean_intensity(separations, diameter)
+            eager = stellar_intensity_curves(
+                eqx_coro, getattr(diameter, "value", diameter), interpolation="keys"
+            ).evaluate("core_mean_intensity", separations)
             np.testing.assert_allclose(eager, expected, rtol=1e-12, atol=1e-24)
             np.testing.assert_allclose(
                 evaluate(separations, diameter), expected, rtol=1e-12, atol=1e-24
             )
-        scalar = eqx_coro.core_mean_intensity(2.03, 0.075)
+        scalar = stellar_intensity_curves(
+            eqx_coro, 0.075, interpolation="keys"
+        ).evaluate("core_mean_intensity", 2.03)
         np.testing.assert_allclose(
-            scalar, coro.core_mean_intensity(2.03, 0.075 * lod), rtol=1e-12, atol=1e-24
+            scalar,
+            stellar_intensity_curves(
+                EqxCoronagraph(yippy_coro=coro), 0.075, interpolation="keys"
+            ).evaluate("core_mean_intensity", 2.03),
+            rtol=1e-12,
+            atol=1e-24,
         )
 
 
 def test_diameter_outside_the_tabulated_range_is_nan(ring_coro):
     """The loader does not extrapolate the curve past its largest diameter."""
-    assert np.isnan(ring_coro.core_mean_intensity(2.5, 0.3 * lod))
+    assert np.isnan(
+        stellar_intensity_curves(
+            EqxCoronagraph(yippy_coro=ring_coro), 0.3, interpolation="keys"
+        ).evaluate("core_mean_intensity", 2.5)
+    )
 
 
 @pytest.mark.parametrize("diameter", [0.0, 0.075])
@@ -222,12 +246,24 @@ def test_eqx_separation_arrays_keep_shape(ring_coro, diameter, shape):
 
     coro = EqxCoronagraph(yippy_coro=ring_coro)
     separations = jnp.linspace(1.5, 3.5, np.prod(shape)).reshape(shape)
-    expected = jax.vmap(lambda s: coro.core_mean_intensity(s, diameter))(
-        separations.ravel()
-    ).reshape(shape)
+    expected = jax.vmap(
+        lambda s: stellar_intensity_curves(
+            coro, getattr(diameter, "value", diameter), interpolation="keys"
+        ).evaluate("core_mean_intensity", s)
+    )(separations.ravel()).reshape(shape)
     for evaluate in (
-        coro.core_mean_intensity,
-        jax.jit(lambda s, d: coro.core_mean_intensity(s, d)),
+        (
+            lambda separation, diameter=0.0, interpolation="keys": (
+                stellar_intensity_curves(
+                    coro, diameter, interpolation=interpolation
+                ).evaluate("core_mean_intensity", separation)
+            )
+        ),
+        jax.jit(
+            lambda s, d: stellar_intensity_curves(
+                coro, d, interpolation="keys"
+            ).evaluate("core_mean_intensity", s)
+        ),
     ):
         result = evaluate(separations, diameter)
         assert result.shape == shape
@@ -244,8 +280,20 @@ def test_public_diameter_bounds_under_jit(ring_coro, diameter):
 
     coro = EqxCoronagraph(yippy_coro=ring_coro)
     # The scipy loader is host-only; its inputs must be static inside JIT.
-    host = jax.jit(lambda: jnp.asarray(ring_coro.core_mean_intensity(2.5, diameter)))()
-    traced = jax.jit(lambda d: coro.core_mean_intensity(2.5, d))(diameter)
+    host = jax.jit(
+        lambda: jnp.asarray(
+            stellar_intensity_curves(
+                coro,
+                getattr(diameter, "value", diameter),
+                interpolation="keys",
+            ).evaluate("core_mean_intensity", 2.5)
+        )
+    )()
+    traced = jax.jit(
+        lambda d: stellar_intensity_curves(coro, d, interpolation="keys").evaluate(
+            "core_mean_intensity", 2.5
+        )
+    )(diameter)
     assert np.isnan(host)
     assert np.isnan(traced)
 

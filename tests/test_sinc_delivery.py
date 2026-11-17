@@ -16,6 +16,7 @@ import pytest
 from astropy.io import fits
 from hwoutils.grids import PixelGrid, resample
 from lod_unit import lod
+from optixstuff import YippyCoronagraph
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 
@@ -272,7 +273,11 @@ def test_stellar_frame_and_eqx(admitted):
         basis[:, 4] = np.cos(phase[:, 4])
         basis *= np.sinc(frequencies * ratio)
         expected = (basis @ spectrum @ basis.T).real / 8**2 * ratio**2
-        sampled = view.stellar_map(500.0, 0.0, pixel_scale_lod=pitch, shape=(4, 4))
+        sampled = YippyCoronagraph(backend=view).stellar_map(
+            500.0,
+            0.0,
+            grid=PixelGrid.regular((4, 4), pitch, "lod", frame=view.stellar_grid.frame),
+        )
         assert sampled.reconstruction == "band_limited"
         np.testing.assert_allclose(sampled.data, expected, rtol=1e-14, atol=0)
         wrong = expected * (0.4 / 0.25) ** 2
@@ -289,7 +294,11 @@ def test_stellar_frame_and_eqx(admitted):
         rtol=1e-14,
     )
     np.testing.assert_allclose(
-        view.background_transmission(500.0, pixel_scale_lod=0.4, shape=(4, 4)).data,
+        YippyCoronagraph(backend=view)
+        .background_transmission(
+            500.0, grid=PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_grid.frame)
+        )
+        .data,
         admitted.sky_trans().data,
         atol=1e-14,
     )
@@ -416,13 +425,16 @@ def test_auto_fallback_and_bounded(tmp_path):
 def test_table_consumer(admitted):
     """Fails if the table consumer rescales densities or resamples off its frame."""
     pytest.importorskip("optixstuff")
-    from optixstuff.yippy_coronagraph import YippyCoronagraph
 
     view = EqxCoronagraph(yippy_coro=admitted)
     consumer = YippyCoronagraph(backend=view)
     # The record already stores a density per (lambda/D)^2: no pitch factor.
     density = view.performance.evaluate("leakage_density_lod2", 0.0)
-    np.testing.assert_allclose(consumer.noise_floor_ayo(0.0), density / 30.0, rtol=0)
+    np.testing.assert_allclose(
+        consumer.curves().evaluate("leakage_density_lod2", 0.0) / 30.0,
+        density / 30.0,
+        rtol=0,
+    )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
     for pitch in (0.25, 0.4):
         # Each product keeps its own frame; targets share it.
@@ -530,11 +542,17 @@ def test_public_delivery(tmp_path):
             rtol=1e-14,
         )
         np.testing.assert_allclose(
-            view.background_transmission(
+            YippyCoronagraph(backend=view)
+            .background_transmission(
                 500.0,
-                pixel_scale_lod=view.sky_pixel_scale_lod,
-                shape=view.sky_trans.data.shape,
-            ).data,
+                grid=PixelGrid.regular(
+                    view.sky_trans.data.shape,
+                    view.sky_pixel_scale_lod,
+                    "lod",
+                    frame=view.sky_grid.frame,
+                ),
+            )
+            .data,
             coro.sky_trans().data,
             atol=1e-14,
         )
@@ -544,15 +562,17 @@ def test_public_delivery(tmp_path):
         )
         assert view.stellar_frame != offaxis_frame
         if importlib.util.find_spec("optixstuff") is not None:
-            from optixstuff import YippyCoronagraph
-
             consumer = YippyCoronagraph(backend=view)
             np.testing.assert_allclose(
                 consumer.stellar_map(
                     500.0,
                     0.0,
-                    pixel_scale_lod=view.stellar_pixel_scale_lod,
-                    shape=view.stellar_intens(0.0).data.shape,
+                    grid=PixelGrid.regular(
+                        view.stellar_intens(0.0).data.shape,
+                        view.stellar_pixel_scale_lod,
+                        "lod",
+                        frame=view.stellar_grid.frame,
+                    ),
                 ).data,
                 resample(coro.stellar_intens(0.0 * lod), view.stellar_grid).data,
                 atol=1e-14,
@@ -563,8 +583,12 @@ def test_public_delivery(tmp_path):
                     500.0,
                     x,
                     y,
-                    pixel_scale_lod=view.pixel_scale_lod,
-                    shape=view.psf_shape,
+                    grid=PixelGrid.regular(
+                        view.psf_shape,
+                        view.pixel_scale_lod,
+                        "lod",
+                        frame=consumer.grid.frame,
+                    ),
                 ).data,
                 resample(coro.create_psfs(x, y), view.grid).data,
                 rtol=1e-14,
