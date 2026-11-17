@@ -54,10 +54,12 @@ class TestTruncationThroughputCurve:
     def test_values_bounded(self, coro):
         """Truncation throughput should be in [0, 1]."""
         rule = HalfMaximum(0.5)
-        prepared = Coronagraph(coro.yip_path, rules=(rule,))
+        prepared = coro.with_rules((rule,))
         throughput = prepared.curves(rule).throughput
         assert np.all(throughput >= 0)
         assert np.all(throughput <= 1.0)
+        constructed = Coronagraph(coro.yip_path, rules=(rule,)).curves(rule)
+        np.testing.assert_array_equal(throughput, constructed.throughput)
 
 
 @requires_available_yip
@@ -67,7 +69,7 @@ class TestTruncationCoreAreaCurve:
     def test_positive_areas(self, coro):
         """Core areas should be positive."""
         rule = HalfMaximum(0.5)
-        prepared = Coronagraph(coro.yip_path, rules=(rule,))
+        prepared = coro.with_rules((rule,))
         core_area = prepared.curves(rule).core_area_lod2
         assert np.all(core_area > 0)
 

@@ -270,26 +270,60 @@ class Coronagraph(AbstractTableCoronagraph):
 
         return jax.vmap(one)(x_lod, y_lod)
 
+    def with_rules(self, rules, *, leakage_rule=None):
+        """Return this coronagraph with a different set of prepared aperture rules.
+
+        Every table and field except the prepared records is kept, so a
+        modified module keeps its modifications. Preparation runs on the host,
+        outside JAX transformations. ``leakage_rule`` defaults to the current one.
+        """
+        rules = tuple(dict.fromkeys(rules))
+        if not rules:
+            raise ValueError("rules must contain at least one aperture rule")
+        if leakage_rule is None:
+            leakage_rule = self._records[0].leakage_rule
+        host = self._reopen_host(rules[0], leakage_rule)
+        records = tuple(_jax_record(host._prepare_record(rule)) for rule in rules)
+        operators = tuple(
+            jax.tree.map(
+                jnp.asarray,
+                leakage_weights(
+                    lambda s: host.create_psf(s, 0.0),
+                    self._native_stellar_map(0.0),
+                    record,
+                    samples=_native_samples(host, record),
+                ),
+            )
+            for record in records
+        )
+        return eqx.tree_at(
+            lambda c: (c._records, c._leakage_operators), self, (records, operators)
+        )
+
+    def _reopen_host(self, rule, leakage_rule):
+        """Reopen the YIP on the host with this coronagraph's load options."""
+        options, interpolation = self._load_options
+        host = _YIPData(
+            self.yip_path,
+            *options,
+            rule=rule,
+            leakage_rule=leakage_rule,
+            interpolation=interpolation,
+            sinc_options=SincOptions(*self._sinc_configuration),
+        )
+        if host._source_sig != self._source_signature:
+            raise ValueError("YIP source files changed; construct a new Coronagraph")
+        host.offax = self._offaxis_backend
+        return host
+
     def create_psf_datacube(self, batch_size=128):
         """Return a new coronagraph with a cached PSF cube for extended scenes.
 
         Assign the returned module: coro = coro.create_psf_datacube(). Loading
         and cache writes happen on the host, outside JAX transformations.
         """
-        options, interpolation = self._load_options
-        sinc_options = SincOptions(*self._sinc_configuration)
         record = self._records[0]
-        host = _YIPData(
-            self.yip_path,
-            *options,
-            rule=record.rule,
-            leakage_rule=record.leakage_rule,
-            interpolation=interpolation,
-            sinc_options=sinc_options,
-        )
-        if host._source_sig != self._source_signature:
-            raise ValueError("YIP source files changed; construct a new Coronagraph")
-        host.offax = self._offaxis_backend
+        host = self._reopen_host(record.rule, record.leakage_rule)
         host.create_psf_datacube(batch_size)
         return eqx.tree_at(
             lambda c: c.psf_datacube,

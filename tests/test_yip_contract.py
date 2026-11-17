@@ -134,13 +134,11 @@ def test_the_inner_working_angle_has_not_moved(shipped_coro, centre, expected):
     """
     from optixstuff.apertures import Circular
 
-    from yippy import Coronagraph
-
     rule = Circular(0.7, centre=centre)
     record = (
         shipped_coro.curves()
         if centre == "source"
-        else Coronagraph(shipped_coro.yip_path, rules=(rule,)).curves(rule)
+        else shipped_coro.with_rules((rule,)).curves(rule)
     )
     assert record.rule.centre == centre
     got = record.iwa_lod

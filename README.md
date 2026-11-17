@@ -59,7 +59,8 @@ core_area_map = coro.core_area_map()
 
 Supply every required rule in `rules=` at construction. `curves(rule)` selects
 a prepared record and raises for an unprepared rule. Reading a curve never
-mutates the model. `leakage_rule="aperture_mean"` is the default;
+mutates the model. `coro.with_rules((rule, ...))` returns the same coronagraph
+with a different set of prepared rules, without loading new tables. `leakage_rule="aperture_mean"` is the default;
 `"azimuthal_ring_mean"` selects ring-mean leakage density at construction.
 Pass the same `leakage_rule` to `curves` and scalar queries for that record.
 `bandpass` is a `hwoutils.spectral.Band`, or `None` when the YIP has no edges.
