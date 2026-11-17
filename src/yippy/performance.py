@@ -1381,6 +1381,69 @@ def _stellar_samples(stellar, planet_grid, sy, sx, shape, factor):
     return jnp.where(inside, jnp.real(by @ spectrum @ bx.T) * ratio**2, 0)
 
 
+def leakage_weights(offaxis, stellar, record, *, native_offaxis=None):
+    """Prepare linear native-image operators for a performance record.
+
+    Returns aperture weights and, for ring averaging, density weights, each
+    with shape (separation, stellar_y, stellar_x). All aperture construction
+    and image-coordinate transforms happen here, before runtime queries.
+    For retained native records, native_offaxis supplies shipped samples and
+    their nearest-to-zero y coordinate, just as the record measurement does.
+    Explicit synthesized axes use the offaxis callable at (separation, 0).
+    """
+    from dataclasses import replace
+
+    with jax.enable_x64():
+        aperture = []
+        native = {}
+        if native_offaxis is not None:
+            y_offsets = np.asarray(native_offaxis.y_offsets)
+            iy = int(np.argmin(np.abs(y_offsets)))
+            x_offsets = np.asarray(
+                native_offaxis.x_offsets, dtype=record.separation_lod.dtype
+            )
+            for ix, x in enumerate(x_offsets):
+                native[float(x)] = (ix, iy, float(y_offsets[iy]))
+        for separation in np.asarray(record.separation_lod):
+            position = (float(separation), 0.0)
+            if float(separation) in native:
+                ix, iy, y = native[float(separation)]
+                psf = native_offaxis.get_psf_by_offset_idx(ix, iy)
+                position = (float(separation), y)
+            else:
+                psf = offaxis(float(separation))
+            weights = _rule_weights(record.rule, psf, position, CORE_OVERSAMPLE)
+            if stellar.grid == psf.grid:
+                aperture.append(weights)
+            else:
+
+                def integrate(data, psf=psf, weights=weights):
+                    samples = _stellar_samples(
+                        replace(stellar, data=data), psf.grid, 0, 0, psf.grid.shape, 1
+                    )
+                    return jnp.sum(samples * weights)
+
+                aperture.append(jax.grad(integrate)(jnp.zeros(stellar.grid.shape)))
+        aperture = jnp.stack(aperture)
+        ring = None
+        if record.leakage_rule == "azimuthal_ring_mean":
+            sg, pf = stellar.grid, record.frame
+            ratio = pf.lod_to_arcsec(
+                pf.reference_wavelength_nm
+            ) / sg.frame.lod_to_arcsec(sg.frame.reference_wavelength_nm)
+            radii = jnp.asarray(record.separation_lod) * ratio / sg.step
+
+            def profile(data):
+                return (
+                    azimuthal_mean_profile(data, (sg.center_y, sg.center_x), radii)
+                    / sg.pixel_area
+                    * ratio**2
+                )
+
+            ring = jax.jacrev(profile)(jnp.zeros(sg.shape))
+    return aperture, ring
+
+
 class PerformanceCurves(eqx.Module):
     """Frozen photometry on one separation axis; all fractions are absolute.
 
@@ -1516,6 +1579,43 @@ class PerformanceCurves(eqx.Module):
                     (y[-1] - y[-2]) / (x[-1] - x[-2]),
                 ]
             )
+
+    def evaluate_samples(self, name, separation_lod, values):
+        """Evaluate new knot values with this record's interpolation and tails.
+
+        Values may depend on traced inputs. Aperture geometry stays prepared;
+        only the scalar PCHIP coefficients are rebuilt.
+        """
+        x = jnp.asarray(self.separation_lod)
+        values = jnp.asarray(values)
+        if len(x) == 1:
+            return jnp.full_like(
+                jnp.asarray(separation_lod), values[0], dtype=values.dtype
+            )
+        y = (
+            jnp.where(
+                values > 0,
+                jnp.maximum(jnp.log10(jnp.where(values > 0, values, 1)), -300),
+                -300,
+            )
+            if self.interpolation[name] == "log"
+            else values
+        )
+        coefficients = interpax.PchipInterpolator(x, y, check=False).c
+        tails = jnp.stack(
+            (
+                y[0],
+                y[-1],
+                (y[1] - y[0]) / (x[1] - x[0]),
+                (y[-1] - y[-2]) / (x[-1] - x[-2]),
+            )
+        )
+        record = eqx.tree_at(
+            lambda r: (getattr(r, name), r._coefficients[name], r._tails[name]),
+            self,
+            (values, coefficients, tails),
+        )
+        return record.evaluate(name, jnp.asarray(separation_lod))
 
     def evaluate(self, name, separation_lod):
         """Evaluate one named quantity using its declared interpolation space."""
@@ -1763,56 +1863,47 @@ def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="ke
     """
     if interpolation not in ("keys", "quintic"):
         raise ValueError("interpolation must be 'keys' or 'quintic'")
-    base = backend._intensity_record
-    same_reader = interpolation == backend._core_intensity_interpolation
-    varies = backend._core_intensity_varies_with_diameter
-    if same_reader and not varies:
-        return base
-    low, high = backend._diam_knot_range
+    grid = backend.stellar_grid
+    radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
+    nodes = radii * grid.step
+    zeros = np.zeros_like(nodes)
+    base = PerformanceCurves(
+        nodes,
+        grid.frame,
+        DEFAULT_APERTURE_RULE,
+        zeros,
+        zeros,
+        zeros,
+        zeros,
+        zeros,
+        0.0,
+        min(grid.shape) * grid.step / 2,
+        extra={"core_mean_intensity": zeros},
+    )
+    knots = backend._stellar_ln_interp.x
     diameter = jnp.asarray(stellar_diam_lod)
-    if not same_reader:
-        diameter = jnp.where(
-            diameter == 0.0, backend._core_intensity_diameter, diameter
-        )
-        if not varies:
-            diameter = jnp.asarray(backend._core_intensity_diameter)
-    valid = (diameter >= low) & (diameter <= high)
-    if same_reader:
-        valid = valid | (diameter == 0.0)
-
-    def measure():
-        image = backend.stellar_intens(jnp.clip(diameter, low, high)).data
-        profile = azimuthal_mean_profile(
-            image,
-            backend._stellar_axis,
-            backend._profile_radii_pix,
-            interpolation=interpolation,
-        )
-        nodes = base.separation_lod
-        coefficients = interpax.PchipInterpolator(
-            nodes, profile, extrapolate=False, check=False
-        ).c
-        tails = jnp.stack(
-            (
-                profile[0],
-                profile[-1],
-                (profile[1] - profile[0]) / (nodes[1] - nodes[0]),
-                (profile[-1] - profile[-2]) / (nodes[-1] - nodes[-2]),
-            )
-        )
-        return profile, coefficients, tails
-
-    original = (
-        base._extra["core_mean_intensity"],
-        base._coefficients["core_mean_intensity"],
-        base._tails["core_mean_intensity"],
+    valid = (diameter >= 0) & (diameter <= knots[-1])
+    image = backend.stellar_intens(jnp.clip(diameter, 0.0, knots[-1])).data
+    profile = azimuthal_mean_profile(
+        image,
+        (grid.center_y, grid.center_x),
+        jnp.asarray(radii),
+        interpolation=interpolation,
     )
-    values = (
-        jax.lax.cond(diameter == 0.0, lambda: original, measure)
-        if same_reader
-        else measure()
+    coefficients = interpax.PchipInterpolator(
+        jnp.asarray(nodes), profile, extrapolate=False, check=False
+    ).c
+    tails = jnp.stack(
+        (
+            profile[0],
+            profile[-1],
+            (profile[1] - profile[0]) / (nodes[1] - nodes[0]),
+            (profile[-1] - profile[-2]) / (nodes[-1] - nodes[-2]),
+        )
     )
-    values = tuple(jnp.where(valid, value, jnp.nan) for value in values)
+    values = tuple(
+        jnp.where(valid, value, jnp.nan) for value in (profile, coefficients, tails)
+    )
     return eqx.tree_at(
         lambda record: (
             record._extra["core_mean_intensity"],

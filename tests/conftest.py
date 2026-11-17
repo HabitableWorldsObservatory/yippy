@@ -45,7 +45,7 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
         np.dtype(eqx_coro.performance.evaluate("throughput", jnp.asarray(5.0)).dtype)
         == expected
     ), "throughput"
-    if eqx_coro._core_intensity_varies_with_diameter:
+    if len(eqx_coro._stellar_ln_interp.x) > 1:
         out_2d = stellar_intensity_curves(
             eqx_coro, 1e-3, interpolation="keys"
         ).evaluate("core_mean_intensity", jnp.asarray(5.0))

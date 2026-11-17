@@ -44,10 +44,7 @@ from jaxtyping import Array
 from ._precision import float_dtype
 from .apertures import DEFAULT_APERTURE_RULE, ApertureRule
 from .coronagraph import Coronagraph
-from .performance import (
-    PerformanceCurves,
-    profile_radii,
-)
+from .performance import PerformanceCurves
 
 
 class EqxCoronagraph(eqx.Module):
@@ -101,13 +98,6 @@ class EqxCoronagraph(eqx.Module):
     performance: PerformanceCurves
     _performance_records: tuple[PerformanceCurves, ...]
     occultation_record: PerformanceCurves
-    _intensity_record: PerformanceCurves
-    _core_intensity_varies_with_diameter: bool = eqx.field(static=True)
-    _core_intensity_interpolation: str = eqx.field(static=True)
-    _core_intensity_diameter: float = eqx.field(static=True)
-    _diam_knot_range: tuple[float, float]
-    _profile_radii_pix: Array
-    _stellar_axis: tuple[float, float] = eqx.field(static=True)
 
     # -- Static arrays (dynamic) -----------------------------------------
     sky_trans: Image
@@ -248,25 +238,6 @@ class EqxCoronagraph(eqx.Module):
             for record in yippy_coro.curves_by_rule.values()
         )
         self.occultation_record = jax_record(yippy_coro.occultation_record)
-        self._intensity_record = jax_record(yippy_coro._intensity_record)
-
-        # Core mean intensity at other diameters: the azimuthal mean of the
-        # interpolated stellar map on the profile radii, computed on demand.
-        diam_values = np.asarray(stellar.diams.value, dtype=float)
-        self._core_intensity_varies_with_diameter = len(diam_values) > 1
-        self._core_intensity_interpolation = getattr(
-            yippy_coro, "_core_intensity_interpolation", "keys"
-        )
-        self._core_intensity_diameter = getattr(
-            yippy_coro, "_core_intensity_diameter", float(diam_values[0])
-        )
-        self._diam_knot_range = (float(diam_values.min()), float(diam_values.max()))
-        self._stellar_axis = (self.stellar_grid.center_y, self.stellar_grid.center_x)
-        self._profile_radii_pix = jnp.asarray(
-            profile_radii(stellar.psfs.shape[-2:], self._stellar_axis),
-            dtype=float_dtype(),
-        )
-
         # -- Sky transmission --------------------------------------------
         self.sky_trans = yippy_coro.sky_trans()
 
