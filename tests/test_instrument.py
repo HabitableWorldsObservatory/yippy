@@ -7,8 +7,8 @@ import pytest
 
 
 @pytest.fixture(scope="session")
-def optical_path(cached_diameter_coro):
-    """Full OpticalPath with primary, coronagraph, detector, and a filter."""
+def instrument(cached_diameter_coro):
+    """Full Instrument with primary, coronagraph, detector, and a filter."""
     # The primary takes the coronagraph's diameter: its tables fix lambda/D.
     primary = ox.SimplePrimary(
         circumscribed_diameter_m=cached_diameter_coro.grid.frame.diameter_m,
@@ -25,7 +25,7 @@ def optical_path(cached_diameter_coro):
         survival_fraction=1.0,
     )
     optics_filter = ox.ConstantThroughput(throughput=0.5, name="optics")
-    return ox.OpticalPath(
+    return ox.Instrument(
         primary=primary,
         coronagraph=cached_diameter_coro,
         attenuating_elements=(optics_filter,),
@@ -111,21 +111,21 @@ class TestCoronagraph:
 
 
 # ---------------------------------------------------------------------------
-# OpticalPath integration tests
+# Instrument integration tests
 # ---------------------------------------------------------------------------
 
 
-class TestOpticalPathIntegration:
-    """Verify a table-backed OpticalPath computes system throughput."""
+class TestInstrumentIntegration:
+    """Verify a table-backed Instrument computes system throughput."""
 
-    def test_system_throughput_value(self, optical_path):
+    def test_system_throughput_value(self, instrument):
         """Exact algebra: the path retains the explicit 50 percent filter."""
-        t = optical_path.system_throughput(500.0)
+        t = instrument.system_throughput(500.0)
         assert t == pytest.approx(0.5)
 
-    def test_primary_area(self, optical_path):
+    def test_primary_area(self, instrument):
         """Floating-point: the explicit collecting area equals the annular area."""
         expected = jnp.pi * 3.0**2 * (1.0 - 0.14**2)
-        assert optical_path.primary.collecting_area_m2 == pytest.approx(
+        assert instrument.primary.collecting_area_m2 == pytest.approx(
             float(expected), rel=1e-6
         )
