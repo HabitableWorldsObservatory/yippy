@@ -7,9 +7,9 @@ import sys
 
 import numpy as np
 import pytest
-from hwoutils.grids import Frame
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
+from optixstuff.grids import Frame
 from optixstuff.performance import PerformanceCurves, SampledProfile
 
 import yippy

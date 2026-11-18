@@ -23,9 +23,9 @@ from pathlib import Path
 import numpy as np
 import optixstuff.performance as perf
 import pytest
-from hwoutils.grids import Frame
 from numpy.testing import assert_allclose
 from optixstuff.apertures import Circular, HalfMaximum
+from optixstuff.grids import Frame
 from synthetic_yip import write_synthetic_yip
 from test_band_limited_apertures import reference_circle_weights
 

@@ -16,8 +16,8 @@ package instead, in ``test_analytic_yip.py``.
 import astropy.io.fits as pyfits
 import numpy as np
 import pytest
-from hwoutils.grids import Measure, PixelGrid
 from lod_unit import lod
+from optixstuff.grids import Measure, PixelGrid
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -213,7 +213,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     """
     import equinox as eqx
     import jax.numpy as jnp
-    from hwoutils.grids import Image
+    from optixstuff.grids import Image
 
     from yippy.offax import OffAx
 

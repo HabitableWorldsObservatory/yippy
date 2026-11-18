@@ -2,12 +2,12 @@
 
 import jax
 import jax.numpy as jnp
-from hwoutils.grids import Image, PixelGrid
 from jax import device_put, jit, shard_map, vmap
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from lod_unit import lod
+from optixstuff.grids import Image, PixelGrid
 
 from .jax_funcs import synthesize_psf_idw, synthesize_psf_separable
 from .offax import OffAx

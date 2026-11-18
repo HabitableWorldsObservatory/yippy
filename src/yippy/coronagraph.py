@@ -9,8 +9,6 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image, Measure, PixelGrid
-from hwoutils.spectral import Band
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -20,8 +18,10 @@ from optixstuff.coronagraph import (
     SourcePSFs,
     _on_grid,
 )
+from optixstuff.grids import Image, Measure, PixelGrid
 from optixstuff.performance import PerformanceCurves, SampledProfile, leakage_weights
 from optixstuff.primary import SimplePrimary
+from optixstuff.spectral import Band
 from sinchole import PrefilteredReader, SceneRenderer
 
 from ._precision import float_dtype

@@ -4,14 +4,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import (
+from hwoutils.transforms import rotate_image
+from optixstuff.grids import (
     Image,
     Measure,
     PixelGrid,
     footprint_overlap,
     integrate_footprints,
 )
-from hwoutils.transforms import rotate_image
 
 
 @pytest.mark.parametrize("size", [64, 100])

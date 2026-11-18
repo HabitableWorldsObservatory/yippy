@@ -46,8 +46,8 @@ import equinox as eqx
 import interpax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Frame, PixelGrid
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
+from optixstuff.grids import Frame, PixelGrid
 from optixstuff.performance import leakage_weights, performance_curves
 
 from yippy import open_yip

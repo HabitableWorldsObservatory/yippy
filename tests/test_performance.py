@@ -236,7 +236,7 @@ def test_performance_interpolation_linear_tails(performance_interpolation):
 
 def test_default_preserves_a_steep_monotone_rise():
     """Fails if cubic overshoot replaces shape-preserving interpolation."""
-    from hwoutils.grids import Frame
+    from optixstuff.grids import Frame
 
     nodes = np.r_[np.linspace(0, 4, 17), 6, 9, 14]
     values = 1 / (1 + np.exp(-10 * (nodes - 3)))

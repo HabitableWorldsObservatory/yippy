@@ -2,8 +2,8 @@
 
 import astropy.units as u
 import numpy as np
-from hwoutils.grids import Frame, PixelGrid
 from lod_unit import lod
+from optixstuff.grids import Frame, PixelGrid
 
 from yippy.offax import OffAx
 

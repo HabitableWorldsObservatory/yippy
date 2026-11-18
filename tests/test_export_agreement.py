@@ -6,7 +6,7 @@ import astropy.io.fits as fits
 import astropy.units as u
 import equinox as eqx
 import numpy as np
-from hwoutils.grids import Image, Measure
+from optixstuff.grids import Image, Measure
 from optixstuff.performance import performance_curves
 
 from yippy.export import export_ayo_csv, export_exosims

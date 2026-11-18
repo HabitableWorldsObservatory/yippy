@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 import sinchole as sc
 from astropy.io import fits
-from hwoutils.grids import Image, Measure, PixelGrid, resample
 from lod_unit import lod
+from optixstuff.grids import Image, Measure, PixelGrid, resample
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 

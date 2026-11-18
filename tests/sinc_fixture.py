@@ -6,7 +6,7 @@ import json
 
 import numpy as np
 from astropy.io import fits
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 from synthetic_yip import write_synthetic_yip
 
 from yippy.writer import yip_header

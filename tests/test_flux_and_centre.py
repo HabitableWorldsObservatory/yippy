@@ -18,8 +18,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.grids import Image, Measure, resample
 from lod_unit import lod
+from optixstuff.grids import Image, Measure, resample
 
 from yippy import DenseSceneOperator, SceneCoronagraph, open_yip
 from yippy.performance import stellar_intensity_curves

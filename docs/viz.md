@@ -28,7 +28,7 @@ and planet variance throughput are each half their mean counterparts.
 import hwostyle
 import matplotlib.pyplot as plt
 import numpy as np
-from hwoutils.grids import Frame
+from optixstuff.grids import Frame
 
 from optixstuff import DEFAULT_APERTURE_RULE, PerformanceCurves, SampledProfile
 from yippy import viz

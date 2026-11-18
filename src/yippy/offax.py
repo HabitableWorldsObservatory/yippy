@@ -6,14 +6,14 @@ import astropy.units as u
 import jax
 import numpy as np
 from astropy.units import Quantity
-from hwoutils.grids import (
+from lod_unit import lod
+from optixstuff.grids import (
     Frame,
     Image,
     PixelGrid,
     footprint_overlap,
     integrate_footprints,
 )
-from lod_unit import lod
 
 from .logger import logger
 from .sampling import fraction_image, sample_units

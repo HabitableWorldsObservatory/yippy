@@ -4,7 +4,7 @@ import astropy.io.fits as fits
 import jax
 import numpy as np
 import pytest
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 
 from yippy.header import HeaderData
 from yippy.offax import OffAx

@@ -1,7 +1,7 @@
 """This module handles the sky transmission map."""
 
 import numpy as np
-from hwoutils.grids import Image, Measure
+from optixstuff.grids import Image, Measure
 
 
 def sky_transmission_image(package) -> Image:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import astropy.io.fits as fits
 import numpy as np
-from hwoutils.grids import Frame
+from optixstuff.grids import Frame
 
 PERFORMANCE_VERSION = 7
 PERFORMANCE_FIELDS = (

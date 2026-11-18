@@ -15,8 +15,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.apertures import Circular
+from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.performance import (
     _circle_square_weights,
     circular_aperture,

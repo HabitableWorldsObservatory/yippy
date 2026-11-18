@@ -1,6 +1,6 @@
 """Detector sampling conventions for native FITS images and delivery planes."""
 
-from hwoutils.grids import Image, Measure
+from optixstuff.grids import Image, Measure
 
 
 def sample_units(sample_kind, grid):

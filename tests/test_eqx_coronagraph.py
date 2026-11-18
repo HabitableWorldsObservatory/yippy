@@ -5,8 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import Frame
 from optixstuff.apertures import Circular
+from optixstuff.grids import Frame
 from optixstuff.performance import PerformanceCurves
 from scipy.interpolate import PchipInterpolator
 

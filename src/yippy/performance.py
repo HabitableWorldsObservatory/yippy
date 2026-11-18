@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image
+from optixstuff.grids import Image
 from optixstuff.performance import (
     CORE_WINDOW_LOD,
     SampledProfile,

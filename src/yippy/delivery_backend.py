@@ -7,8 +7,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Measure, PixelGrid
 from lod_unit import lod
+from optixstuff.grids import Measure, PixelGrid
 from sinchole import Reason, check_memory, require_read
 
 from .interpolation import InterpolationRead, ReadLedger, blend_read

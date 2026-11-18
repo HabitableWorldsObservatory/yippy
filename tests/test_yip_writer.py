@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.grids import Frame, Image, Measure, PixelGrid
+from optixstuff.grids import Frame, Image, Measure, PixelGrid
 
 from yippy import open_yip, write_yip
 

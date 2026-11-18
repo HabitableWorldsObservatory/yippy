@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 from astropy.io import fits
-from hwoutils.grids import Image, Measure
+from optixstuff.grids import Image, Measure
 
 from .header import HeaderData
 from .package import YIPPackage

@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.grids import Image, PixelGrid, resample
+from optixstuff.grids import Image, PixelGrid, resample
 from synthetic_yip import synthetic_coronagraph
 
 from yippy import open_yip

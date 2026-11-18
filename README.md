@@ -79,7 +79,7 @@ mutates the model. `coro.with_rules((rule, ...))` returns the same coronagraph
 with a different set of prepared rules, without loading new tables. `leakage_rule="aperture_mean"` is the default;
 `"azimuthal_ring_mean"` selects ring-mean leakage density at construction.
 Pass the same `leakage_rule` to `curves` and scalar queries for that record.
-`bandpass` is a `hwoutils.spectral.Band`, or `None` when the YIP has no edges.
+`bandpass` is a `optixstuff.spectral.Band`, or `None` when the YIP has no edges.
 `primary` reads both diameter conventions and collecting area from the YIP.
 
 ## Images, grids, and JAX

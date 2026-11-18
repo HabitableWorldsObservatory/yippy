@@ -19,8 +19,8 @@ import numpy as np
 import sinchole as sc
 from astropy.io import fits
 from hwoutils.constants import m2nm, rad2arcsec
-from hwoutils.grids import Frame, Measure, PixelGrid
 from lod_unit import lod
+from optixstuff.grids import Frame, Measure, PixelGrid
 
 from .header import HeaderData
 from .sampling import sample_units

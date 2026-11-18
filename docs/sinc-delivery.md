@@ -563,5 +563,5 @@ The manifest kernel describes the raw sample admission convention. At load time,
 most 0.64, otherwise its raw reader (limit 0.76). `SincOptions(taps=5..10)`
 requests a prefilter tap count explicitly. Both readers report an unknown
 image-error bound; sampled tone-error design figures are not certified bounds.
-Detector and source geometry use `hwoutils.grids.PixelGrid`. Diameter conventions
-are `circumscribed` or `inscribed`, as required by `hwoutils.grids.Frame`.
+Detector and source geometry use `optixstuff.grids.PixelGrid`. Diameter conventions
+are `circumscribed` or `inscribed`, as required by `optixstuff.grids.Frame`.

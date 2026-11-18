@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import astropy.units as u
 from astropy.io import fits
-from hwoutils.grids import Frame, PixelGrid
 from lod_unit import lod
+from optixstuff.grids import Frame, PixelGrid
 
 from .logger import logger
 

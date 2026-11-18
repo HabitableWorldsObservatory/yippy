@@ -5,11 +5,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import resample
-from hwoutils.spectral import Band
 from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
 from optixstuff.apertures import Circular, HalfMaximum
+from optixstuff.grids import resample
 from optixstuff.performance import performance_curves
+from optixstuff.spectral import Band
 from synthetic_yip import (
     replace_stellar_tables,
     synthetic_coronagraph,

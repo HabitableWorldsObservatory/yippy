@@ -3,8 +3,8 @@
 import astropy.units as u
 import numpy as np
 from astropy.units import Quantity
-from hwoutils.grids import Frame, Image
 from lod_unit import lod
+from optixstuff.grids import Frame, Image
 from scipy.interpolate import CubicSpline
 
 from .sampling import fraction_image, sample_units
