@@ -58,7 +58,8 @@ def relative_errors(coro, diameter_lod, separations_lod):
     """|curve / reference - 1| and the reference, at each separation."""
     pixel_lod = float(coro.grid.step)
     image = np.asarray(
-        coro.stellar_map(None, diameter_lod, grid=None).data, dtype=np.float64
+        coro.stellar_map(None, diameter_lod, grid=None).integrated().data,
+        dtype=np.float64,
     )
     reference = ring_mean(
         image,
@@ -191,7 +192,7 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
             ]
         ).reshape(2, 4)
         for diameter in (0.0, 0.075):
-            image = coro.stellar_map(None, diameter, grid=None).data
+            image = coro.stellar_map(None, diameter, grid=None).integrated().data
             values = np.asarray(
                 azimuthal_mean_profile(image, (grid.center_y, grid.center_x), radii)
             )

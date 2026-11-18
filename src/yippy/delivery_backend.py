@@ -7,12 +7,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image, PixelGrid
+from hwoutils.grids import Measure, PixelGrid
 from lod_unit import lod
 from sinchole import Reason, check_memory, require_read
 
 from .interpolation import InterpolationRead, ReadLedger, blend_read
 from .jax_funcs import synthesize_psf_idw
+from .sampling import fraction_image
 
 # Construction/query fallbacks allowed for declared complete full rectangles.
 _FALLBACK_MASK = int(
@@ -46,6 +47,7 @@ class DeliveryBackend(eqx.Module):
     y_offsets: jax.Array
     conversion: float
     pitch_lod: float
+    measure: Measure = eqx.field(static=True)
     grid: PixelGrid
     psf_shape: tuple[int, int]
     requested: str = eqx.field(static=True)
@@ -82,6 +84,7 @@ class DeliveryBackend(eqx.Module):
             origin[1] + spacing[1] * np.arange(delivery.shape_yx[0])
         )
         self.conversion = delivery.conversion
+        self.measure = delivery.measure
         self.pitch_lod = float(delivery.manifest["pixel_scale_lod_xy"][0])
         self.grid = delivery.grid
         self.psf_shape = tuple(delivery.manifest["detector_shape_yx"])
@@ -113,13 +116,11 @@ class DeliveryBackend(eqx.Module):
             offset = jnp.array([self.x_offsets[x_idx], self.y_offsets[y_idx]])
             index = jnp.argmin(jnp.sum((self.blend_offsets - offset) ** 2, axis=1))
             image = self.blend_nodes[index]
-        return Image(
+        return fraction_image(
             np.asarray(image) * self.conversion,
             self.grid,
             (),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )
 
     def _blend_image(self, query):
@@ -275,24 +276,20 @@ class DeliveryBackend(eqx.Module):
 
     def create_psf(self, x_lod, y_lod):
         """Return photon fractions, raising eagerly on a refused query."""
-        return Image(
+        return fraction_image(
             self._require(self.create_psf_with_info(x_lod, y_lod)),
             self.grid,
             (),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )
 
     def create_psfs(self, x_lod, y_lod):
         """Return photon fractions for a vector of source coordinates."""
-        return Image(
+        return fraction_image(
             self._require(self.create_psfs_with_info(x_lod, y_lod)),
             self.grid,
             ("source",),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )
 
     def create_psfs_parallel(self, x_vals, y_vals):

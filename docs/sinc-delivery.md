@@ -116,7 +116,7 @@ the manifest, but nothing reads their value.
 | `detector_convention` | string | yes | Exactly `pixel_midpoint_v1`. |
 | `pixel_scale_lod_xy` | [number, number] | yes | Pixel width in $\lambda_0/D$. Positive, square (both equal). |
 | `pixel_scale_arcsec_xy` | [number, number] | yes | The same width in arcseconds, `lod * (lambda0_m / diameter_m) * 206264.80624709636`, at full precision. |
-| `sample_kind` | string | yes | Pixel measure: `integral` or `mean`. See Pixel measure. |
+| `sample_kind` | string | yes | Pixel sampling: `point`, `integral` or `mean`. See Pixel measure. |
 | `pixel_response`, `instrument_to_sky` | string or null | no | Free descriptions, carried. |
 | `normalization` | object | yes | See Normalization. |
 | `optical_state` | object | yes | Must hold `state_id`. The whole object is hashed. Other fields are free, for example DM and wavefront hashes, alignment, polarization, coherence and propagator version. |
@@ -219,11 +219,19 @@ Independent checks must lie inside the served region and inside the stencil cove
 
 | Value | Meaning | `BUNIT` |
 | --- | --- | --- |
-| `integral` | Photon fraction integrated over the square pixel, per incident photon. | `incident_fraction_per_pixel` |
+| `point` | Intensity density evaluated at the pixel centre times the cell area. The reader divides by cell area to recover density per grid unit squared. | `incident_fraction_per_pixel` |
+| `integral` | Photon fraction integrated over the cell with the declared pixel response, per incident photon. | `incident_fraction_per_pixel` |
 | `mean` | Mean photon fraction per $(\lambda_0/D)^2$ over the pixel. The reader multiplies by the pixel area. | `incident_fraction_per_lod2` |
 
-Point samples are not supported. Never normalize an individual PSF to unit sum or to
-its own peak.
+The reader represents both integrals and means as cell integrals. The independent
+check peaks and photon error ledger use photon fraction per pixel for all three
+declarations. Keep one source-independent normalization across the PSFs.
+
+Native five-file YIPs record the same declaration in the `SAMPKIND` FITS card
+of the off-axis and stellar intensity products. A native product without this
+card uses the CDS `point` convention. The CDS pipeline propagates intensity onto
+science-pixel centres and multiplies by `grid.weights`, the cell area. The sky
+transmission product is dimensionless.
 
 ### Normalization
 
@@ -455,7 +463,7 @@ parses exactly this block.
   "detector_convention": "pixel_midpoint_v1",
   "pixel_scale_lod_xy": [0.25, 0.25],
   "pixel_scale_arcsec_xy": [0.0034377467707849396, 0.0034377467707849396],
-  "sample_kind": "integral",           // photon fraction integrated over each pixel
+  "sample_kind": "point",              // centre intensity times cell area
   "pixel_response": "uniform square",
   "instrument_to_sky": null,
   "normalization": {

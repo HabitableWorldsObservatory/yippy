@@ -1,10 +1,12 @@
 """Finite-diameter Images retain the backend's diameter dependence and JAX support."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.grids import resample
+from hwoutils.spectral import Band
 from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.performance import performance_curves
@@ -22,7 +24,7 @@ def test_yippy_diameter_forwarding(cached_diameter_coro):
     for d in (0.0, 0.1, 0.2):
         np.testing.assert_array_equal(
             c.stellar_map(500.0, d, grid=c.grid).data,
-            resample(c.stellar_map(None, d), c.grid).data,
+            resample(c.stellar_map(None, d).integrated(), c.grid).data,
         )
     assert float(c.stellar_map(500.0, 0.2, grid=c.grid).data.sum()) > float(
         c.stellar_map(500.0, 0.0, grid=c.grid).data.sum()
@@ -32,7 +34,7 @@ def test_yippy_diameter_forwarding(cached_diameter_coro):
 def test_multiband_forwards_diameter_and_time(cached_diameter_coro):
     """Exact record and image dispatch; monochromatic records ignore time/wavelength."""
     c = cached_diameter_coro
-    mb = MultiBandCoronagraph([450.0, 900.0], [c, c])
+    mb = MultiBandCoronagraph([c, eqx.tree_at(lambda m: m.bandpass, c, Band(800, 900))])
     for wl in (500.0, 850.0):
         np.testing.assert_array_equal(
             mb.band(wl).stellar_map(wl, 0.1, grid=c.grid).data,
@@ -106,7 +108,7 @@ def finite_coro(request, tmp_path_factory):
         x, y = base.stellar_grid.coordinates()
         maps = jnp.stack(
             [
-                base.stellar_map(None, 0.0).data
+                base.stellar_map(None, 0.0).integrated().data
                 * jnp.exp(d * (2 + 0.2 * x + 0.1 * y**2))
                 for d in knots
             ]
@@ -231,7 +233,9 @@ def test_finite_leakage_record_reference(finite_coro, rule, leakage_rule):
             )[..., 0],
             projected,
         )
-        mb = MultiBandCoronagraph([500, 800], [c, c])
+        mb = MultiBandCoronagraph(
+            [c, eqx.tree_at(lambda m: m.bandpass, c, Band(750, 850))]
+        )
         np.testing.assert_array_equal(
             mb.leakage_fraction(
                 s, 800, rule=rule, leakage_rule=leakage_rule, stellar_diam_lod=0.15

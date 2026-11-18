@@ -7,6 +7,8 @@ from hwoutils.grids import Frame, Image
 from lod_unit import lod
 from scipy.interpolate import CubicSpline
 
+from .sampling import fraction_image, sample_units
+
 
 class StellarIntens:
     """Diameter interpolator fitted to the native stellar intensity product."""
@@ -18,6 +20,8 @@ class StellarIntens:
         self.diams = package.stellar_diameters_lod * lod
 
         # Store a copy of the original PSFs
+        kind = package.header.stellar_intensity.sample_kind
+        self.measure, factor = sample_units(kind, self.grid)
         self.psfs = psfs.copy()
 
         # Interpolate stellar data in logarithmic space to ensure non-negative
@@ -29,6 +33,8 @@ class StellarIntens:
         interp_diams = self.diams.value.copy()
         interp_diams[interp_diams == 0] = np.finfo(np.float32).eps
         self.psfs[self.psfs == 0] = np.finfo(np.float32).eps
+        if kind == "mean":
+            self.psfs *= factor
         self.ln_interp = CubicSpline(interp_diams, np.log(self.psfs))
 
     def __call__(self, stellar_diam: Quantity, lam=None, D=None) -> Image:
@@ -49,18 +55,16 @@ class StellarIntens:
 
         Returns:
             Image:
-                Per-pixel fraction of unocculted stellar flux, with diameter
+                Native fraction of unocculted stellar flux, with diameter
                 axes preceding (y, x).
         """
         data = self._evaluate_array(stellar_diam, lam, D)
         axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))
-        return Image(
+        return fraction_image(
             data,
             self.grid,
             axes,
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
             # The residual halo continues past the tabulated field.
             outside="reflect",
         )

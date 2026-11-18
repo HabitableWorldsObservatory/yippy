@@ -127,7 +127,7 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
             .copy()
         )
         expected = quintic_ring_reference(
-            coro.stellar_map(None, diameter, grid=None).data,
+            coro.stellar_map(None, diameter, grid=None).integrated().data,
             (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
             separation / coro.stellar_grid.step,
         )
@@ -167,7 +167,7 @@ def test_curve_and_noise_callers_forward_reader(reader_coro):
             record = stellar_intensity_curves(coro, diameter, interpolation="quintic")
             nodes = np.asarray(record.separation_lod)
             expected = quintic_ring_reference(
-                coro.stellar_map(None, diameter).data,
+                coro.stellar_map(None, diameter).integrated().data,
                 (grid.center_y, grid.center_x),
                 nodes / grid.step,
             )
@@ -224,7 +224,7 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
                 separation
             ),
             quintic_ring_reference(
-                coro.stellar_map(None, 0.0).data,
+                coro.stellar_map(None, 0.0).integrated().data,
                 (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
                 separation / coro.stellar_grid.step,
             ),

@@ -56,7 +56,7 @@ class TestFluxConservation:
             ref_psf = np.array(offax.flat_psfs[ref_idx])
             ref_flux = np.sum(ref_psf)
 
-            interp_psf = np.array(offax.create_psf(x_val, 0.0).data)
+            interp_psf = np.array(offax.create_psf(x_val, 0.0).integrated().data)
             interp_flux = np.sum(interp_psf)
             np.testing.assert_allclose(
                 interp_flux,
@@ -79,7 +79,7 @@ class TestFluxConservation:
             flux_lo = float(np.sum(np.array(offax.flat_psfs[idx_lo])))
             flux_hi = float(np.sum(np.array(offax.flat_psfs[idx_hi])))
 
-            interp_psf = np.array(offax.create_psf(x_mid, 0.0).data)
+            interp_psf = np.array(offax.create_psf(x_mid, 0.0).integrated().data)
             interp_flux = float(np.sum(interp_psf))
 
             flux_min = min(flux_lo, flux_hi) * 0.8
@@ -116,11 +116,11 @@ class TestDarkHoleContrast:
         x_mid = (x_lo + x_hi) / 2.0
 
         # Get the grid-point reference PSFs
-        ref_lo = np.array(offax.create_psf(x_lo, 0.0).data)
-        ref_hi = np.array(offax.create_psf(x_hi, 0.0).data)
+        ref_lo = np.array(offax.create_psf(x_lo, 0.0).integrated().data)
+        ref_hi = np.array(offax.create_psf(x_hi, 0.0).integrated().data)
 
         # Get the interpolated midpoint PSF
-        interp_psf = np.array(offax.create_psf(x_mid, 0.0).data)
+        interp_psf = np.array(offax.create_psf(x_mid, 0.0).integrated().data)
 
         ny, nx = interp_psf.shape
         cy, cx = ny // 2, nx // 2
@@ -150,7 +150,7 @@ class TestDarkHoleContrast:
         x_hi = float(grid_offsets[len(grid_offsets) // 2 + 1])
         x_mid = (x_lo + x_hi) / 2.0
 
-        psf = np.array(offax.create_psf(x_mid, 0.0).data)
+        psf = np.array(offax.create_psf(x_mid, 0.0).integrated().data)
         assert np.all(np.isfinite(psf))
         assert np.sum(psf) > 0
 

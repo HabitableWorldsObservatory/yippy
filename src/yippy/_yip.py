@@ -8,7 +8,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, RecordRule
 from optixstuff.performance import (
@@ -25,6 +24,7 @@ from .interpolation import SincOptions, blend_read
 from .logger import logger
 from .offjax import OffJAX
 from .performance import _iter_xaxis_positions
+from .sampling import fraction_image
 from .sky_trans import sky_transmission_image
 from .stellar_intens import StellarIntens
 from .util import (
@@ -35,9 +35,8 @@ from .util import (
     save_coro_performance_to_fits,
 )
 
-# Invalidate artifacts using corner counts as pixel-center indices, including
-# datacube layouts and nominal peak locations in performance tables.
-_SAMPLING_CACHE_VERSION = 2
+# Sampling changes invalidate both cached performance and detector responses.
+_SAMPLING_CACHE_VERSION = 3
 
 # Namespace of automatically managed cache entries. Schema 2 keys every entry
 # by a digest of its complete calculation identity; entries from earlier
@@ -151,6 +150,7 @@ class _YIPData:
                 x_symmetric,
                 y_symmetric,
                 downsample_shape=downsample_shape,
+                sample_kind=self.offaxis_header.sample_kind,
             )
         )
 
@@ -199,28 +199,24 @@ class _YIPData:
         logger.info(f"Created {yip_path.stem}")
 
     def create_psf(self, x_lod, y_lod):
-        """Return the off-axis photon fraction per pixel at one source position."""
+        """Return the native off-axis intensity at one source position."""
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
-            return Image(
+            return fraction_image(
                 self.create_psf_with_info(x_lod, y_lod).intensity,
                 self.grid,
                 (),
-                "per_pixel",
-                "stellar_flux_fraction",
-                reconstruction="band_limited",
+                self.offax.measure,
             )
         return self.offax.create_psf(x_lod, y_lod)
 
     def create_psfs(self, x, y):
         """Return off-axis photon fractions for equal-length coordinate vectors."""
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
-            return Image(
+            return fraction_image(
                 self.create_psfs_with_info(x, y).intensity,
                 self.grid,
                 ("source",),
-                "per_pixel",
-                "stellar_flux_fraction",
-                reconstruction="band_limited",
+                self.offax.measure,
             )
         return self.offax.create_psfs(x, y)
 
@@ -237,7 +233,7 @@ class _YIPData:
             Reason.LAYOUT_UNSUPPORTED if "LAYOUT_UNSUPPORTED" in info.reasons else 0
         )
         return blend_read(
-            image.data, finite, reasons, fallback=info.requested == "auto"
+            image.integrated().data, finite, reasons, fallback=info.requested == "auto"
         )
 
     def create_psfs_with_info(self, x, y):
@@ -328,7 +324,7 @@ class _YIPData:
                     # Store the batch in the data cube
                     psfs.reshape((-1, self.npixels, self.npixels))[
                         i : i + batch_size
-                    ] = batch_psfs.data
+                    ] = batch_psfs.integrated().data
                     pb.update(batch_points.shape[0])
             _save_datacube(datacube_path, psfs)
             logger.info(f"PSF datacube saved to {datacube_path}.")
@@ -490,7 +486,9 @@ class _YIPData:
                     batch_x = jnp.array(points[i : i + batch_size, 0])
                     batch_y = jnp.array(points[i : i + batch_size, 1])
                     batch_psfs = self.offax.create_psfs(batch_x, batch_y)
-                    flat_view[i : i + batch_size] = np.asarray(batch_psfs.data)
+                    flat_view[i : i + batch_size] = np.asarray(
+                        batch_psfs.integrated().data
+                    )
                     pb.update(batch_x.shape[0])
 
             _save_datacube(datacube_path, psfs)
@@ -695,19 +693,10 @@ class _YIPData:
                 positions = [
                     p
                     for p in positions
-                    if 0 <= p.px < p.psf.shape[1] and 0 <= p.py < p.psf.shape[0]
+                    if 0 <= p.px < p.image.grid.shape[1]
+                    and 0 <= p.py < p.image.grid.shape[0]
                 ]
-            samples = {
-                p.separation: Image(
-                    p.psf,
-                    self.grid,
-                    (),
-                    "per_pixel",
-                    "stellar_flux_fraction",
-                    reconstruction="band_limited",
-                )
-                for p in positions
-            }
+            samples = {p.separation: p.image for p in positions}
             native_axis = np.array([p.separation for p in positions])
             locations = [
                 (

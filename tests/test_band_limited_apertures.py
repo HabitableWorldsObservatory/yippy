@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import Frame, Image, PixelGrid
+from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.apertures import Circular
 from optixstuff.performance import (
     _circle_square_weights,
@@ -54,10 +54,14 @@ def image_source(psf, pixel_lod, star=None):
         frame=Frame(500, 6, "circumscribed"),
     )
     stellar = Image(
-        psf if star is None else star, grid, (), "per_pixel", "stellar_flux_fraction"
+        psf if star is None else star,
+        grid,
+        (),
+        Measure.integral(),
+        "stellar_flux_fraction",
     )
     return lambda separation: Image(
-        psf, grid, (), "per_pixel", "stellar_flux_fraction"
+        psf, grid, (), Measure.integral(), "stellar_flux_fraction"
     ), stellar
 
 
@@ -219,7 +223,7 @@ def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
         values = []
         for factor in (10, 40):
             with jax.enable_x64():
-                psf = jnp.asarray(pos.psf, dtype=jnp.float64)
+                psf = jnp.asarray(pos.image.integrated().data, dtype=jnp.float64)
                 if aperture == "circle":
                     result = circular_aperture(
                         psf,
@@ -249,12 +253,7 @@ def test_shipped_contrast_is_repeatable_for_faint_stellar_sums(shipped_coro):
     """Faint stellar DFT sums are stable despite cancellation of bright modes."""
     coro = shipped_coro
     positions = list(_iter_xaxis_positions(_YIPData(coro.package)))
-    images = {
-        pos.separation: Image(
-            pos.psf, coro.grid, (), "per_pixel", "stellar_flux_fraction"
-        )
-        for pos in positions
-    }
+    images = {pos.separation: pos.image for pos in positions}
     stellar = coro.stellar_map(None, 0.0, grid=None)
     values = np.stack(
         [
@@ -392,7 +391,7 @@ def test_shipped_truncation_stays_near_nominal_source(shipped_coro):
     pos = next(_iter_xaxis_positions(_YIPData(shipped_coro.package)))
     with jax.enable_x64():
         flux, _ = truncation_core(
-            jnp.asarray(pos.psf, dtype=jnp.float64),
+            jnp.asarray(pos.image.integrated().data, dtype=jnp.float64),
             0.3,
             0.25,
             nominal_center=(pos.py, pos.px),

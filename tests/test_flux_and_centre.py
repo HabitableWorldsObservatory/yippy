@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.grids import Image
+from hwoutils.grids import Image, Measure, resample
 from lod_unit import lod
 
 from yippy import DenseSceneOperator, SceneCoronagraph, open_yip
@@ -32,7 +32,11 @@ BETWEEN_KNOTS_LOD = (1.25, 2.25, 3.75, 4.25)
 
 def _sum(coro, x_lod, y_lod=0.0):
     """Total flux of the synthesized PSF at a sky position."""
-    return float(np.asarray(coro._offaxis_backend(x_lod * lod, y_lod * lod).data).sum())
+    return float(
+        np.asarray(
+            coro._offaxis_backend(x_lod * lod, y_lod * lod).integrated().data
+        ).sum()
+    )
 
 
 def test_interpolated_flux_is_bracketed_by_its_two_neighbours(syn_coro_1d):
@@ -313,17 +317,19 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     center = (npix - 1) / 2
     row, col = npix // 2 - 1, npix // 2 + 1
     x, y = (col - center) * 0.25, (row - center) * 0.25
-    direct = np.asarray(full._offaxis_backend(x * lod, y * lod).data)
+    direct = np.asarray(full.source_psfs(None, x, y, grid=full.grid).image.data[0])
     scene = np.zeros((npix, npix))
     scene[row, col] = 1
-    image = Image(jnp.asarray(scene), full.grid, (), "per_pixel", "flux")
+    image = Image(jnp.asarray(scene), full.grid, (), Measure.integral(), "flux")
     result = full.render_scene(image, None, grid=full.grid)
     assert result.valid
     rendered = result.image.data
     tolerance = direct.max() * 2e-6
     np.testing.assert_allclose(rendered, direct, rtol=0, atol=tolerance)
     shifted = np.asarray(
-        full.source_psfs(None, [x + 0.125], [y + 0.125], grid=None).image.data[0]
+        full.source_psfs(None, [x + 0.125], [y + 0.125], grid=full.grid)
+        .image.integrated()
+        .data[0]
     )
     assert np.max(np.abs(shifted - direct)) > direct.max() * 0.1
     # Independent integer-offset reader anchor for odd n, half-integer for even.
@@ -339,6 +345,9 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     flux = np.arange(1, npix**2 + 1).reshape(npix, npix)
     raster = replace(image, data=jnp.asarray(flux, dtype=jnp.float32))
     expected = np.einsum("ij,ijyx->yx", flux, cube)
+    expected = resample(
+        replace(image, data=expected, reconstruction="band_limited"), full.grid
+    ).data
     result = quarter.render_scene(raster, None, grid=full.grid)
     assert result.valid
     np.testing.assert_allclose(result.image.data, expected, rtol=2e-6)
@@ -392,10 +401,22 @@ def test_uniform_raster_reproduces_calibrated_sky_map(tmp_path):
     diff = offsets[:, None] - offsets[None, :]
     axis = np.exp(-0.5 * (diff / spec.psf_sigma_lod) ** 2).sum(axis=1)
     amplitude = spec.psf_flux * spec.pixscale**2 / (2 * np.pi * spec.psf_sigma_lod**2)
+    # The centre-sampled calibration must include the detector pixel response.
+    grid = open_yip(spec.path).header.offaxis_psfs.pixel_grid()
+    samples = Image(
+        amplitude * np.outer(axis, axis),
+        grid,
+        (),
+        Measure.integral(),
+        "flux",
+        reconstruction="band_limited",
+    )
     with fits.open(spec.path / "sky_trans.fits", mode="update") as hdus:
-        hdus[0].data[:] = amplitude * np.outer(axis, axis)
+        hdus[0].data[:] = resample(samples, grid).data
     model = open_yip(spec.path).prepare().with_scene_operator()
-    scene = Image(jnp.ones(model.grid.shape), model.grid, (), "per_pixel", "flux")
+    scene = Image(
+        jnp.ones(model.grid.shape), model.grid, (), Measure.integral(), "flux"
+    )
     sky = model.uniform_sky_map(None, grid=model.grid)
     result = model.render_scene(scene, None, grid=model.grid)
     assert result.valid

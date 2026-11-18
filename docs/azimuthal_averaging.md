@@ -103,7 +103,7 @@ profile. The circle-sampled profile agrees with the exact mean to a few
 tenths of a percent except within the deepest nulls.
 
 At a stellar diameter between the tabulated ones, the profile is taken from
-the stellar intensity map interpolated to that diameter (`stellar_map(None, diameter_lod, grid=None)`),
+the stellar intensity map interpolated to that diameter (`stellar_map(None, diameter_lod, grid=None).integrated()`),
 so the curve and the map an image simulator renders describe the same star.
 
 ## Recommendation

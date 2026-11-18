@@ -6,11 +6,17 @@ import astropy.units as u
 import jax
 import numpy as np
 from astropy.units import Quantity
-from hwoutils.grids import Frame, Image, PixelGrid
-from hwoutils.transforms import downsample_psfs
+from hwoutils.grids import (
+    Frame,
+    Image,
+    PixelGrid,
+    footprint_overlap,
+    integrate_footprints,
+)
 from lod_unit import lod
 
 from .logger import logger
+from .sampling import fraction_image, sample_units
 
 
 class OffAx:
@@ -24,6 +30,8 @@ class OffAx:
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
+        *,
+        sample_kind="point",
     ) -> None:
         """Prepare interpolation geometry from shipped samples and their grid."""
         self.pixel_scale_arcsec = grid.step * lod / u.pix
@@ -31,6 +39,9 @@ class OffAx:
         self.y_symmetric = y_symmetric
         self.grid = grid
         psfs = psfs.astype(psfs.dtype.newbyteorder("="), copy=False)
+        self.measure, factor = sample_units(sample_kind, grid)
+        if sample_kind == "mean":
+            psfs = psfs * factor
         offsets_x = np.unique(offsets[:, 0])
         offsets_y = np.unique(offsets[:, 1])
 
@@ -95,31 +106,24 @@ class OffAx:
 
         # Downsample PSFs if requested
         if downsample_shape is not None:
-            original_shape = psfs.shape[1:]
-            logger.info(
-                f"Downsampling PSFs from {original_shape} to {downsample_shape}"
-            )
-            psfs, new_pixscale = downsample_psfs(
-                psfs, self.pixel_scale_arcsec.value, downsample_shape
-            )
-            # Update pixel scale with the new value (preserving units)
-            self.pixel_scale_arcsec = new_pixscale * self.pixel_scale_arcsec.unit
-            logger.info(f"New pixel scale: {self.pixel_scale_arcsec}")
-
-            # Transform pixel-center coordinates under the same bin-edge map.
-            # For example, input index 4 becomes 1.75 after a 2x reduction.
-            scale_y = original_shape[0] / psfs.shape[1]
-            scale_x = original_shape[1] / psfs.shape[2]
+            ny, nx = grid.shape
+            ty, tx = downsample_shape
+            if min(tx, ty) <= 0 or ty > ny or tx > nx or ny * tx != nx * ty:
+                raise ValueError(
+                    "downsample_shape must reduce both axes in the same ratio"
+                )
+            scale = nx / tx
             self.grid = replace(
-                self.grid,
-                shape=tuple(psfs.shape[-2:]),
-                center_x=(self.grid.center_x + 0.5) / scale_x - 0.5,
-                center_y=(self.grid.center_y + 0.5) / scale_y - 0.5,
-                basis=(
-                    (self.grid.step * scale_x, 0.0),
-                    (0.0, self.grid.step * scale_y),
-                ),
+                grid,
+                shape=downsample_shape,
+                center_x=(grid.center_x + 0.5) / scale - 0.5,
+                center_y=(grid.center_y + 0.5) / scale - 0.5,
+                basis=((grid.step * scale, 0.0), (0.0, grid.step * scale)),
             )
+            source = fraction_image(psfs, grid, ("source",), self.measure)
+            rebinned = integrate_footprints(source, footprint_overlap(grid, self.grid))
+            psfs, self.measure = np.asarray(rebinned.data), rebinned.measure
+            self.pixel_scale_arcsec = self.grid.step * lod / u.pix
 
             # Update max_offset_in_image after downsampling
             self.max_offset_in_image = (
@@ -165,17 +169,15 @@ class OffAx:
 
         Returns:
             Image or None:
-                Per-pixel unocculted source flux fraction, or None when absent.
+                Native unocculted source flux fraction, or None when absent.
         """
         flat_idx = self.offset_to_flat_idx[x_idx, y_idx]
         if flat_idx >= 0:
-            return Image(
+            return fraction_image(
                 self.flat_psfs[flat_idx],
                 self.grid,
                 (),
-                "per_pixel",
-                "stellar_flux_fraction",
-                reconstruction="band_limited",
+                self.measure,
             )
         return None
 
@@ -205,7 +207,7 @@ class OffAx:
 
         Returns:
             Image:
-                Per-pixel unocculted source flux fractions at the given position.
+                Native unocculted source flux fractions at the given position.
         """
         if (
             isinstance(x, Quantity)

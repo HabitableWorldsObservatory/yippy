@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import sinchole as sc
 from astropy.io import fits
-from hwoutils.grids import Image, PixelGrid, resample
+from hwoutils.grids import Image, Measure, PixelGrid, resample
 from lod_unit import lod
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
@@ -113,7 +113,8 @@ def test_full_blend_photon_conversion(tmp_path):
     metadata["sample_kind"] = "mean"
     save_manifest(tmp_path, metadata)
     delivery, blend, _ = route_interpolation(tmp_path, "blend", None, None)
-    expected = delivery.nodes[16 * 33 + 16] * (2.0 * 0.25**2)
+    assert delivery.measure == Measure.integral()
+    expected = fits.getdata(tmp_path / "nodes.fits")[16 * 33 + 16] * (2.0 * 0.25**2)
     np.testing.assert_allclose(blend.create_psf(0.0, 0.0).data, expected, rtol=2e-7)
 
 
@@ -150,10 +151,18 @@ def test_product_selection(tmp_path):
     )
     assert package.header.offaxis_psfs.pixel_grid() == chosen.grid
     assert chosen.grid.frame.diameter_convention == "inscribed"
-    np.testing.assert_array_equal(package.offaxis_psfs, chosen.nodes)
+    np.testing.assert_array_equal(package.offaxis_psfs / 0.25**2, chosen.nodes)
     np.testing.assert_array_equal(package.offsets_xy_lod, chosen.offsets)
     assert chosen.header.pixscale.value == 0.25
     np.testing.assert_allclose(chosen.header.lambda0.to_value("nm"), 500.0, atol=1e-12)
+    again = load_delivery(
+        copied.source.path,
+        copied._manifest,
+        SincOptions(product_id="other"),
+        package=copied,
+    )
+    np.testing.assert_array_equal(chosen.nodes, again.nodes)
+    np.testing.assert_array_equal(copied.offaxis_psfs / 0.25**2, again.nodes)
     assert chosen.plane["id"] == "other"
     assert chosen.nodes.dtype == np.float32
     bad_check = dict(m["checks"][0], image_index=-1)
@@ -165,6 +174,7 @@ def test_quadrant_native_intake(admitted):
     """Fails if manifest intake applies legacy center, mirrors or float casting."""
     grid = admitted._offaxis_backend.reader.grid
     assert admitted.bandpass is None
+    assert grid.products.measure == Measure.density("grid")
     assert grid.intensity.dtype == jnp.float32
     assert grid.intensity.shape == (1, 18, 18, 4, 4)
     np.testing.assert_array_equal(
@@ -184,7 +194,7 @@ def test_reads_units_refusals(admitted):
         lambda value: value[0],
         admitted._offaxis_backend.create_psfs_with_info([0.07], [-0.04]),
     )
-    np.testing.assert_allclose(actual.intensity, direct.intensity, atol=1e-18)
+    np.testing.assert_allclose(actual.intensity, direct.intensity * 0.25**2, atol=1e-18)
     assert actual.selected_backend == 1
     assert actual.ledger.target_id.endswith(
         ":" + admitted.interpolation_info.product_id
@@ -200,37 +210,6 @@ def test_reads_units_refusals(admitted):
     np.testing.assert_allclose(
         signed_backend.create_psf(0.07, -0.04).data, -direct.intensity, atol=1e-18
     )
-    for measure, conversion in (("integral", 2.0), ("mean", 2.0 * 0.25**2)):
-        d = load_delivery(
-            admitted.package.source.path,
-            detect_delivery(admitted.package.source.path),
-            SincOptions(),
-        )
-        metadata = copy.deepcopy(d.manifest)
-        metadata["sample_kind"] = measure
-        metadata["normalization"]["kind"] = "unocculted_peak"
-        metadata["planes"][0]["photon_conversion"] = 2.0
-        from yippy.delivery_backend import DeliveryBackend
-        from yippy.sinc_delivery import admit_delivery
-
-        changed = replace(
-            d, manifest=metadata, plane=metadata["planes"][0], conversion=conversion
-        )
-        admission, domain, memory = admit_delivery(changed, SincOptions())
-        new_reader = sc.Interpolator(
-            admission.require(),
-            domain,
-            sc.KernelProfile(),
-            sc.ReadPolicy(),
-            sc.Tiling(),
-            memory,
-        )
-        backend = DeliveryBackend(changed, new_reader, "sinc")
-        np.testing.assert_allclose(
-            backend.create_psf(0.07, -0.04).data,
-            direct.intensity * conversion,
-            atol=1e-18,
-        )
     refused = jax.tree.map(
         lambda value: value[0],
         admitted._offaxis_backend.create_psfs_with_info([np.nan], [0.0]),
@@ -271,7 +250,7 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
     # Reflect extension doubles each axis (period 8, zero Nyquist mode).
     stellar = view.stellar_map(None, 0.0)
     assert stellar.outside == "reflect"
-    data = np.asarray(stellar.data)
+    data = np.asarray(stellar.integrated().data)
     even = np.concatenate([data, data[::-1]], axis=0)
     even = np.concatenate([even, even[:, ::-1]], axis=1)
     spectrum = np.fft.fft2(even)
@@ -456,7 +435,7 @@ def test_table_consumer(admitted):
         grid = PixelGrid.focal(4, pitch, stellar.grid.frame)
         np.testing.assert_array_equal(
             admitted.stellar_map(500.0, 0.0, grid=grid).data,
-            resample(stellar, grid).data,
+            resample(stellar.integrated(), grid).data,
         )
         grid = PixelGrid.focal(4, pitch, admitted.sky_trans.grid.frame)
         np.testing.assert_array_equal(
@@ -464,7 +443,9 @@ def test_table_consumer(admitted):
             resample(admitted.sky_trans, grid).data,
         )
         grid = PixelGrid.focal(4, pitch, admitted.grid.frame)
-        expected = resample(admitted._offaxis_backend.create_psfs(x, y), grid).data
+        expected = resample(
+            admitted._offaxis_backend.create_psfs(x, y).integrated(), grid
+        ).data
         result = admitted.source_psfs(500.0, x, y, grid=grid).image.data
         np.testing.assert_allclose(result, expected, atol=1e-18)
         np.testing.assert_array_equal(
@@ -524,7 +505,9 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
     )
     for row, y in enumerate((0.125, 0.375)):
         np.testing.assert_allclose(
-            before[row, 0], host.offax.create_psf(0.125, y).data, rtol=1e-14
+            before[row, 0],
+            host.offax.create_psf(0.125, y).integrated().data,
+            rtol=1e-14,
         )
         assert np.isfinite(before[row, 0]).all()
         assert np.isnan(before[row, 1]).all()
@@ -534,12 +517,12 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
 
     scene_model = admitted.with_scene_operator(batch_size=4)
     image = Image(
-        jnp.zeros(admitted.grid.shape), admitted.grid, (), "per_pixel", "flux"
+        jnp.zeros(admitted.grid.shape), admitted.grid, (), Measure.integral(), "flux"
     )
     supported = replace(image, data=image.data.at[2, 2].set(1.0))
     good = scene_model.render_scene(supported, None, grid=admitted.grid)
     assert good.valid and jnp.isfinite(good.image.data).all()
-    expected = admitted.source_psfs(None, 0.125, 0.125)
+    expected = admitted.source_psfs(None, 0.125, 0.125, grid=admitted.grid)
     np.testing.assert_allclose(good.image.data, expected.image.data[0], rtol=1e-12)
     # Negative y lies outside the asymmetric domain even where positive y is supported.
     unsupported = replace(supported, data=supported.data.at[0, 2].set(1.0))
@@ -568,7 +551,7 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
         model = open_yip(tmp_path).prepare(interpolation="sinc").with_scene_operator()
         assert isinstance(model.operator, sc.SceneRenderer)
         flux = jnp.zeros(model.grid.shape).at[2, 1].set(2.0)
-        scene = Image(flux, model.grid, (), "per_pixel", "flux")
+        scene = Image(flux, model.grid, (), Measure.integral(), "flux")
         result = eqx.filter_jit(model.render_scene)(scene, None, grid=model.grid)
         point = model.source_psfs(None, -0.125, 0.125)
         assert result.valid and point.valid[0]
@@ -626,13 +609,15 @@ def test_public_delivery(tmp_path):
         )
         np.testing.assert_allclose(
             coro.stellar_map(500.0, 0.0, grid=coro.stellar_grid).data,
-            resample(host.stellar_intens(0.0 * lod), coro.stellar_grid).data,
+            resample(
+                host.stellar_intens(0.0 * lod).integrated(), coro.stellar_grid
+            ).data,
             atol=1e-14,
         )
         x, y = jnp.array([4.0]), jnp.array([5.5])
         np.testing.assert_allclose(
             coro.source_psfs(500.0, x, y, grid=coro.grid).image.data,
-            resample(host.offax.create_psfs(x, y), coro.grid).data,
+            resample(host.offax.create_psfs(x, y).integrated(), coro.grid).data,
             rtol=1e-14,
         )
         metadata = json.loads((root / "sinc-delivery.json").read_text())
@@ -654,7 +639,12 @@ def test_public_delivery(tmp_path):
             assert peak > 0
             assert (
                 np.max(
-                    np.abs(np.asarray(coro.source_psfs(None, *q).image.data[0]) - image)
+                    np.abs(
+                        np.asarray(
+                            coro.source_psfs(None, *q).image.integrated().data[0]
+                        )
+                        - image
+                    )
                 )
                 <= 1e-5 * peak
             )
@@ -875,7 +865,9 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
                 assert perf_path.stat().st_mtime_ns == stamp
 
 
-@pytest.mark.parametrize("measure,factor", [("integral", 2.0), ("mean", 0.125)])
+@pytest.mark.parametrize(
+    "measure,factor", [("point", 2.0), ("integral", 2.0), ("mean", 0.125)]
+)
 def test_intake_finite_error_units(tmp_path, measure, factor):
     """Real intake scales nonzero finite empirical residuals with pixel values."""
     m = write_delivery(tmp_path)
@@ -892,6 +884,14 @@ def test_intake_finite_error_units(tmp_path, measure, factor):
         save_manifest(tmp_path, m)
         _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
         converted = backend.create_psf_with_info(0.07, -0.04)
+        image = backend.create_psf(0.07, -0.04)
+        expected_measure = (
+            Measure.density("grid") if measure == "point" else Measure.integral()
+        )
+        assert image.measure == expected_measure == backend.reader.grid.products.measure
+        np.testing.assert_allclose(
+            image.integrated().data, raw.intensity * factor, rtol=1e-14
+        )
         np.testing.assert_allclose(
             converted.intensity, raw.intensity * factor, rtol=1e-14
         )
@@ -1123,3 +1123,22 @@ def test_override_domain_excludes_unreadable_checks(tmp_path):
         assert excluded and set(excluded) <= set(check_ids)
         result = backend.create_psf_with_info(0.0, 0.0)
         assert bool(result.accepted)
+
+
+@pytest.mark.parametrize("kind", ["integral", "mean"])
+def test_measured_detector_cells_survive_explicit_native_grid(tmp_path, kind):
+    """Fails if a native read applies the declared detector response twice."""
+    m = write_delivery(tmp_path, full=True)
+    m["sample_kind"] = kind
+    save_manifest(tmp_path, m)
+    with jax.enable_x64():
+        model = open_yip(tmp_path).prepare(interpolation="blend")
+        source = model.source_psfs(None, 0.0, 0.0, grid=model.grid).image
+        native = model.source_psfs(None, 0.0, 0.0).image
+        assert np.ptp(native.data) > 0
+        assert native.measure == source.measure == Measure.integral()
+        assert native.reconstruction == "nearest"
+        np.testing.assert_array_equal(native.data, source.data)
+        stored = model.package.offaxis_psfs[16 * 33 + 16]
+        expected = stored if kind == "integral" else stored * 0.25**2
+        np.testing.assert_allclose(source.data[0], expected, rtol=2e-7)

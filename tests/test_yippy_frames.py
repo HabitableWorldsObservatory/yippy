@@ -24,7 +24,7 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
     target = PixelGrid.regular(
         (20, 22), 0.35, "lod", frame=backend.grid.frame, center=(10.2, 9.7)
     )
-    stellar = backend.stellar_map(None, 0.1)
+    stellar = backend.stellar_map(None, 0.1).integrated()
     expected = resample(stellar, target)
     np.testing.assert_array_equal(
         coro.stellar_map(500.0, 0.1, grid=target).data, expected.data
@@ -56,7 +56,10 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
     np.testing.assert_allclose(
         coro.on_axis_psf(500.0, angular).data,
         resample(
-            replace(backend.stellar_map(None, 0.0), grid=sg.to_arcsec(500.0)), angular
+            replace(
+                backend.stellar_map(None, 0.0).integrated(), grid=sg.to_arcsec(500.0)
+            ),
+            angular,
         ).data,
         rtol=8 * np.finfo(np.float32).eps,
     )
@@ -71,11 +74,13 @@ def test_shared_frame_bit_equality(cached_diameter_coro):
     c = cached_diameter_coro
     g = c.grid
     for actual, expected in [
-        (c.stellar_map(500.0, 0.1, grid=g), c.stellar_map(None, 0.1)),
+        (c.stellar_map(500.0, 0.1, grid=g), c.stellar_map(None, 0.1).integrated()),
         (c.uniform_sky_map(500.0, grid=g), c.sky_trans),
         (
             c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=g).image,
-            c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=None).image,
+            c.source_psfs(
+                500.0, jnp.array([1.0]), jnp.array([0.0]), grid=None
+            ).image.integrated(),
         ),
     ]:
         assert isinstance(actual, Image)

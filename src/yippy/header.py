@@ -41,11 +41,14 @@ class HeaderData:
     n_star: int | None = None
     zernike: str | None = None
     wfe: u.Quantity | None = None
+    sample_kind: str = "point"
     diameter_convention: str = "circumscribed"
     coordinate_model: str = "paraxial_entrance_tilt"
 
     def __post_init__(self):
         """Protect the underlying quantity arrays as well as the header fields."""
+        if self.sample_kind not in ("point", "integral", "mean"):
+            raise ValueError("SAMPKIND must be point, integral or mean")
         for value in vars(self).values():
             if isinstance(value, u.Quantity):
                 value.flags.writeable = False
@@ -206,6 +209,7 @@ class HeaderData:
                 "D",
                 "D_INSC",
                 "PIXSCALE",
+                "SAMPKIND",
                 "LAMBDA",
                 "MINLAM",
                 "MAXLAM",
@@ -241,6 +245,7 @@ class HeaderData:
             lambda0=HeaderData.get_header_value(header, "LAMBDA", u.micron),
             minlam=HeaderData.get_header_value(header, "MINLAM", u.micron),
             maxlam=HeaderData.get_header_value(header, "MAXLAM", u.micron),
+            sample_kind=header.get("SAMPKIND", "point"),
             xcenter=header.get("XCENTER", None),
             ycenter=header.get("YCENTER", None),
             obscured=header.get("OBSCURED", None),

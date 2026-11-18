@@ -21,7 +21,10 @@ def test_round_trip_native_products(synthetic_2d, shipped, tmp_path):
     package = open_yip("eac1_aavc_2d" if shipped else synthetic_2d.path)
     other = open_yip(write_yip(tmp_path / "copy", package))
     assert other.header == package.header
-    assert other.source.digest == package.source.digest
+    assert (other.source.digest == package.source.digest) == (
+        "SAMPKIND" in package.fits_header("offaxis_psfs")
+        and "SAMPKIND" in package.fits_header("stellar_intensity")
+    )
     assert other.source.path != package.source.path
     for product, filename in PRODUCT_FILES.items():
         np.testing.assert_array_equal(
@@ -29,9 +32,10 @@ def test_round_trip_native_products(synthetic_2d, shipped, tmp_path):
         )
         original = package.source.path / filename
         restored = other.source.path / filename
-        assert (
-            fits.getheader(restored).tostring() == fits.getheader(original).tostring()
-        )
+        saved, loaded = fits.getheader(original), fits.getheader(restored)
+        if product in ("offaxis_psfs", "stellar_intensity") and "SAMPKIND" not in saved:
+            assert loaded.pop("SAMPKIND") == "point"
+        assert loaded.tostring() == saved.tostring()
         np.testing.assert_array_equal(fits.getdata(restored), fits.getdata(original))
     for name in ("offaxis_psfs", "stellar_intensity", "sky_transmission"):
         assert (

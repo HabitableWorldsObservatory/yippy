@@ -11,6 +11,7 @@ from lod_unit import lod
 
 from .jax_funcs import synthesize_psf_idw, synthesize_psf_separable
 from .offax import OffAx
+from .sampling import fraction_image
 
 
 class OffJAX(OffAx):
@@ -38,10 +39,18 @@ class OffJAX(OffAx):
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
+        *,
+        sample_kind="point",
     ) -> None:
         """Prepare JAX interpolation arrays from the native samples."""
         super().__init__(
-            psfs, offsets, grid, x_symmetric, y_symmetric, downsample_shape
+            psfs,
+            offsets,
+            grid,
+            x_symmetric,
+            y_symmetric,
+            downsample_shape,
+            sample_kind=sample_kind,
         )
 
         ##############
@@ -180,25 +189,21 @@ class OffJAX(OffAx):
         self._create_psf = create_psf_wrapper
 
     def create_psf(self, x, y) -> Image:
-        """Return one per-pixel source flux fraction image."""
-        return Image(
+        """Return one native source flux fraction image."""
+        return fraction_image(
             self._create_psf(x, y),
             self.grid,
             (),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )
 
     def create_psfs(self, x, y) -> Image:
-        """Return per-pixel source flux fractions with leading axis source."""
-        return Image(
+        """Return native source flux fractions with leading axis source."""
+        return fraction_image(
             self._create_psfs(x, y),
             self.grid,
             ("source",),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )
 
     def create_psfs_parallel(self, x_vals, y_vals):
@@ -256,11 +261,9 @@ class OffJAX(OffAx):
         else:
             psfs = psfs_padded
 
-        return Image(
+        return fraction_image(
             psfs,
             self.grid,
             ("source",),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self.measure,
         )

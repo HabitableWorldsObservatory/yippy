@@ -4,7 +4,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.transforms import downsample_psfs, rotate_image
+from hwoutils.grids import (
+    Image,
+    Measure,
+    PixelGrid,
+    footprint_overlap,
+    integrate_footprints,
+)
+from hwoutils.transforms import rotate_image
 
 
 @pytest.mark.parametrize("size", [64, 100])
@@ -12,7 +19,12 @@ def test_real_psf_downsampling_conserves_flux(coro, size):
     """Every stored PSF retains its integral at integer and noninteger ratios."""
     with jax.enable_x64():
         source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=jnp.float64)
-        output, scale = downsample_psfs(source, 0.25, (size, size))
+        scale = coro.grid.step * source.shape[1] / size
+        target = PixelGrid.focal(size, scale, coro.grid.frame)
+        pixels = Image(
+            source, coro.grid, ("source",), Measure.integral(), "stellar_flux_fraction"
+        )
+        output = integrate_footprints(pixels, footprint_overlap(coro.grid, target)).data
         np.testing.assert_allclose(
             output.sum(axis=(1, 2)), source.sum(axis=(1, 2)), rtol=1e-12, atol=1e-30
         )

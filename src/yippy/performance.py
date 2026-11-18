@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Image
 from optixstuff.performance import (
     CORE_WINDOW_LOD,
     SampledProfile,
@@ -28,7 +29,7 @@ class _OffAxisPosition:
     """Data for a single off-axis PSF position along the performance axis."""
 
     separation: float  # |x| in lam/D
-    psf: np.ndarray  # the off-axis PSF image
+    image: Image  # the native off-axis PSF
     px: float  # nominal x position in the image, including subpixel phase
     py: float  # nominal y position in the image, including subpixel phase
 
@@ -54,13 +55,12 @@ def _iter_xaxis_positions(coro: _YIPData):
             continue
         r = abs(x_lod_val)
         planet_image = coro.offax.get_psf_by_offset_idx(i, y_idx)
-        planet_psf = None if planet_image is None else np.asarray(planet_image.data)
-        if planet_psf is None:
+        if planet_image is None:
             continue
         with jax.enable_x64():
             px, py = coro.offax.grid.unit_to_pixel(x_lod_val, y_lod_val)
         px, py = float(px), float(py)
-        yield _OffAxisPosition(separation=r, psf=planet_psf, px=px, py=py)
+        yield _OffAxisPosition(separation=r, image=planet_image, px=px, py=py)
 
 
 def core_separations(coro: Coronagraph, step_lod: float = CORE_STEP_LOD) -> np.ndarray:
@@ -120,9 +120,11 @@ def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="ke
     knots = backend._stellar_ln_interp.x
     diameter = jnp.asarray(stellar_diam_lod)
     valid = (diameter >= 0) & (diameter <= knots[-1])
-    image = backend.stellar_map(
-        None, jnp.clip(diameter, 0.0, knots[-1]), grid=None
-    ).data
+    image = (
+        backend.stellar_map(None, jnp.clip(diameter, 0.0, knots[-1]), grid=None)
+        .integrated()
+        .data
+    )
     image = jnp.asarray(image, dtype=jnp.asarray(nodes).dtype)
     profile = azimuthal_mean_profile(
         image,

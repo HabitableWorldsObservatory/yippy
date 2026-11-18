@@ -19,10 +19,11 @@ import numpy as np
 import sinchole as sc
 from astropy.io import fits
 from hwoutils.constants import m2nm, rad2arcsec
-from hwoutils.grids import Frame, PixelGrid
+from hwoutils.grids import Frame, Measure, PixelGrid
 from lod_unit import lod
 
 from .header import HeaderData
+from .sampling import sample_units
 
 _PREMISES = (
     "entrance_tilt_model",
@@ -60,6 +61,7 @@ class Delivery:
     shape_yx: tuple[int, int]
     tolerance_lod: np.ndarray
     coordinate_residual_lod: np.ndarray
+    measure: Measure
     conversion: float
     independent_images: dict
     missing_metadata: tuple[str, ...]
@@ -187,6 +189,7 @@ def delivery_header(header, manifest, plane):
     """Resolve the selected plane's geometry in the manifest reference frame."""
     return replace(
         HeaderData.from_fits_header(header),
+        sample_kind=manifest["sample_kind"],
         pixscale=float(manifest["pixel_scale_lod_xy"][0]) * lod / u.pix,
         lambda0=float(manifest["lambda0_m"]) * m2nm * u.nm,
         diameter_convention=manifest.get("diameter_convention") or "circumscribed",
@@ -375,16 +378,20 @@ def load_delivery(root, manifest, options, *, package=None):
                 )
     tolerance, residual = np.asarray(tolerance), np.asarray(residual)
     _header_checks(header, manifest, plane, tolerance)
-    measure = manifest["sample_kind"]
-    if measure not in ("integral", "mean"):
-        raise ValueError("Only integral and mean pixel samples are supported")
+    kind = manifest["sample_kind"]
+    if "SAMPKIND" in header and header["SAMPKIND"] != kind:
+        raise ValueError("Conflicting FITS SAMPKIND and manifest sample_kind")
+    metadata = delivery_header(header, manifest, plane)
+    grid = metadata.pixel_grid()
+    measure, factor = sample_units(kind, grid)
     conversion = float(plane["photon_conversion"])
     if not np.isfinite(conversion) or conversion <= 0:
         raise ValueError("Photon conversion must be positive and known")
     if manifest["normalization"]["kind"] == "incident_photon" and conversion != 1:
         raise ValueError("Incident photon normalization requires photon_conversion=1")
-    if measure == "mean":
-        conversion *= float(np.prod(manifest["pixel_scale_lod_xy"]))
+    # The status ledger and error policy are expressed in fractions per pixel.
+    if measure == Measure.density("grid"):
+        conversion *= grid.cell_area("grid")
     if not np.isfinite(conversion) or conversion <= 0:
         raise ValueError("Invalid pixel-area photon conversion")
     nodes = _native(package.offaxis_psfs if package else fits.getdata(psf_path))
@@ -413,19 +420,29 @@ def load_delivery(root, manifest, options, *, package=None):
                         required=True,
                     )
     independent = _independent_images(root, manifest, indices, tuple(nodes.shape[1:]))
+    if factor != 1.0:
+        # _native makes private, native-endian copies of the FITS data.
+        with np.errstate(over="raise", invalid="raise"):
+            try:
+                nodes *= factor
+                for image in independent.values():
+                    image *= factor
+            except FloatingPointError as err:
+                raise ValueError(
+                    "Decoded intensity exceeds the storage precision"
+                ) from err
     _validate_check_positions(manifest, canonical_origin, spacing, size)
     for record in manifest.get("checks", []):
         reference = record.get("local_peak_reference")
         if reference is not None and not (0 < reference / conversion < np.inf):
             raise ValueError("DATA_INVALID: unrepresentable local_peak_reference")
-    metadata = delivery_header(header, manifest, plane)
     return Delivery(
         root,
         manifest,
         file_sha256(root / "sinc-delivery.json"),
         plane,
         metadata,
-        metadata.pixel_grid(),
+        grid,
         nodes,
         offsets,
         (indices - lower).astype(np.int32),
@@ -433,6 +450,7 @@ def load_delivery(root, manifest, options, *, package=None):
         tuple(int(n) for n in size[::-1]),
         tolerance,
         residual,
+        measure,
         conversion,
         independent,
         _missing_metadata(manifest, plane),
@@ -484,7 +502,7 @@ def admit_delivery(delivery, options):
         ).hexdigest(),
         "monochromatic",
         delivery.manifest_sha256 + ":" + p["id"],
-        measure="per_pixel" if d["sample_kind"] == "integral" else "per_unit_area",
+        measure=delivery.measure,
     )
     lattice = sc.source_grid(
         delivery.origin_lod,

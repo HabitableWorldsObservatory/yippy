@@ -9,7 +9,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image, PixelGrid
+from hwoutils.grids import Image, Measure, PixelGrid
 from hwoutils.spectral import Band
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
 from optixstuff.coronagraph import (
@@ -29,6 +29,7 @@ from ._yip import _YIPData
 from .export import export_ayo_csv, export_exosims
 from .header import HeaderData
 from .interpolation import SincOptions
+from .sampling import fraction_image
 from .scene import DenseSceneOperator
 
 
@@ -217,13 +218,11 @@ class Coronagraph(AbstractTableCoronagraph):
         if hasattr(stellar_diam_lod, "unit"):
             raise TypeError("stellar_diam_lod must be floats in lambda/D")
         data = jnp.exp(self._stellar_ln_interp(stellar_diam_lod))
-        return Image(
+        return fraction_image(
             data,
             self.stellar_grid,
             tuple(f"diameter_{i}" for i in range(data.ndim - 2)),
-            "per_pixel",
-            "stellar_flux_fraction",
-            reconstruction="band_limited",
+            self._host.stellar_intens.measure,
             outside="reflect",
         )
 
@@ -242,13 +241,11 @@ class Coronagraph(AbstractTableCoronagraph):
         backend = self._offaxis_backend
         if hasattr(backend, "create_psfs_with_info"):
             read = backend.create_psfs_with_info(x, y)
-            image = Image(
+            image = fraction_image(
                 read.intensity,
                 self.grid,
                 ("source",),
-                "per_pixel",
-                "stellar_flux_fraction",
-                reconstruction="band_limited",
+                backend.measure,
             )
             return SourcePSFs(image, read.accepted)
         finite = jnp.isfinite(x) & jnp.isfinite(y)
@@ -386,8 +383,8 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
 
     def render_scene(self, scene, wavelength_nm, *, grid):
         """Sum native source-pixel flux through the operator and sample the detector."""
-        if scene.measure != "per_pixel" or scene.data.ndim != 2:
-            raise ValueError("scene must be a two-dimensional per_pixel Image")
+        if scene.measure != Measure.integral() or scene.data.ndim != 2:
+            raise ValueError("scene must be a two-dimensional cell-integral Image")
         flux = (
             scene.data if scene.grid == self.grid else _on_grid(scene, self.grid).data
         )
@@ -406,5 +403,7 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
                 data, valid = jnp.where(dark, 0.0, data), valid | dark
         else:
             data, valid = self.operator.render(flux, self.grid)
-        image = Image(data, self.grid, (), "per_pixel", scene.quantity)
+        image = fraction_image(
+            data, self.grid, (), self._offaxis_backend.measure, quantity=scene.quantity
+        )
         return SceneRender(_on_grid(image, grid), valid)

@@ -16,7 +16,7 @@ package instead, in ``test_analytic_yip.py``.
 import astropy.io.fits as pyfits
 import numpy as np
 import pytest
-from hwoutils.grids import PixelGrid
+from hwoutils.grids import Measure, PixelGrid
 from lod_unit import lod
 
 # The off-axis PSFs are normalized so that a source far outside the mask
@@ -76,7 +76,9 @@ def test_the_off_axis_normalization_is_the_recorded_one(shipped_coro):
     for separation in FAR_FIELD_SEPARATIONS_LOD:
         total = float(
             np.asarray(
-                shipped_coro._offaxis_backend(separation * lod, 0.0 * lod).data
+                shipped_coro._offaxis_backend(separation * lod, 0.0 * lod)
+                .integrated()
+                .data
             ).sum()
         )
         assert total == pytest.approx(FAR_FIELD_PSF_SUM, rel=FAR_FIELD_TOL), (
@@ -94,7 +96,11 @@ def test_the_far_field_normalization_has_actually_plateaued(shipped_coro):
     makes the constant a property of the package.
     """
     sums = [
-        float(np.asarray(shipped_coro._offaxis_backend(s * lod, 0.0 * lod).data).sum())
+        float(
+            np.asarray(
+                shipped_coro._offaxis_backend(s * lod, 0.0 * lod).integrated().data
+            ).sum()
+        )
         for s in FAR_FIELD_SEPARATIONS_LOD
     ]
     spread = (max(sums) - min(sums)) / np.mean(sums)
@@ -258,20 +264,28 @@ def test_public_images_carry_header_grid(syn_coro_1d):
             jnp.array([1.0]), jnp.array([0.0])
         ).image,
         eqx.filter_jit(lambda d: coro.stellar_map(None, d))(0.1),
-        rendered_source,
-        rendered_star,
     ]
-    for image in images:
+    for image in [*images, rendered_source, rendered_star]:
         assert isinstance(image, Image)
         assert image.grid == grid
         assert image.data.shape[-2:] == grid.shape
         assert len(image.leading_axes) == image.data.ndim - 2
-        assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
+        expected_measure = (
+            Measure.density("grid") if image in images else Measure.integral()
+        )
+        assert (image.measure, image.quantity) == (
+            expected_measure,
+            "stellar_flux_fraction",
+        )
         assert image.reconstruction == "band_limited"
+    np.testing.assert_array_equal(
+        coro.sky_trans.data,
+        np.asarray(coro.package.sky_transmission, dtype=coro.sky_trans.data.dtype),
+    )
     for image in (coro.sky_trans, coro.uniform_sky_map(None, grid=grid)):
         assert isinstance(image, Image) and image.grid == grid
         assert image.data.shape == grid.shape
-        assert (image.measure, image.quantity) == ("per_unit_area", "transmission")
+        assert (image.measure, image.quantity) == (Measure.intensive(), "transmission")
         assert image.reconstruction == "linear"
         assert image.outside == "reflect"
     # Stellar halos continue past the field; off-axis PSFs vanish outside it.
@@ -286,7 +300,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         coro.stellar_map(None, 0.1, grid=coarse),
     ):
         assert image.reconstruction == "linear"
-    actual = np.asarray(native_source.data)
+    actual = np.asarray(native_source.integrated().data)
     flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
     expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
     np.testing.assert_allclose(

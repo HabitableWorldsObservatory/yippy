@@ -15,6 +15,7 @@ def write_synthetic_yip(path, *, grid, offsets_xy_lod, psfs, stellar, sky, heade
         path,
         {
             "grid": grid,
+            "sample_kind": "point",
             "headers": headers,
             "offsets_xy_lod": offsets_xy_lod,
             "offaxis_psfs": psfs,

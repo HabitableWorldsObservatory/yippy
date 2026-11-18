@@ -56,8 +56,10 @@ develop/_changelog.md
 `optixstuff.AbstractTableCoronagraph`. Supply aperture rules at construction,
 select records with `coro.curves(rule)`, and query images through
 `source_psfs(None, x_lod, y_lod, grid=None).image` or
-`stellar_map(None, diameter_lod, grid=None)`. Native samples retain their product
-grid. Source reads include one validity flag per position. Explicit target grids request pixel integration.
+`stellar_map(None, diameter_lod, grid=None)`. Native images carry their product grid and sampling measure. Point samples
+carry density per square grid unit. Call `image.integrated()` for midpoint
+photon fractions per pixel. Explicit target grids request pixel integration.
+Source reads include one validity flag per position.
 
 Aperture rules and generic photometry belong to optixstuff:
 `optixstuff.Circular`, `HalfMaximum`, `Matched`, `PerformanceCurves`, and

@@ -131,7 +131,7 @@ def write_delivery(root, *, full=False):
         "detector_convention": "pixel_midpoint_v1",
         "pixel_scale_lod_xy": [0.25, 0.25],
         "pixel_scale_arcsec_xy": [(0.25 * (500e-9 / 6.0)) * (180 * 3600 / np.pi)] * 2,
-        "sample_kind": "integral",
+        "sample_kind": "point",
         "pixel_response": "uniform square",
         "instrument_to_sky": None,
         "normalization": {"kind": "incident_photon", "source_independent": True},

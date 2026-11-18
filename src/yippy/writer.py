@@ -7,12 +7,13 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 from astropy.io import fits
-from hwoutils.grids import Image
+from hwoutils.grids import Image, Measure
 
 from .header import HeaderData
 from .package import YIPPackage
 from .schema import PRODUCT_FILES, WRITE_LOCK
 
+_INTENSITY_PRODUCTS = ("offaxis_psfs", "stellar_intensity")
 _IMAGE_AXES = {"offaxis_psfs": 3, "stellar_intensity": 3, "sky_transmission": 2}
 
 
@@ -80,14 +81,38 @@ def _array_hdu(arrays, product):
         grid = arrays.get("grid")
         if isinstance(grid, Mapping):
             grid = grid[product]
+    declared = (cards or {}).get("SAMPKIND")
+    sample_kind = arrays.get("sample_kind", declared)
+    if (
+        product in _INTENSITY_PRODUCTS
+        and declared is not None
+        and sample_kind != declared
+    ):
+        raise ValueError("SAMPKIND conflicts with the declared sample_kind")
     if isinstance(data, Image):
-        grid, data = data.grid, data.data
+        grid = data.grid
+        if product in _INTENSITY_PRODUCTS:
+            inferred = "integral" if data.measure == Measure.integral() else "point"
+            if data.measure == Measure.intensive() or (
+                sample_kind is not None and sample_kind != inferred
+            ):
+                raise ValueError("Image measure conflicts with YIP intensity sampling")
+            sample_kind = inferred
+            data = data.integrated()
+        elif product == "sky_transmission" and data.measure != Measure.intensive():
+            raise ValueError("sky transmission must be intensive")
+        data = data.data
     data = np.asarray(data)
     if grid is not None and data.shape[-2:] != grid.shape:
         raise ValueError(f"{product} data shape disagrees with its grid")
     header = fits.Header() if grid is None else yip_header(grid)
     if cards is not None:
         header.update(cards)
+    if product in _INTENSITY_PRODUCTS:
+        header["SAMPKIND"] = (
+            "point" if sample_kind is None else sample_kind,
+            "detector intensity sampling",
+        )
     return fits.PrimaryHDU(data, header or None)
 
 
@@ -185,7 +210,9 @@ def write_yip(path: str | Path, package_or_arrays: YIPPackage | Mapping) -> Path
     names to either. Explicit cards override grid defaults. A 1D offset list
     denotes a radial product. Existing unrelated files are retained.
 
-    Re-emitting a native package preserves its original FITS bytes. A versioned
+    Native intensity products record their sampling in SAMPKIND. Raw arrays
+    default to point samples times cell area. A typed density Image is
+    encoded in that convention and a cell integral Image is stored directly. A versioned
     sinc delivery is copied with its manifest and supporting files to a new
     or empty directory. Reopen a multi-plane copy with the desired product ID.
     """
@@ -207,7 +234,18 @@ def write_yip(path: str | Path, package_or_arrays: YIPPackage | Mapping) -> Path
             package = package_or_arrays
             package._check_source()
             for product, filename in PRODUCT_FILES.items():
-                copyfile(package._files[product], staging / filename)
+                target = staging / filename
+                copyfile(package._files[product], target)
+                if (
+                    product in _INTENSITY_PRODUCTS
+                    and "SAMPKIND" not in package.fits_header(product)
+                ):
+                    fits.setval(
+                        target,
+                        "SAMPKIND",
+                        value="point",
+                        comment="detector intensity sampling",
+                    )
             package._check_source()
         _validate_products(staging)
         _publish(staging, path)

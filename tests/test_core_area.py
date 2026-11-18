@@ -291,7 +291,9 @@ def test_shipped_core_area_matches_the_band_limited_psf(
         fourier_upsampled_core(
             coro._offaxis_backend.get_psf_by_offset_idx(
                 int(np.flatnonzero(nodes == s)[0]), int(np.argmin(np.abs(y_offsets)))
-            ).data,
+            )
+            .integrated()
+            .data,
             pixel_lod,
             SHIPPED_RATIO,
             factor=8,
@@ -395,7 +397,9 @@ def test_shipped_core_throughput_matches_the_band_limited_psf(
         fourier_upsampled_core(
             coro._offaxis_backend.get_psf_by_offset_idx(
                 int(np.flatnonzero(nodes == s)[0]), int(np.argmin(np.abs(y_offsets)))
-            ).data,
+            )
+            .integrated()
+            .data,
             pixel_lod,
             SHIPPED_RATIO,
             factor=8,
@@ -530,7 +534,7 @@ def test_shipped_core_matches_a_quintic_spline_reference(
 
     coro = shipped_trunc_coro
     pixel_lod = float(coro.grid.step)
-    psf = coro.off_axis_psf(None, separation_lod, grid=None).data
+    psf = coro.off_axis_psf(None, separation_lod, grid=None).integrated().data
     t_ref, a_ref = quintic_spline_core(psf, pixel_lod, SHIPPED_RATIO)
     t_got, a_got = truncation_core(
         jnp.asarray(psf),
@@ -550,7 +554,9 @@ def test_core_converges_in_subpixels(shipped_trunc_coro, separation_lod):
 
     coro = shipped_trunc_coro
     pixel_lod = float(coro.grid.step)
-    psf = jnp.asarray(coro.off_axis_psf(None, separation_lod, grid=None).data)
+    psf = jnp.asarray(
+        coro.off_axis_psf(None, separation_lod, grid=None).integrated().data
+    )
     half = core_window_half_width_pix(pixel_lod)
     t10, a10 = truncation_core(
         psf, SHIPPED_RATIO, pixel_lod, oversample=10, half_width_pix=half

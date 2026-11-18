@@ -1,7 +1,7 @@
 """This module handles the sky transmission map."""
 
 import numpy as np
-from hwoutils.grids import Image
+from hwoutils.grids import Image, Measure
 
 
 def sky_transmission_image(package) -> Image:
@@ -10,7 +10,7 @@ def sky_transmission_image(package) -> Image:
         np.asarray(package.sky_transmission, dtype=float),
         package.header.sky_transmission.pixel_grid(),
         (),
-        "per_unit_area",
+        Measure.intensive(),
         "transmission",
         reconstruction="linear",
         outside="reflect",
