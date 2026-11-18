@@ -55,9 +55,9 @@ develop/_changelog.md
 `yippy.open_yip(path).prepare(rules=(...))` directly implements
 `optixstuff.AbstractTableCoronagraph`. Supply aperture rules at construction,
 select records with `coro.curves(rule)`, and query images through
-`source_psfs(None, x_lod, y_lod, grid=None)` or
+`source_psfs(None, x_lod, y_lod, grid=None).image` or
 `stellar_map(None, diameter_lod, grid=None)`. Native samples retain their product
-grid; explicit target grids request pixel integration.
+grid. Source reads include one validity flag per position. Explicit target grids request pixel integration.
 
 Aperture rules and generic photometry belong to optixstuff:
 `optixstuff.Circular`, `HalfMaximum`, `Matched`, `PerformanceCurves`, and

@@ -222,11 +222,11 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     )
     native_star = coro.stellar_map(None, 0.1, grid=None)
     native_source = coro.off_axis_psf(None, 1.0, None)
-    batch_source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]))
-    aperture_samples = coro.aperture_psfs(None, coro.curves().separation_lod)
+    batch_source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0])).image
+    aperture_samples = coro.aperture_samples(None, coro.curves().separation_lod)
     knot = np.flatnonzero(np.asarray(coro.curves().separation_lod) == 1.0)[0]
     np.testing.assert_array_equal(
-        aperture_samples.data[knot],
+        aperture_samples[knot][0].data,
         coro._offaxis_backend.get_psf_by_offset_idx(2, 0).data,
     )
     batch_star = coro.stellar_map(None, jnp.array([0.0, 0.1]))
@@ -242,7 +242,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert not hasattr(product, "center_y")
     rendered_source = coro.source_psfs(
         None, jnp.array([1.0]), jnp.array([0.0]), grid=grid
-    )
+    ).image
     rendered_star = coro.stellar_map(None, 0.1, grid=grid)
     images = [
         numpy_reader.get_psf_by_offset_idx(2, 0),
@@ -250,13 +250,13 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         coro._offaxis_backend(1.0 * lod, 0.0 * lod),
         coro._offaxis_backend.get_psf_by_offset_idx(2, 0),
         batch_source,
-        aperture_samples,
+        aperture_samples[knot][0],
         coro._offaxis_backend.create_psfs_parallel(jnp.array([1.0]), jnp.array([0.0])),
         native_star,
         batch_star,
         eqx.filter_jit(lambda x, y: coro.source_psfs(None, x, y))(
             jnp.array([1.0]), jnp.array([0.0])
-        ),
+        ).image,
         eqx.filter_jit(lambda d: coro.stellar_map(None, d))(0.1),
         rendered_source,
         rendered_star,
@@ -268,7 +268,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert len(image.leading_axes) == image.data.ndim - 2
         assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
         assert image.reconstruction == "band_limited"
-    for image in (coro.sky_trans, coro.background_transmission(None, grid=grid)):
+    for image in (coro.sky_trans, coro.uniform_sky_map(None, grid=grid)):
         assert isinstance(image, Image) and image.grid == grid
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == ("per_unit_area", "transmission")
@@ -282,7 +282,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
     for image in (
-        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse),
+        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse).image,
         coro.stellar_map(None, 0.1, grid=coarse),
     ):
         assert image.reconstruction == "linear"

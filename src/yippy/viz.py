@@ -21,7 +21,7 @@ _METRICS = {
     "leakage_fraction": ("Stellar leakage fraction", True),
     "leakage_density_lod2": (r"Stellar leakage density [$(\lambda/D)^{-2}$]", True),
     "raw_contrast": ("Raw contrast", True),
-    "occulter_transmission": ("Occulter transmission", False),
+    "uniform_sky_response": ("Uniform sky response", False),
     "stellar_ring_mean_per_pixel": (
         "Stellar ring mean [stellar flux fraction / pixel]",
         True,

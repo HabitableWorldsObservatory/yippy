@@ -1,7 +1,7 @@
 """Immutable YIP tables implementing the shared coronagraph contract."""
 
 from copy import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 from math import pi
 
 import equinox as eqx
@@ -9,18 +9,27 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Frame, Image, PixelGrid
+from hwoutils.grids import Image, PixelGrid
 from hwoutils.spectral import Band
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
-from optixstuff.coronagraph import AbstractTableCoronagraph
+from optixstuff.coronagraph import (
+    AbstractSceneCoronagraph,
+    AbstractTableCoronagraph,
+    ProductGrids,
+    SceneRender,
+    SourcePSFs,
+    _on_grid,
+)
 from optixstuff.performance import PerformanceCurves, SampledProfile, leakage_weights
 from optixstuff.primary import SimplePrimary
+from sinchole import PrefilteredReader, SceneRenderer
 
 from ._precision import float_dtype
 from ._yip import _YIPData
 from .export import export_ayo_csv, export_exosims
 from .header import HeaderData
-from .interpolation import SincOptions, blend_read
+from .interpolation import SincOptions
+from .scene import DenseSceneOperator
 
 
 def _jax_record(record):
@@ -66,7 +75,6 @@ class Coronagraph(AbstractTableCoronagraph):
     grid: PixelGrid
     stellar_grid: PixelGrid
     sky_trans: Image
-    psf_datacube: object
     header: HeaderData = eqx.field(static=True)
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
@@ -75,7 +83,7 @@ class Coronagraph(AbstractTableCoronagraph):
     _stellar_ln_interp: interpax.CubicSpline
     _records: tuple[PerformanceCurves, ...]
     _leakage_operators: tuple
-    occulter_transmission_profile: SampledProfile
+    uniform_sky_profile: SampledProfile
     _host: _YIPData = eqx.field(static=True)
 
     @property
@@ -150,11 +158,8 @@ class Coronagraph(AbstractTableCoronagraph):
             )
             for record in self._records
         )
-        self.occulter_transmission_profile = _jax_record(
-            host.occulter_transmission_profile
-        )
+        self.uniform_sky_profile = _jax_record(host.uniform_sky_profile)
         self.sky_trans = host.sky_trans
-        self.psf_datacube = None
 
     @property
     def primary(self):
@@ -204,9 +209,9 @@ class Coronagraph(AbstractTableCoronagraph):
                 return weights
         raise ValueError("No prepared stellar-map weights for this rule")
 
-    def stellar_frame(self, wavelength_nm) -> Frame:
-        """Return the frame of the native stellar intensity product."""
-        return self.stellar_grid.frame
+    def at_wavelength(self, wavelength_nm) -> ProductGrids:
+        """Return the three recorded native grids for this fixed YIP product."""
+        return ProductGrids(self.grid, self.stellar_grid, self.sky_trans.grid)
 
     def _native_stellar_map(self, stellar_diam_lod):
         if hasattr(stellar_diam_lod, "unit"):
@@ -222,68 +227,39 @@ class Coronagraph(AbstractTableCoronagraph):
             outside="reflect",
         )
 
-    def aperture_psfs(self, wavelength_nm, separations_lod) -> Image:
-        """Stack PSFs selected or interpolated for this aperture record."""
-        samples = _aperture_samples(
+    def aperture_samples(self, wavelength_nm, separations_lod):
+        """Return calibration images paired with their measured source offsets."""
+        return _aperture_samples(
             self._offaxis_backend, separations_lod, self._offaxis_backend.create_psf
-        )
-        return replace(
-            samples[0][0],
-            data=jnp.stack([image.data for image, _ in samples]),
-            leading_axes=("source",),
         )
 
     def _native_source_psfs(self, x_lod, y_lod):
         if hasattr(x_lod, "unit") or hasattr(y_lod, "unit"):
             raise TypeError("source coordinates must be floats in lambda/D")
-        if (
-            not self.interpolation_info.manifest_sha256
-            and self.interpolation_info.requested == "auto"
-        ):
-            return Image(
-                self.source_psfs_with_info(x_lod, y_lod).intensity,
+        x, y = jnp.atleast_1d(jnp.asarray(x_lod)), jnp.atleast_1d(jnp.asarray(y_lod))
+        if x.ndim != 1 or x.shape != y.shape:
+            raise ValueError("Coordinates must be equal-length vectors")
+        backend = self._offaxis_backend
+        if hasattr(backend, "create_psfs_with_info"):
+            read = backend.create_psfs_with_info(x, y)
+            image = Image(
+                read.intensity,
                 self.grid,
                 ("source",),
                 "per_pixel",
                 "stellar_flux_fraction",
                 reconstruction="band_limited",
             )
-        return self._offaxis_backend.create_psfs(
-            jnp.atleast_1d(jnp.asarray(x_lod)), jnp.atleast_1d(jnp.asarray(y_lod))
+            return SourcePSFs(image, read.accepted)
+        finite = jnp.isfinite(x) & jnp.isfinite(y)
+        image = backend.create_psfs(
+            jnp.where(finite, x, 0.0), jnp.where(finite, y, 0.0)
         )
-
-    def source_psfs_with_info(self, x_lod, y_lod):
-        """Interpolated source PSFs with admission status and backend diagnostics.
-
-        Unlike source_psfs, this returns InterpolationRead diagnostics, whose
-        intensity has shape (source, y, x), on the native grid only.
-        """
-        if hasattr(x_lod, "unit") or hasattr(y_lod, "unit"):
-            raise TypeError("source coordinates must be floats in lambda/D")
-        x_lod, y_lod = (
-            jnp.atleast_1d(jnp.asarray(x_lod)),
-            jnp.atleast_1d(jnp.asarray(y_lod)),
+        valid = finite & jnp.all(jnp.isfinite(image.data), axis=(-1, -2))
+        return SourcePSFs(
+            replace(image, data=jnp.where(valid[:, None, None], image.data, jnp.nan)),
+            valid,
         )
-        backend = self._offaxis_backend
-        if hasattr(backend, "create_psfs_with_info"):
-            return backend.create_psfs_with_info(x_lod, y_lod)
-
-        def one(x, y):
-            finite = jnp.isfinite(x) & jnp.isfinite(y)
-            image = backend.create_psf(
-                jnp.where(finite, x, 0.0), jnp.where(finite, y, 0.0)
-            )
-            info = self.interpolation_info
-            reasons = (
-                (1 << 21)
-                if "EXTRA_MISSING" in info.reasons
-                else ((1 << 0) if "LAYOUT_UNSUPPORTED" in info.reasons else 0)
-            )
-            return blend_read(
-                image.data, finite, reasons, fallback=info.requested == "auto"
-            )
-
-        return jax.vmap(one)(x_lod, y_lod)
 
     def with_rules(self, rules, *, leakage_rule=None):
         """Return this coronagraph with a different set of prepared aperture rules.
@@ -326,21 +302,39 @@ class Coronagraph(AbstractTableCoronagraph):
         host.offax = self._offaxis_backend
         return host
 
-    def create_psf_datacube(self, batch_size=128):
-        """Return a new coronagraph with a cached PSF cube for extended scenes.
+    def with_scene_operator(self, *, batch_size=128):
+        """Prepare a scene renderer for this model on its native source grid.
 
-        Assign the returned module: coro = coro.create_psf_datacube(). Loading
-        and cache writes happen on the host, outside JAX transformations.
+        Admitted prefiltered products render from their coefficient table.
+        Other interpolation modes cache dense PSFs with per-source admission.
         """
-        record = self._records[0]
-        host = self._host_for_rule(record.rule, record.leakage_rule)
-        host.create_psf_datacube(batch_size)
-        return eqx.tree_at(
-            lambda c: c.psf_datacube,
-            self,
-            jnp.asarray(host.psf_datacube),
-            is_leaf=lambda x: x is None,
-        )
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        backend = self._offaxis_backend
+        reader = getattr(backend, "reader", None)
+        if isinstance(reader, PrefilteredReader) and backend.blend_nodes is None:
+            x, y = self.grid.coordinates()
+            operator = SceneRenderer.from_raster(reader, 0, x[0], y[:, 0])
+        else:
+            record = self._records[0]
+            host = self._host_for_rule(record.rule, record.leakage_rule)
+            # Signed tables and permission regions can break mirror symmetry.
+            host.use_quarter_psf_datacube = (
+                host.use_quarter_psf_datacube
+                and backend.type in ("1d", "2dq")
+                and host.x_symmetric
+                and host.y_symmetric
+                and self.grid.is_geometric
+            )
+            host._prepare_dense_psfs(batch_size)
+            cube = jnp.asarray(host.psf_datacube)
+            valid = (
+                host.psf_datacube_info["accepted"]
+                if host._sinc_delivery is not None
+                else jnp.ones(cube.shape[:2], dtype=bool)
+            )
+            operator = DenseSceneOperator(cube, valid)
+        return SceneCoronagraph(self, operator)
 
     def to_exosims(self, units="LAMBDA/D", *, separations_lod=None, output_dir=None):
         """Export the first prepared record to EXOSIMS FITS tables."""
@@ -377,3 +371,40 @@ class Coronagraph(AbstractTableCoronagraph):
             f"Coronagraph({self.package.source.path.name!r}, grid={self.grid.shape}, "
             f"rules={len(self._records)})"
         )
+
+
+class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
+    """YIP imaging model with a prepared native scene operator."""
+
+    operator: DenseSceneOperator | SceneRenderer
+
+    def __init__(self, model, operator):
+        """Reuse the prepared imaging tables and bind the chosen operator."""
+        for field in fields(Coronagraph):
+            setattr(self, field.name, getattr(model, field.name))
+        self.operator = operator
+
+    def render_scene(self, scene, wavelength_nm, *, grid):
+        """Sum native source-pixel flux through the operator and sample the detector."""
+        if scene.measure != "per_pixel" or scene.data.ndim != 2:
+            raise ValueError("scene must be a two-dimensional per_pixel Image")
+        flux = (
+            scene.data if scene.grid == self.grid else _on_grid(scene, self.grid).data
+        )
+        if isinstance(self.operator, SceneRenderer):
+            x, y = self.grid.coordinates()
+            read = self.operator.render_raster(
+                jnp.asarray(flux, jnp.float64), x[0], y[:, 0]
+            )
+            data, valid = (
+                read.intensity * self._offaxis_backend.conversion,
+                read.accepted,
+            )
+            if self.operator.reader.policy.mode == "bounded":
+                # A dark raster is exactly zero without making a bounded PSF read.
+                dark = jnp.all(flux == 0)
+                data, valid = jnp.where(dark, 0.0, data), valid | dark
+        else:
+            data, valid = self.operator.render(flux, self.grid)
+        image = Image(data, self.grid, (), "per_pixel", scene.quantity)
+        return SceneRender(_on_grid(image, grid), valid)

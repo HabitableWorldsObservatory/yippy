@@ -59,12 +59,12 @@ result.ax.set_title("Synthetic raw contrast")
 plt.show()
 ```
 
-The occulter transmission profile carries its sampled radii and quantity.
+The annular mean uniform-sky response carries its sampled radii and quantity.
 
 ```{code-cell} python
 transmission = SampledProfile(
     separations, 1 - np.exp(-separations**2 / 4),
-    quantity="occulter_transmission", frame=curves.frame, interpolation="linear",
+    quantity="uniform_sky_response", frame=curves.frame, interpolation="linear",
 )
 result = viz.plot_performance_curve(transmission)
 plt.show()

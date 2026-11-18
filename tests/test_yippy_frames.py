@@ -32,7 +32,7 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
     wrong = resample(replace(stellar, grid=backend.grid), target)
     assert not np.allclose(expected.data, wrong.data, atol=0.0, rtol=1e-3)
     np.testing.assert_array_equal(
-        coro.background_transmission(500.0, grid=target).data,
+        coro.uniform_sky_map(500.0, grid=target).data,
         resample(sky, target).data,
     )
     # A different physical diameter and reference wavelength define another lod.
@@ -72,10 +72,10 @@ def test_shared_frame_bit_equality(cached_diameter_coro):
     g = c.grid
     for actual, expected in [
         (c.stellar_map(500.0, 0.1, grid=g), c.stellar_map(None, 0.1)),
-        (c.background_transmission(500.0, grid=g), c.sky_trans),
+        (c.uniform_sky_map(500.0, grid=g), c.sky_trans),
         (
-            c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=g),
-            c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=None),
+            c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=g).image,
+            c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=None).image,
         ),
     ]:
         assert isinstance(actual, Image)

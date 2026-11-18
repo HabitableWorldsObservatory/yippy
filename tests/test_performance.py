@@ -110,7 +110,7 @@ class TestOccTransCurve:
         expected = np.bincount(index, weights=image.ravel()) / np.bincount(index)
         nodes = (bins[:-1] + bins[1:]) / 2 * grid.step
         queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
-        actual = coro.occulter_transmission(queries)
+        actual = coro.uniform_sky_response(queries)
         tol = 16 * np.finfo(np.asarray(coro.sky_trans.data).dtype).eps
         np.testing.assert_allclose(
             actual, PchipInterpolator(nodes, expected)(queries), rtol=tol

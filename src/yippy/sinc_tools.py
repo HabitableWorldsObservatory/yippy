@@ -19,8 +19,16 @@ from pathlib import Path
 
 import jax
 import numpy as np
+import sinchole as sc
 from hwoutils.constants import m2nm
-from sinchole import MIRROR_TOLERANCE, KernelProfile
+from sinchole import (
+    MIRROR_TOLERANCE,
+    KernelProfile,
+    plan_cell_checks,
+    plan_mirror_bases,
+    plan_radial_checks,
+    plan_sampling,
+)
 
 from .interpolation import SincOptions
 from .sinc_delivery import (
@@ -185,7 +193,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
         not raise.
 
     Raises:
-        SincToolsError: If ``path`` holds no sinc delivery or sinchole is missing.
+        SincToolsError: If ``path`` holds no sinc delivery.
     """
     root = Path(path)
     try:
@@ -194,15 +202,6 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
         return _failed(f"unreadable manifest: {error}", product_id)
     if manifest is None:
         raise SincToolsError(f"no sinc-delivery.json in {root}")
-    try:
-        import sinchole as sc
-    except ModuleNotFoundError as error:
-        if error.name != "sinchole":
-            raise
-        raise SincToolsError(
-            "install yippy[sinc] to validate a sinc delivery"
-        ) from error
-
     options = SincOptions(product_id=product_id)
     try:
         delivery = load_delivery(root, manifest, options)
@@ -210,7 +209,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
         message = str(error) or type(error).__name__
         return _failed(message, product_id)
     plane = delivery.plane
-    ratios = delivery_ratios(delivery, sc)
+    ratios = delivery_ratios(delivery)
     rho = tuple(max(ratios[axis::2]) for axis in range(2)) if ratios else None
     failures, notes = [], list(_outer_edge_notes(delivery))
     if campaign_sampling_failed(delivery):
@@ -222,7 +221,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
     if not failures:
         with jax.enable_x64(True):
             try:
-                admission, _, _ = admit_delivery(delivery, options, sc)
+                admission, _, _ = admit_delivery(delivery, options)
                 receipt = admission.receipt
                 reasons = sc.reason_names(admission.reason_bits)
                 admitted = admission.admitted
@@ -428,13 +427,6 @@ def plan(
         limit = (limit[0], limit[0])
     if check_layout not in ("radius", "cell"):
         raise SincToolsError("check layout must be radius or cell")
-    from sinchole import (
-        plan_cell_checks,
-        plan_mirror_bases,
-        plan_radial_checks,
-        plan_sampling,
-    )
-
     try:
         spacing, rho, cells, (nx, ny) = plan_sampling(
             lambda0_m * m2nm,

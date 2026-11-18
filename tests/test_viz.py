@@ -131,7 +131,7 @@ def test_viz_records_arrays_and_axes(curves):
         transmission = SampledProfile(
             [0.0, 2.0],
             [0.0, 1.0],
-            quantity="occulter_transmission",
+            quantity="uniform_sky_response",
             frame=curves.frame,
             interpolation="linear",
         )
@@ -173,7 +173,7 @@ def test_viz_records_arrays_and_axes(curves):
         for args, kw in (
             ((curves,), {"metric": "invalid"}),
             ((curves, [1, 2]), {}),
-            ((curves,), {"metric": "occulter_transmission"}),
+            ((curves,), {"metric": "uniform_sky_response"}),
             (([0, 2],), {}),
         ):
             with pytest.raises(ValueError):

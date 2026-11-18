@@ -513,7 +513,7 @@ def _small_2dq(tmp_path, name, **kwargs):
 
 
 def _cube(coro):
-    coro.create_psf_datacube()
+    coro._prepare_dense_psfs()
     return np.asarray(coro.psf_datacube)
 
 
@@ -523,7 +523,7 @@ def test_datacube_warning_names_1d_sampling_only(tmp_path, caplog, kind, warned)
     path = _yip(tmp_path, f"warn_{kind}", kind=kind, npix=16, max_offset_lod=2.0)
     coro = _YIPData(open_yip(path))
     with caplog.at_level("WARNING", logger="yippy"):
-        coro.create_psf_datacube()
+        coro._prepare_dense_psfs()
     assert any("not rotated" in r.getMessage() for r in caplog.records) is warned
 
 
@@ -572,7 +572,7 @@ def test_gpu_path_loads_the_cpu_entry(tmp_path, monkeypatch):
         raise AssertionError("cube was regenerated")
 
     monkeypatch.setattr(other.offax, "create_psfs", fail)
-    other._create_psf_datacube_gpu()
+    other._prepare_dense_psfs_gpu()
     assert_allclose(np.asarray(other.psf_datacube), expected, rtol=0, atol=0)
 
 

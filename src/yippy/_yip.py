@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.grids import Image
-from hwoutils.radial import radial_profile
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, RecordRule
 from optixstuff.performance import (
@@ -17,6 +16,7 @@ from optixstuff.performance import (
     SampledProfile,
     performance_curves,
 )
+from sinchole import Reason
 from tqdm import tqdm
 
 from ._precision import dtype_tag, float_dtype
@@ -234,9 +234,7 @@ class _YIPData:
         )
         info = self.interpolation_info
         reasons = (
-            (1 << 21)
-            if "EXTRA_MISSING" in info.reasons
-            else ((1 << 0) if "LAYOUT_UNSUPPORTED" in info.reasons else 0)
+            Reason.LAYOUT_UNSUPPORTED if "LAYOUT_UNSUPPORTED" in info.reasons else 0
         )
         return blend_read(
             image.data, finite, reasons, fallback=info.requested == "auto"
@@ -254,16 +252,7 @@ class _YIPData:
 
     def _initialize_profiles(self):
         """Measure radial transmission on the ancillary product's native grid."""
-        sky = self.sky_trans
-        separation, values, counts = radial_profile(sky)
-        populated = np.asarray(counts) > 0
-        self.occulter_transmission_profile = SampledProfile(
-            np.asarray(separation)[populated],
-            np.asarray(values)[populated],
-            quantity="occulter_transmission",
-            frame=sky.grid.frame,
-            interpolation="linear",
-        )
+        self.uniform_sky_profile = SampledProfile.from_uniform_sky(self.sky_trans)
 
     def _datacube_offsets(self):
         """Source (x, y) offsets on the native grid, optionally its positive quarter.
@@ -287,7 +276,7 @@ class _YIPData:
             indexing="xy",
         )
 
-    def create_psf_datacube(self, batch_size=128):
+    def _prepare_dense_psfs(self, batch_size=128):
         """Load the PSF datacube from a file or generate it if it doesn't exist.
 
         The PSF datacube has axes (source_y, source_x, y, x).
@@ -310,7 +299,7 @@ class _YIPData:
             )
         backend = jax.default_backend().lower()
         if backend in ("gpu", "tpu"):
-            return self._create_psf_datacube_gpu(batch_size=batch_size)
+            return self._prepare_dense_psfs_gpu(batch_size=batch_size)
         ext = "_quarter" if self.use_quarter_psf_datacube else ""
         datacube_path = self._datacube_cache_path
         cached = _load_cached_datacube(datacube_path)
@@ -455,7 +444,7 @@ class _YIPData:
         self.psf_datacube, self.psf_datacube_info = jnp.asarray(cube), diagnostics
         self.has_psf_datacube = True
 
-    def _create_psf_datacube_gpu(self, batch_size=128):
+    def _prepare_dense_psfs_gpu(self, batch_size=128):
         """Generate PSF datacube on GPU/TPU, transferring each batch to host.
 
         Uses vmap+jit (``offax.create_psfs``) instead of shard_map to avoid

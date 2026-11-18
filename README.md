@@ -45,12 +45,12 @@ native_xy_lod = package.offsets_xy_lod[0]
 coro = package.prepare(rules=(circle, core))
 
 # Model PSFs evaluated at the requested positions, on the native pixel grid.
-planet = coro.source_psfs(None, [2.0], [5.0], grid=None)
+planet, valid = coro.source_psfs(None, [2.0], [5.0], grid=None)
 star = coro.stellar_map(None, 0.01, grid=None)
 
 # Explicit target grids request pixel integrals, including at native pitch.
 rendered = coro.off_axis_psf(None, 5.0, coro.grid)
-transmission = coro.background_transmission(None, grid=coro.grid)
+transmission = coro.uniform_sky_map(None, grid=coro.grid)
 
 record = coro.curves(circle)
 throughput = coro.throughput(5.0, rule=circle)
@@ -84,13 +84,14 @@ Pass the same `leakage_rule` to `curves` and scalar queries for that record.
 
 ## Images, grids, and JAX
 
-Every image query returns `hwoutils.grids.Image`, with array values in `.data`
-and geometry in `.grid`. Source arrays have leading axis `"source"`; stellar
-and sky maps are two-dimensional for scalar diameters. Source and stellar
+Images carry array values in `.data` and geometry in `.grid`.
+`source_psfs` returns an `Image` with leading axis `"source"` and a boolean
+validity vector. Stellar and sky maps are two-dimensional for scalar diameters.
+Source and stellar
 images are per-pixel fractions of unocculted stellar flux. Sky transmission is
 dimensionless and uses sampled-value semantics. The off-axis, stellar, and sky
-products carry separate grids. Model preparation requires matching off-axis and
-stellar grids for a five-file native YIP. A versioned sinc delivery can specify
+products carry separate grids, available from `coro.at_wavelength(wavelength_nm)`.
+Model preparation requires matching off-axis and stellar grids for a five-file native YIP. A versioned sinc delivery can specify
 its own off-axis grid. The sky map retains its own grid in both layouts.
 
 Use `grid=None` to evaluate the prepared model on its native pixel grid.
@@ -116,13 +117,13 @@ def simulate(coro, x_lod, y_lod, diameter_lod):
 planets, star = simulate(coro, jnp.array([3.0]), jnp.array([2.0]), 0.01)
 ```
 
-For extended-scene convolution, prepare a PSF datacube outside JIT and assign
-the returned model. The original module remains unchanged. Cubes can be large;
-choose the grid and available memory before preparing one.
+For an extended scene, prepare its operator outside JIT. Unsupported pixels
+may carry zero flux. An illuminated unsupported pixel sets the result validity
+to false.
 
 ```python notest
-coro = coro.create_psf_datacube()
-image = coro.extended_scene(scene_image, None, grid=detector_grid)
+coro = coro.with_scene_operator()
+image, valid = coro.render_scene(scene_image, None, grid=detector_grid)
 ```
 
 ## Performance records
@@ -148,7 +149,7 @@ and variance moments. For inverse-variance photometry, pass `Matched()` to
 Default records measure the shipped non-negative off-axis samples. For
 standalone aperture measurements on another separation axis, use
 `optixstuff.performance.performance_curves`. Its source callback returns a
-native two-dimensional `Image`; select the source axis from `source_psfs`
+native two-dimensional `Image`; select the source axis from `source_psfs(...).image`
 with `dataclasses.replace`, retaining the native grid and reconstruction.
 The prepared `coro.curves(rule)` records require no callback.
 
@@ -260,11 +261,10 @@ float64. Model construction and export perform host I/O; image and scalar
 queries support JAX transformations. Batch source positions through
 `source_psfs(None, x_lod_array, y_lod_array, grid=target)`.
 
-### Optional sampled-intensity reader
+### Sampled-intensity reader
 
-Install `yippy[sinc]` to read directories containing a `sinc-delivery.json`
-manifest with schema `sinc-delivery-0.1`. Enable JAX x64 before construction.
-The `sinchole` dependency must be available separately until its first release.
+For a directory with a `sinc-delivery-0.1` manifest, enable JAX x64 before
+preparing the sampled-intensity reader.
 
 ```python notest
 import jax
@@ -273,12 +273,10 @@ from yippy import open_yip
 jax.config.update("jax_enable_x64", True)
 package = open_yip("delivery", product_id="mono-000")
 coro = package.prepare(interpolation="sinc")
-image = coro.source_psfs(None, [4.0], [5.5], grid=None)
-result = coro.source_psfs_with_info([4.0], [5.5])
+image, valid = coro.source_psfs(None, [4.0], [5.5], grid=None)
 ```
 
-`blend` remains the default. Unmarked packages do not import sinchole;
-versioned deliveries require it for file-free validation even with blend.
+`blend` remains the default for unmarked packages.
 Unmarked packages retain their numerical and cache behavior. `auto` records its
 construction decision in the frozen `interpolation_info` record. It can use
 blend for supported sampling refusals on full signed grids. Quadrant deliveries
@@ -291,7 +289,7 @@ the schema unit, lambda0/D per pixel, and is compared numerically with the
 manifest. Explicit lambda/D or lod units also use that frame; recognized arcsec,
 mas, deg or rad units are converted before comparison. Nonempty unrecognized
 comments raise. All declarations, referenced hashes and independent-image indices
-are validated before precision, memory or optional-extra fallback decisions.
+are validated before precision or memory fallback decisions.
 Absent physical admission claims produce `METADATA_MISSING`; geometry and
 output-unit omissions remain data errors. A failed non-null campaign sampling
 minimum requires a revised manifest removing that claim. The adapter evaluates
@@ -299,18 +297,17 @@ that campaign test with the core's separate binary64 nm-frame arithmetic.
 
 Images contain incident photon fractions per pixel. Integral samples receive
 only their declared photon conversion; mean densities additionally receive the
-pixel area. Sinc output retains signed excursions. With-info reads expose status,
-reason bits, converted error diagnostics and a `selected_backend` value of 0
-(blend) or 1 (sinc). Sampling admission permits unknown error; bounded policies
-refuse. Eager strict reads raise on refusal, while compiled reads return NaNs.
+pixel area. Sinc output retains signed excursions. Each source read returns an
+image and a validity flag. Refused positions carry NaN pixels in eager and
+compiled reads.
 
 The model selects one monochromatic product and reads stellar and sky data
 from the manifest's separate package. Each `Image` carries its own `PixelGrid`
 and wavelength/diameter `Frame`. `source_psfs`, `stellar_map`, and
-`background_transmission` accept explicit target grids and reconcile different
+`uniform_sky_map` accept explicit target grids and reconcile different
 frames through angular coordinates. `grid=None` retains the native pixel grid
-for the interpolated image. The wavelength argument does not select another product; use
-`optixstuff.MultiBandCoronagraph` to dispatch among products.
+for the interpolated image. For a multiband instrument, select the imaging
+model with `multi.band(wavelength_nm)`.
 
 `SincOptions` accepts sinchole domain, memory and policy objects, plus an
 optional prefilter `taps` count (5 to 10). By default sinchole selects its
@@ -327,4 +324,4 @@ status and backend selections in an integrity-checked sidecar. Every opt-in
 cache identity retains the requested domain, policy and canonical options,
 including when construction binds blend.
 
-The `interpolation` selector accepts `blend` (default), `legacy_blend`, `auto`, and `sinc`. `legacy_blend` selects the blend reader and retains that requested name in admission provenance.
+The `interpolation` selector accepts `blend` (default), `auto`, and `sinc`.

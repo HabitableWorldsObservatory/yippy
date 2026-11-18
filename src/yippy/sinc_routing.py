@@ -1,10 +1,10 @@
 """Construction-time selection of the optional sampled-intensity backend."""
 
-import importlib
 import json
 from dataclasses import asdict
 
 import jax
+import sinchole as sc
 
 from .delivery_backend import _FALLBACK_MASK, DeliveryBackend
 from .interpolation import InterpolationInfo, SincOptions
@@ -18,17 +18,11 @@ from .sinc_delivery import (
 )
 
 
-class SincExtraMissing(ImportError):
-    """The requested reader requires the optional yippy[sinc] extra."""
-
-
 def route_interpolation(path, requested, options, downsample_shape, *, package=None):
     """Select and validate the off-axis route before legacy data loading."""
-    if requested not in ("blend", "legacy_blend", "auto", "sinc"):
-        raise ValueError(
-            "interpolation must be 'blend', 'legacy_blend', 'auto', or 'sinc'"
-        )
-    is_blend = requested in ("blend", "legacy_blend")
+    if requested not in ("blend", "auto", "sinc"):
+        raise ValueError("interpolation must be 'blend', 'auto', or 'sinc'")
+    is_blend = requested == "blend"
     if options is None:
         options = SincOptions()
     if not isinstance(options, SincOptions):
@@ -54,21 +48,6 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
             raise ValueError(
                 "Failed campaign sampling claim must be removed by a revised manifest"
             )
-    sc = None
-    missing = False
-    if not is_blend:
-        try:
-            sc = importlib.import_module("sinchole")
-        except ModuleNotFoundError as error:
-            if error.name != "sinchole":
-                raise
-            if requested == "sinc" or (
-                options.policy is not None and options.policy.mode == "bounded"
-            ):
-                raise SincExtraMissing(
-                    "Install yippy[sinc] to use sinc interpolation"
-                ) from error
-            missing = True
     if manifest is None:
         if requested == "sinc":
             raise ValueError(
@@ -85,7 +64,7 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
             InterpolationInfo(
                 requested,
                 "blend",
-                ("EXTRA_MISSING" if missing else "LAYOUT_UNSUPPORTED",),
+                ("LAYOUT_UNSUPPORTED",),
                 options_json=canonical_options,
             ),
         )
@@ -95,20 +74,16 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
         manifest_json=json.dumps(manifest, sort_keys=True),
         options_json=canonical_options,
     )
-    if sc is not None:
+    if not is_blend:
         base.update(
             sinchole_version=sc.__version__,
-            kernel_profile=delivery_profile(delivery, options, sc).identity,
+            kernel_profile=delivery_profile(delivery, options).identity,
         )
 
     def blend_result(reasons=(), bits=0):
         if options.policy is not None and options.policy.mode == "bounded":
             raise ValueError("Bounded policies require sinc; blend has no error bound")
         if manifest["layout"] == "quadrant_rectangle":
-            if missing:
-                raise SincExtraMissing(
-                    "Install yippy[sinc]; quadrant deliveries cannot fall back to blend"
-                )
             raise ValueError("Quadrant deliveries cannot fall back to blend")
         return (
             delivery,
@@ -116,10 +91,8 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
             InterpolationInfo(requested, "blend", reasons, **base),
         )
 
-    if is_blend or missing:
-        return blend_result(
-            ("EXTRA_MISSING",) if missing else (), (1 << 21) if missing else 0
-        )
+    if is_blend:
+        return blend_result()
     if delivery.missing_metadata:
         if (
             requested != "auto"
@@ -133,9 +106,8 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
     try:
         delivery_memory(
             delivery,
-            sc,
             options.memory,
-            profile=delivery_profile(delivery, options, sc),
+            profile=delivery_profile(delivery, options),
         )
     except sc.MemoryLimit:
         if (
@@ -157,7 +129,7 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
         return blend_result(
             ("PRECISION_UNAVAILABLE",), int(sc.Reason.PRECISION_UNAVAILABLE)
         )
-    admission, domain, memory = admit_delivery(delivery, options, sc)
+    admission, domain, memory = admit_delivery(delivery, options)
     base.update(receipt_id=admission.receipt.identity, receipt=admission.receipt)
     if not admission.admitted:
         if (
@@ -176,7 +148,7 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
     reader = sc.make_reader(
         admission.require(),
         domain,
-        profile=delivery_profile(delivery, options, sc),
+        profile=delivery_profile(delivery, options),
         policy=policy,
         memory=memory,
     )

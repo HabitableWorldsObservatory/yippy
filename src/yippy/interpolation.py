@@ -1,14 +1,12 @@
 """Optional interpolation configuration and photon-unit read diagnostics."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-
-if TYPE_CHECKING:
-    from sinchole import Domain, MemoryBudget, ReadPolicy
+from sinchole import BoundKind, Domain, MemoryBudget, ReadPolicy, Reason, Status
 
 
 @dataclass(frozen=True)
@@ -27,9 +25,9 @@ class SincOptions:
     """
 
     product_id: str | None = None
-    domain: "Domain | None" = None
-    memory: "MemoryBudget | None" = None
-    policy: "ReadPolicy | None" = None
+    domain: Domain | None = None
+    memory: MemoryBudget | None = None
+    policy: ReadPolicy | None = None
     taps: int | None = None
 
 
@@ -90,22 +88,24 @@ def blend_read(
     *,
     fallback=False,
     target_id="incident_photon_per_pixel",
-    profile_id="legacy_blend",
+    profile_id="blend",
 ):
-    """Attach unknown-error diagnostics without importing the optional reader."""
+    """Attach unknown-error diagnostics."""
     valid = finite & jnp.all(jnp.isfinite(image))
     # Version-one sinchole reason bits: NONFINITE_QUERY and FALLBACK_USED.
     bits = jnp.asarray(reasons, jnp.uint32)
-    bits = bits | jnp.where(valid & fallback, jnp.uint32(1 << 22), jnp.uint32(0))
-    bits = bits | jnp.where(finite, jnp.uint32(0), jnp.uint32(1 << 17))
+    bits = bits | jnp.where(
+        valid & fallback, jnp.uint32(Reason.FALLBACK_USED), jnp.uint32(0)
+    )
+    bits = bits | jnp.where(finite, jnp.uint32(0), jnp.uint32(Reason.NONFINITE_QUERY))
     return InterpolationRead(
         jnp.where(valid, image, jnp.nan),
         valid,
         jnp.asarray(False),
-        jnp.where(valid, jnp.int32(3), jnp.int32(0)),
+        jnp.where(valid, jnp.int32(Status.FALLBACK), jnp.int32(Status.REFUSED)),
         bits,
         jnp.asarray(False),
-        jnp.int32(0),
+        jnp.int32(BoundKind.UNKNOWN),
         jnp.asarray(jnp.inf),
         jnp.asarray(jnp.nan),
         ReadLedger(
@@ -116,7 +116,7 @@ def blend_read(
             target_id,
             "absolute_max_pixel",
             profile_id,
-            jnp.int32(0),
+            jnp.int32(BoundKind.UNKNOWN),
         ),
         jnp.int32(0),
     )

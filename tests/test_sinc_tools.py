@@ -133,7 +133,6 @@ def test_documented_example_parses(example_root):
 
 def test_validate_passes_documented_example(example_root):
     """A delivery built from the documented example passes with its residuals."""
-    pytest.importorskip("sinchole")
     report = validate(example_root)
     assert report.passed, report.summary()
     assert report.admitted
@@ -149,7 +148,6 @@ def test_validate_passes_documented_example(example_root):
 
 def test_validate_cli_exit_codes(example_root, tmp_path, capsys):
     """The command exits 0 on a pass and 1 on a failure, printing the summary."""
-    pytest.importorskip("sinchole")
     assert main(["validate", str(example_root)]) == 0
     assert "PASS" in capsys.readouterr().out
     broken = tmp_path / "broken"
@@ -164,7 +162,6 @@ def test_validate_cli_exit_codes(example_root, tmp_path, capsys):
 
 def test_validate_fails_missing_mirror_checks(example_root, tmp_path):
     """Dropping the negative-position checks is refused by admission."""
-    pytest.importorskip("sinchole")
     broken = tmp_path / "no-mirror"
     shutil.copytree(example_root, broken)
     manifest = json.loads((broken / "sinc-delivery.json").read_text())
@@ -177,7 +174,6 @@ def test_validate_fails_missing_mirror_checks(example_root, tmp_path):
 
 def test_validate_reports_unrecognized_directory(tmp_path):
     """A directory without a manifest is a usage error, not a pass or a crash."""
-    pytest.importorskip("sinchole")
     with pytest.raises(SincToolsError):
         validate(tmp_path)
     assert main(["validate", str(tmp_path)]) == 2

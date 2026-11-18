@@ -11,12 +11,17 @@ all place the axis at index (npix - 1) / 2, half a pixel before the header's
 XCENTER, which counts pixels from the array's outer corner.
 """
 
+from dataclasses import replace
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from astropy.io import fits
+from hwoutils.grids import Image
 from lod_unit import lod
 
-from yippy import open_yip
+from yippy import DenseSceneOperator, SceneCoronagraph, open_yip
 from yippy.performance import stellar_intensity_curves
 
 # Positions between tabulated knots, where the reader has to interpolate. The
@@ -303,19 +308,22 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
         occulter_floor=1.0,
     )
     full = open_yip(package.path).prepare(use_quarter_psf_datacube=False)
-    full = full.create_psf_datacube(batch_size=81)
-    cube = np.asarray(full.psf_datacube)
+    full = full.with_scene_operator(batch_size=81)
+    cube = np.asarray(full.operator.psfs)
     center = (npix - 1) / 2
     row, col = npix // 2 - 1, npix // 2 + 1
     x, y = (col - center) * 0.25, (row - center) * 0.25
     direct = np.asarray(full._offaxis_backend(x * lod, y * lod).data)
     scene = np.zeros((npix, npix))
     scene[row, col] = 1
-    rendered = np.einsum("ij,ijyx->yx", scene, cube)
+    image = Image(jnp.asarray(scene), full.grid, (), "per_pixel", "flux")
+    result = full.render_scene(image, None, grid=full.grid)
+    assert result.valid
+    rendered = result.image.data
     tolerance = direct.max() * 2e-6
     np.testing.assert_allclose(rendered, direct, rtol=0, atol=tolerance)
     shifted = np.asarray(
-        full.source_psfs(None, [x + 0.125], [y + 0.125], grid=None).data[0]
+        full.source_psfs(None, [x + 0.125], [y + 0.125], grid=None).image.data[0]
     )
     assert np.max(np.abs(shifted - direct)) > direct.max() * 0.1
     # Independent integer-offset reader anchor for odd n, half-integer for even.
@@ -323,38 +331,77 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     quarter = (
         open_yip(package.path)
         .prepare(use_quarter_psf_datacube=True)
-        .create_psf_datacube(batch_size=81)
+        .with_scene_operator(batch_size=81)
     )
-    small = np.asarray(quarter.psf_datacube)
+    small = np.asarray(quarter.operator.psfs)
     assert small.shape[:2] == ((npix + 1) // 2, (npix + 1) // 2)
-    folded = np.empty_like(cube)
-    start = int(np.ceil(center))
-    for j in range(npix):
-        for i in range(npix):
-            jj, ii = (
-                (npix - 1 - j if j < center else j),
-                (npix - 1 - i if i < center else i),
-            )
-            plane = small[jj - start, ii - start]
-            if j < center:
-                plane = plane[::-1, :]
-            if i < center:
-                plane = plane[:, ::-1]
-            folded[j, i] = plane
-    np.testing.assert_allclose(folded, cube, rtol=0, atol=cube.max() * 2e-6)
+    # Unequal flux in every pixel checks reflected detector axes and odd shared axes.
+    flux = np.arange(1, npix**2 + 1).reshape(npix, npix)
+    raster = replace(image, data=jnp.asarray(flux, dtype=jnp.float32))
+    expected = np.einsum("ij,ijyx->yx", flux, cube)
+    result = quarter.render_scene(raster, None, grid=full.grid)
+    assert result.valid
+    np.testing.assert_allclose(result.image.data, expected, rtol=2e-6)
+    # A refused and nonfinite plane must be inert even in the reflected halves.
+    psfs = quarter.operator.psfs.at[-1, -1].set(jnp.nan)
+    # Reject a different, finite plane as well: admission is independent of NaN.
+    mask = quarter.operator.valid.at[-1, -2:].set(False)
+    partial = SceneCoronagraph(quarter, DenseSceneOperator(psfs, mask))
+    origin = replace(
+        image, data=jnp.zeros_like(image.data).at[npix // 2, npix // 2].set(1.0)
+    )
+    good = partial.render_scene(origin, None, grid=full.grid)
+    assert good.valid and jnp.isfinite(good.image.data).all()
+    lit = replace(origin, data=origin.data.at[0, 0].set(1.0))
+    assert not partial.render_scene(lit, None, grid=full.grid).valid
+    refused = replace(origin, data=origin.data.at[0, 1].set(1.0))
+    assert not partial.render_scene(refused, None, grid=full.grid).valid
     from yippy._yip import _YIPData
 
     host = _YIPData(open_yip(package.path), use_quarter_psf_datacube=True)
     host._datacube_cache_path.unlink()
-    quarter = quarter.create_psf_datacube(batch_size=81)
+    quarter = quarter.with_scene_operator(batch_size=81)
     np.testing.assert_allclose(
-        quarter.psf_datacube, small, rtol=0, atol=small.max() * 2e-6
+        quarter.operator.psfs, small, rtol=0, atol=small.max() * 2e-6
     )
     host = _YIPData(open_yip(package.path), use_quarter_psf_datacube=False)
     assert host._datacube_identity()["layout"] == 2
     host._datacube_cache_path.unlink()
-    host._create_psf_datacube_gpu(batch_size=81)
+    host._prepare_dense_psfs_gpu(batch_size=81)
     np.testing.assert_allclose(host.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)
+
+
+def test_uniform_raster_reproduces_calibrated_sky_map(tmp_path):
+    """Float32 FFT/grid accumulation agrees to 2e-6 of the peak sky response.
+
+    The independent calibration sums a separable Gaussian over source centers
+    on each axis. Every positive source center coincides with a measured knot.
+    """
+    from synthetic_yip import write_synthetic_yip
+
+    spec = write_synthetic_yip(
+        tmp_path / "uniform",
+        kind="2dq",
+        npix=9,
+        max_offset_lod=1.5,
+        offset_step_lod=0.25,
+        psf_sigma_lod=0.25,
+        occulter_floor=1.0,
+    )
+    offsets = (np.arange(spec.npix) - spec.center) * spec.pixscale
+    diff = offsets[:, None] - offsets[None, :]
+    axis = np.exp(-0.5 * (diff / spec.psf_sigma_lod) ** 2).sum(axis=1)
+    amplitude = spec.psf_flux * spec.pixscale**2 / (2 * np.pi * spec.psf_sigma_lod**2)
+    with fits.open(spec.path / "sky_trans.fits", mode="update") as hdus:
+        hdus[0].data[:] = amplitude * np.outer(axis, axis)
+    model = open_yip(spec.path).prepare().with_scene_operator()
+    scene = Image(jnp.ones(model.grid.shape), model.grid, (), "per_pixel", "flux")
+    sky = model.uniform_sky_map(None, grid=model.grid)
+    result = model.render_scene(scene, None, grid=model.grid)
+    assert result.valid
+    np.testing.assert_allclose(
+        result.image.data, sky.data, atol=2e-6 * sky.data.max(), rtol=0
+    )
 
 
 def test_offaxis_grid_must_match_the_stellar_grid(tmp_path):

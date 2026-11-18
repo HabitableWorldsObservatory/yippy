@@ -35,7 +35,7 @@ def test_multiband_forwards_diameter_and_time(cached_diameter_coro):
     mb = MultiBandCoronagraph([450.0, 900.0], [c, c])
     for wl in (500.0, 850.0):
         np.testing.assert_array_equal(
-            mb.stellar_map(wl, 0.1, grid=c.grid).data,
+            mb.band(wl).stellar_map(wl, 0.1, grid=c.grid).data,
             c.stellar_map(wl, 0.1, grid=c.grid).data,
         )
         np.testing.assert_array_equal(

@@ -42,7 +42,7 @@ def test_single_and_batched_synthesis_agree(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).data)
+    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).image.data)
     assert batched.shape[0] == len(POSITIONS), "the batch lost positions"
 
     for index, (x, y) in enumerate(POSITIONS):
@@ -58,7 +58,7 @@ def test_the_parallel_path_agrees_with_the_batched_one(syn_coro_1d):
     xs = np.array([x for x, _ in POSITIONS])
     ys = np.array([y for _, y in POSITIONS])
 
-    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).data)
+    batched = np.asarray(coro.source_psfs(None, xs, ys, grid=None).image.data)
     parallel = np.asarray(coro._offaxis_backend.create_psfs_parallel(xs, ys).data)
     assert np.allclose(batched, parallel, atol=1e-6 * batched.max()), (
         "the parallel path returns different PSFs from the batched path"
@@ -93,7 +93,7 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
 
 def test_a_traced_separation_runs_and_matches_eager(syn_eqx_1d):
     """The performance curves stay correct when the separation is traced."""
-    for name in ("throughput", "raw_contrast", "core_area", "occulter_transmission"):
+    for name in ("throughput", "raw_contrast", "core_area", "uniform_sky_response"):
         method = getattr(syn_eqx_1d, name)
         eager = float(method(3.0))
         traced = float(eqx.filter_jit(lambda s: method(s))(jnp.asarray(3.0)))  # noqa: B023

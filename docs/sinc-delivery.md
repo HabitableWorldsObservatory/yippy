@@ -8,10 +8,10 @@ complete contract for schema `sinc-delivery-0.1`. The parser in
 `yippy.sinc_delivery` is the source of truth, and the notes below say which fields the
 parser reads and which it only carries along.
 
-Two commands help a designer meet the contract. Install the extra first.
+Two commands help a designer meet the contract.
 
 ```bash
-pip install "yippy[sinc]"
+pip install yippy
 yippy-sinc plan --lambda0 1e-6 --lambda-min 1e-6 --support 1 --limit 4.18 5.7 --out coords
 yippy-sinc validate path/to/delivery
 ```

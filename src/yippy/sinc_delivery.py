@@ -16,6 +16,7 @@ import astropy.units as u
 import jax
 import jax.numpy as jnp
 import numpy as np
+import sinchole as sc
 from astropy.io import fits
 from hwoutils.constants import m2nm, rad2arcsec
 from hwoutils.grids import Frame, PixelGrid
@@ -208,8 +209,6 @@ def load_delivery(root, manifest, options, *, package=None):
     Returns:
         A Delivery ready for sinchole construction, with no legacy transforms.
     """
-    import sinchole as sc
-
     root = Path(root)
     for key in (
         "detector_shape_yx",
@@ -440,7 +439,7 @@ def load_delivery(root, manifest, options, *, package=None):
     )
 
 
-def admit_delivery(delivery, options, sc):
+def admit_delivery(delivery, options):
     """Map validated delivery declarations to the installed sinchole API."""
     d, p = delivery.manifest, delivery.plane
     f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
@@ -612,8 +611,8 @@ def admit_delivery(delivery, options, sc):
             "independent_images",
             p["id"],
         )
-    profile = delivery_profile(delivery, options, sc)
-    memory = delivery_memory(delivery, sc, options.memory, profile=profile)
+    profile = delivery_profile(delivery, options)
+    memory = delivery_memory(delivery, options.memory, profile=profile)
     admission = sc.admit_grid(
         delivery.nodes[None],
         delivery.offsets,
@@ -665,8 +664,6 @@ def _missing_metadata(d, p):
 
 def _domain(served, override=None):
     """Translate file-domain fields and delegate numeric permission checks."""
-    import sinchole as sc
-
     with jax.enable_x64():
         declared = (
             None
@@ -685,8 +682,6 @@ def _domain(served, override=None):
 
 def _independent_images(root, manifest, indices, shape):
     """Hash/open each independent file once, validating exact authoritative rows."""
-    import sinchole as sc
-
     records = [*manifest.get("checks", []), *manifest.get("mirror_checks", [])]
     grouped = {}
     ids = {p["id"] for p in manifest["planes"]}
@@ -738,8 +733,6 @@ def _independent_images(root, manifest, indices, shape):
 
 def _validate_check_positions(manifest, origin, spacing, size):
     """Check delivered references against the declared raw-table permission."""
-    import sinchole as sc
-
     with jax.enable_x64():
         frame = Frame(
             manifest["lambda0_m"] * m2nm,
@@ -755,7 +748,7 @@ def _validate_check_positions(manifest, origin, spacing, size):
         )
 
 
-def delivery_ratios(delivery, sc, *, campaign_only=False):
+def delivery_ratios(delivery, *, campaign_only=False):
     """Translate manifest units for the engine's sampling-ratio calculation."""
     d, p = delivery.manifest, delivery.plane
     minima = [d["spectral_sampling"].get("campaign_sampling_min_m")]
@@ -774,17 +767,15 @@ def delivery_ratios(delivery, sc, *, campaign_only=False):
 
 def campaign_sampling_failed(delivery):
     """Ask the engine whether the explicit campaign claim meets admission."""
-    import sinchole as sc
-
-    return bool(sc.sampling_reasons(delivery_ratios(delivery, sc, campaign_only=True)))
+    return bool(sc.sampling_reasons(delivery_ratios(delivery, campaign_only=True)))
 
 
-def delivery_profile(delivery, options, sc):
+def delivery_profile(delivery, options):
     """Pass the declared band and requested tap count to engine selection."""
-    return sc.select_profile(delivery_ratios(delivery, sc), taps=options.taps)
+    return sc.select_profile(delivery_ratios(delivery), taps=options.taps)
 
 
-def delivery_memory(delivery, sc, supplied=None, *, profile=None):
+def delivery_memory(delivery, supplied=None, *, profile=None):
     """Pass table sizes and yippy's output tag allocation to the engine."""
     return sc.memory_budget(
         delivery.nodes.nbytes,

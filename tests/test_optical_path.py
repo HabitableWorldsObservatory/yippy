@@ -75,9 +75,9 @@ class TestCoronagraph:
         cmi = cached_diameter_coro.leakage_density_lod2(5.0, 500.0)
         assert float(cmi) >= 0
 
-    def test_occulter_transmission_in_range(self, cached_diameter_coro):
+    def test_uniform_sky_response_in_range(self, cached_diameter_coro):
         """The native sky map retains dimensionless transmission."""
-        st = cached_diameter_coro.occulter_transmission(5.0, 500.0)
+        st = cached_diameter_coro.uniform_sky_response(5.0, 500.0)
         assert 0.0 <= float(st) <= 1.0
 
     @pytest.mark.parametrize("separation_lod", [6.0, 10.0, 16.0])

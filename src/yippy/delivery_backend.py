@@ -9,13 +9,25 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.grids import Image, PixelGrid
 from lod_unit import lod
+from sinchole import Reason, check_memory, require_read
 
 from .interpolation import InterpolationRead, ReadLedger, blend_read
 from .jax_funcs import synthesize_psf_idw
 
 # Construction/query fallbacks allowed for declared complete full rectangles.
-_FALLBACK_MASK = sum(
-    1 << bit for bit in (0, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21)
+_FALLBACK_MASK = int(
+    Reason.LAYOUT_UNSUPPORTED
+    | Reason.METADATA_MISSING
+    | Reason.NORMALIZATION_UNSUPPORTED
+    | Reason.FRAME_UNSUPPORTED
+    | Reason.UNKNOWN_BANDWIDTH
+    | Reason.NYQUIST_FAIL
+    | Reason.KERNEL_MARGIN_FAIL
+    | Reason.INCOMPLETE_STENCIL
+    | Reason.OUTSIDE_DOMAIN
+    | Reason.SYMMETRY_UNSUPPORTED
+    | Reason.PRECISION_UNAVAILABLE
+    | Reason.MEMORY_LIMIT
 )
 
 
@@ -152,7 +164,7 @@ class DeliveryBackend(eqx.Module):
                 self.fallback_reasons,
                 fallback=self.requested == "auto",
                 target_id="incident_photon_per_pixel:" + self.product_identity,
-                profile_id=f"legacy_blend:conversion-{self.conversion}",
+                profile_id=f"blend:conversion-{self.conversion}",
             )
         result = self.reader.read(query, jnp.int32(0))
         ledger = result.ledger
@@ -192,7 +204,11 @@ class DeliveryBackend(eqx.Module):
                     (
                         bits
                         & jnp.uint32(
-                            ~(_FALLBACK_MASK | (1 << 19) | (1 << 23)) & 0xFFFFFFFF
+                            ~(
+                                _FALLBACK_MASK
+                                | int(Reason.BOUND_UNKNOWN | Reason.EMPIRICAL_ONLY)
+                            )
+                            & 0xFFFFFFFF
                         )
                     )
                     == 0
@@ -220,7 +236,7 @@ class DeliveryBackend(eqx.Module):
                         fallback_result.intensity,
                         fallback_result.accepted,
                         fallback_result.status,
-                        bits | jnp.uint32(1 << 22),
+                        bits | jnp.uint32(Reason.FALLBACK_USED),
                         jnp.int32(0),
                         jnp.asarray(jnp.nan),
                     ),
@@ -240,8 +256,6 @@ class DeliveryBackend(eqx.Module):
         if x.ndim != 1 or x.shape != y.shape:
             raise ValueError("Coordinates must be equal-length vectors")
         if self.reader is not None:
-            from sinchole import check_memory
-
             estimates = self.reader.memory_estimate(x.size)
             if self.training_nodes is not None:
                 for key in ("resident", "total"):
@@ -256,8 +270,6 @@ class DeliveryBackend(eqx.Module):
 
     def _require(self, result):
         if self.reader is not None and not isinstance(result.accepted, jax.core.Tracer):
-            from sinchole import require_read
-
             require_read(result)
         return result.intensity
 

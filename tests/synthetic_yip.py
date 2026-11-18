@@ -322,11 +322,7 @@ def synthetic_coronagraph(path, n=24, *, rules=()):
             n_pointings=3,
         ),
     )
-    return (
-        open_yip(path)
-        .prepare(rules=rules or (DEFAULT_APERTURE_RULE,))
-        .create_psf_datacube()
-    )
+    return open_yip(path).prepare(rules=rules or (DEFAULT_APERTURE_RULE,))
 
 
 def replace_stellar_tables(coro, grid, diameters_lod, maps):

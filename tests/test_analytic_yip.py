@@ -150,13 +150,13 @@ def test_raw_contrast_divides_two_aperture_sums_not_two_means(package, coro):
     )
 
 
-def test_occulter_transmission_follows_the_radial_function(package, coro):
+def test_uniform_sky_response_follows_the_radial_function(package, coro):
     """Sky transmission at a radius is the function the package was written with."""
     for radius in (1.0, 2.0, 3.0):
-        got = float(coro.occulter_transmission(radius))
+        got = float(coro.uniform_sky_response(radius))
         expected = package.sky_trans_at(radius)
         assert got == pytest.approx(expected, rel=0.03), (
-            f"occulter_transmission({radius})"
+            f"uniform_sky_response({radius})"
         )
 
 

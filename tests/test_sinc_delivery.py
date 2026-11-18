@@ -1,7 +1,6 @@
 """Optional off-axis routing, geometry and refusal regression tests."""
 
 import copy
-import importlib
 import json
 import os
 import shutil
@@ -14,8 +13,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import sinchole as sc
 from astropy.io import fits
-from hwoutils.grids import PixelGrid, resample
+from hwoutils.grids import Image, PixelGrid, resample
 from lod_unit import lod
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
@@ -24,14 +24,13 @@ from yippy import SincOptions, open_yip
 from yippy._yip import _YIPData
 from yippy.performance import stellar_intensity_curves
 from yippy.sinc_delivery import detect_delivery, file_sha256, load_delivery
-from yippy.sinc_routing import SincExtraMissing, route_interpolation
+from yippy.sinc_routing import route_interpolation
 from yippy.util import cache_identity_digest
 
 
 @pytest.fixture(scope="module")
 def admitted(tmp_path_factory):
     """One tiny admitted quadrant and real performance cache for all reads."""
-    pytest.importorskip("sinchole")
     with jax.enable_x64():
         root = tmp_path_factory.mktemp("sinc")
         metadata = write_delivery(root)
@@ -54,70 +53,34 @@ def admitted(tmp_path_factory):
     jax.clear_caches()
 
 
-def test_default_and_missing_extra(tmp_path, monkeypatch):
-    """Fails if explicit blends import sinc, lose provenance, or accept bounds.
-
-    Exact-algebra basis: both blend selectors and missing-extra auto render
-    identical samples; bounded requests must reject before optional imports.
-    """
-    synthetic_1d = write_synthetic_yip(
+def test_unmarked_blend_and_auto(tmp_path):
+    """Legacy auto uses the blend images and flags unsupported layout."""
+    fixture = write_synthetic_yip(
         tmp_path / "legacy", npix=4, max_offset_lod=1.0, offset_step_lod=0.5
     )
+    package = open_yip(fixture.path)
     with pytest.raises(ValueError, match="product_id"):
-        open_yip(synthetic_1d.path, product_id="mono")
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib, "import_module", unavailable)
-    blend = open_yip(synthetic_1d.path).prepare()
-    auto = open_yip(synthetic_1d.path).prepare(interpolation="auto")
-    explicit = open_yip(synthetic_1d.path).prepare(interpolation="legacy_blend")
+        open_yip(fixture.path, product_id="mono")
+    blend = package.prepare()
+    auto = package.prepare(interpolation="auto")
+    assert auto.interpolation_info.reasons == ("LAYOUT_UNSUPPORTED",)
     np.testing.assert_array_equal(
-        explicit.source_psfs(None, 0.3, 0.2).data,
-        blend.source_psfs(None, 0.3, 0.2).data,
+        blend.source_psfs(None, 0.3, 0.2).image.data,
+        auto.source_psfs(None, 0.3, 0.2).image.data,
     )
-    assert explicit.interpolation_info.requested == "legacy_blend"
-    assert explicit.interpolation_info.effective == "blend"
-    bounded = SincOptions(policy=SimpleNamespace(mode="bounded"))
-    for selector in ("blend", "legacy_blend"):
-        with pytest.raises(ValueError, match="Bounded policies require sinc"):
-            route_interpolation(synthetic_1d.path, selector, bounded, None)
-    np.testing.assert_array_equal(
-        blend.source_psfs(None, 0.3, 0.2).data, auto.source_psfs(None, 0.3, 0.2).data
-    )
-    assert auto.source_psfs(None, 0.3, 0.2).reconstruction == "band_limited"
-    assert (
-        auto.source_psfs(None, jnp.array([0.3]), jnp.array([0.2])).reconstruction
-        == "band_limited"
-    )
-    assert not auto.source_psfs_with_info(np.nan, 0.0).accepted[0]
-    assert np.isnan(auto.source_psfs(None, np.nan, 0.0).data).all()
-    assert auto.interpolation_info.reasons == ("EXTRA_MISSING",)
-    assert (
-        "interpolation"
-        not in _YIPData(open_yip(synthetic_1d.path))._datacube_identity()
-    )
-    with pytest.raises(SincExtraMissing, match=r"yippy\[sinc\]"):
-        open_yip(synthetic_1d.path).prepare(interpolation="sinc")
-
-    def broken(name):
-        raise ModuleNotFoundError(
-            "missing internal dependency", name="internal_dependency"
+    assert not auto.source_psfs(None, np.nan, 0.0).valid[0]
+    with pytest.raises(ValueError, match="versioned"):
+        package.prepare(interpolation="sinc")
+    with pytest.raises(ValueError, match="Bounded policies require sinc"):
+        package.prepare(
+            interpolation="blend",
+            sinc_options=SincOptions(policy=SimpleNamespace(mode="bounded")),
         )
-
-    monkeypatch.setattr(importlib, "import_module", broken)
-    with pytest.raises(ModuleNotFoundError, match="internal dependency"):
-        open_yip(synthetic_1d.path).prepare(interpolation="auto")
 
 
 @pytest.mark.parametrize("defect", ["schema", "hash", "header", "duplicate", "hole"])
 def test_delivery_corruption(tmp_path, defect):
     """Fails if auto hides malformed declarations or corrupt measured data."""
-    pytest.importorskip("sinchole")
     m = write_delivery(tmp_path)
     if defect == "schema":
         m["schema"] = "sinc-delivery-99"
@@ -142,38 +105,16 @@ def test_delivery_corruption(tmp_path, defect):
         route_interpolation(tmp_path, "auto", None, None)
 
 
-def test_full_blend_extra_isolation(tmp_path, monkeypatch):
-    """Fails if full-grid blend imports sinc or scales mean photon units twice."""
-    m = write_delivery(tmp_path, full=True)
-    m["normalization"]["kind"] = "unocculted_peak"
-    m["planes"][0]["photon_conversion"] = 2.0
-    m["sample_kind"] = "mean"
-    save_manifest(tmp_path, m)
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib, "import_module", unavailable)
+def test_full_blend_photon_conversion(tmp_path):
+    """Measured mean densities receive the photon and pixel-area factors once."""
+    metadata = write_delivery(tmp_path, full=True)
+    metadata["normalization"]["kind"] = "unocculted_peak"
+    metadata["planes"][0]["photon_conversion"] = 2.0
+    metadata["sample_kind"] = "mean"
+    save_manifest(tmp_path, metadata)
     delivery, blend, _ = route_interpolation(tmp_path, "blend", None, None)
-    _, fallback, info = route_interpolation(tmp_path, "auto", None, None)
-    _, explicit, explicit_info = route_interpolation(
-        tmp_path, "legacy_blend", None, None
-    )
-    assert explicit_info.requested == "legacy_blend"
-    assert explicit_info.effective == "blend"
-    np.testing.assert_array_equal(
-        explicit.create_psf(0.0, 0.0).data, blend.create_psf(0.0, 0.0).data
-    )
-    assert info.reasons == ("EXTRA_MISSING",)
     expected = delivery.nodes[16 * 33 + 16] * (2.0 * 0.25**2)
     np.testing.assert_allclose(blend.create_psf(0.0, 0.0).data, expected, rtol=2e-7)
-    np.testing.assert_array_equal(
-        fallback.create_psf(0.0, 0.0).data, blend.create_psf(0.0, 0.0).data
-    )
-    assert fallback.create_psf_with_info(0.0, 0.0).selected_backend == 0
 
 
 def test_product_selection(tmp_path):
@@ -237,11 +178,11 @@ def test_quadrant_native_intake(admitted):
 
 def test_reads_units_refusals(admitted):
     """Fails on integral/mean conversion, clipped sinc output or NaN acceptance."""
-    sc = pytest.importorskip("sinchole")
     reader = admitted._offaxis_backend.reader
     direct = reader.read(jnp.array([0.07, -0.04]), jnp.int32(0))
     actual = jax.tree.map(
-        lambda value: value[0], admitted.source_psfs_with_info(0.07, -0.04)
+        lambda value: value[0],
+        admitted._offaxis_backend.create_psfs_with_info([0.07], [-0.04]),
     )
     np.testing.assert_allclose(actual.intensity, direct.intensity, atol=1e-18)
     assert actual.selected_backend == 1
@@ -275,7 +216,7 @@ def test_reads_units_refusals(admitted):
         changed = replace(
             d, manifest=metadata, plane=metadata["planes"][0], conversion=conversion
         )
-        admission, domain, memory = admit_delivery(changed, SincOptions(), sc)
+        admission, domain, memory = admit_delivery(changed, SincOptions())
         new_reader = sc.Interpolator(
             admission.require(),
             domain,
@@ -291,25 +232,31 @@ def test_reads_units_refusals(admitted):
             atol=1e-18,
         )
     refused = jax.tree.map(
-        lambda value: value[0], admitted.source_psfs_with_info(np.nan, 0.0)
+        lambda value: value[0],
+        admitted._offaxis_backend.create_psfs_with_info([np.nan], [0.0]),
     )
     assert not refused.accepted
     assert int(refused.reason_bits) & int(sc.Reason.NONFINITE_QUERY)
-    with pytest.raises(sc.ReadRefused):
-        admitted.source_psfs(None, np.nan, 0.0)
-    assert np.isnan(eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).data).all()
-    batch = admitted.source_psfs_with_info(
-        jnp.array([0.07, np.nan]), jnp.array([-0.04, 0.0])
+    assert not admitted.source_psfs(None, np.nan, 0.0).valid[0]
+    assert np.isnan(
+        eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).image.data
+    ).all()
+    batch = admitted.source_psfs(
+        None, jnp.array([0.07, np.nan]), jnp.array([-0.04, 0.0])
     )
-    np.testing.assert_array_equal(batch.accepted, [True, False])
-    assert admitted.source_psfs(None, jnp.empty(0), jnp.empty(0)).data.shape == (
+    np.testing.assert_array_equal(batch.valid, [True, False])
+    assert admitted.source_psfs(None, jnp.empty(0), jnp.empty(0)).image.data.shape == (
         0,
         4,
         4,
     )
-    assert admitted.source_psfs(None, 0.07, -0.04).reconstruction == "band_limited"
     assert (
-        admitted.source_psfs(None, jnp.array([0.07]), jnp.array([-0.04])).reconstruction
+        admitted.source_psfs(None, 0.07, -0.04).image.reconstruction == "band_limited"
+    )
+    assert (
+        admitted.source_psfs(
+            None, jnp.array([0.07]), jnp.array([-0.04])
+        ).image.reconstruction
         == "band_limited"
     )
 
@@ -363,7 +310,7 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
     )
     np.testing.assert_allclose(
         sky[:, 1],
-        view.occulter_transmission_profile.evaluate(separations * (500 / 400)),
+        view.uniform_sky_profile.evaluate(separations * (500 / 400)),
         rtol=1e-14,
     )
     np.testing.assert_allclose(stellar_intensity_curves(view).separation_lod[1], 0.1)
@@ -374,7 +321,7 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
     )
     sky_grid = PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_trans.grid.frame)
     np.testing.assert_allclose(
-        view.background_transmission(500.0, grid=sky_grid).data,
+        view.uniform_sky_map(500.0, grid=sky_grid).data,
         resample(host.sky_trans, sky_grid).data,
         atol=1e-14,
     )
@@ -387,7 +334,7 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
     @eqx.filter_jit
     def read(module):
         traces.append(None)
-        return module.source_psfs(None, 0.07, -0.04).data
+        return module.source_psfs(None, 0.07, -0.04).image.data
 
     expected = read(view)
     changed = eqx.tree_at(
@@ -402,7 +349,6 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
 @pytest.mark.parametrize("defect", ["missing", "failed", "declaration", "center"])
 def test_quadrant_precedence(tmp_path, defect):
     """Fails if rejected quadrant data can escape through auto or blend."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path)
     if defect == "missing":
         m["mirror_checks"] = []
@@ -432,14 +378,12 @@ def test_quadrant_precedence(tmp_path, defect):
         assert not caught.value.reason_bits & int(
             sc.Reason.PRECISION_UNAVAILABLE | sc.Reason.FALLBACK_USED
         )
-    for selector in ("blend", "legacy_blend"):
-        with pytest.raises(ValueError, match="midpoint-aware"):
-            route_interpolation(tmp_path, selector, None, None)
+    with pytest.raises(ValueError, match="midpoint-aware"):
+        route_interpolation(tmp_path, "blend", None, None)
 
 
 def test_independent_checks(admitted, tmp_path):
     """Fails if independent images join training or empirical units are lost."""
-    pytest.importorskip("sinchole")
     write_delivery(tmp_path)
     _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
     assert backend.reader.grid.intensity.shape[1:3] == (18, 18)
@@ -457,7 +401,6 @@ def test_independent_checks(admitted, tmp_path):
 
 def test_auto_fallback_and_bounded(tmp_path):
     """Fails if auto ignores its allowlist, mixes branches or evades a budget."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     _, backend, info = route_interpolation(tmp_path, "auto", None, None)
     assert info.effective == "sinc"
@@ -517,18 +460,19 @@ def test_table_consumer(admitted):
         )
         grid = PixelGrid.focal(4, pitch, admitted.sky_trans.grid.frame)
         np.testing.assert_array_equal(
-            admitted.background_transmission(500.0, grid=grid).data,
+            admitted.uniform_sky_map(500.0, grid=grid).data,
             resample(admitted.sky_trans, grid).data,
         )
         grid = PixelGrid.focal(4, pitch, admitted.grid.frame)
         expected = resample(admitted._offaxis_backend.create_psfs(x, y), grid).data
-        result = admitted.source_psfs(500.0, x, y, grid=grid).data
+        result = admitted.source_psfs(500.0, x, y, grid=grid).image.data
         np.testing.assert_allclose(result, expected, atol=1e-18)
         np.testing.assert_array_equal(
-            admitted.source_psfs(600.0, x, y, grid=grid).data, result
+            admitted.source_psfs(600.0, x, y, grid=grid).image.data, result
         )
 
 
+@pytest.mark.medium(reason="builds and reloads cache variants and JITs a scene render")
 def test_cache_identity_and_selections(admitted, monkeypatch):
     """Fails if route provenance collides or cube cache loses refusal selections."""
     host = _YIPData(admitted.package, interpolation="sinc")
@@ -555,7 +499,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         ) != cache_identity_digest(host._auto_perf_identity())
         changed._load_or_compute_performance()
         assert (changed._perf_dir / changed._perf_filename()).exists()
-        changed.create_psf_datacube(batch_size=4)
+        changed._prepare_dense_psfs(batch_size=4)
         first = np.asarray(changed.psf_datacube)
 
         def no_reads(*args, **kwargs):
@@ -563,16 +507,16 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
 
         with monkeypatch.context() as patch:
             patch.setattr(changed, "create_psfs_with_info", no_reads)
-            changed._create_psf_datacube_gpu(batch_size=4)
+            changed._prepare_dense_psfs_gpu(batch_size=4)
         np.testing.assert_array_equal(changed.psf_datacube, first)
         perf_path = changed._perf_dir / changed._perf_filename()
         stamp = perf_path.stat().st_mtime_ns
         changed._load_or_compute_performance()
         assert perf_path.stat().st_mtime_ns == stamp
-    host.create_psf_datacube(batch_size=4)
+    host._prepare_dense_psfs(batch_size=4)
     before = np.asarray(host.psf_datacube)
     selected = host.psf_datacube_info["selected_backend"].copy()
-    host._create_psf_datacube_gpu(batch_size=4)
+    host._prepare_dense_psfs_gpu(batch_size=4)
     np.testing.assert_array_equal(host.psf_datacube, before)
     np.testing.assert_array_equal(host.psf_datacube_info["selected_backend"], selected)
     np.testing.assert_array_equal(
@@ -585,18 +529,77 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         assert np.isfinite(before[row, 0]).all()
         assert np.isnan(before[row, 1]).all()
     base_cube.with_suffix(".status.npz").unlink()
-    host.create_psf_datacube(batch_size=4)
+    host._prepare_dense_psfs(batch_size=4)
     assert base_cube.with_suffix(".status.npz").exists()
 
-    frozen = admitted.create_psf_datacube(batch_size=4)
-    assert admitted.psf_datacube is None
-    np.testing.assert_array_equal(frozen.psf_datacube, host.psf_datacube)
+    scene_model = admitted.with_scene_operator(batch_size=4)
+    image = Image(
+        jnp.zeros(admitted.grid.shape), admitted.grid, (), "per_pixel", "flux"
+    )
+    supported = replace(image, data=image.data.at[2, 2].set(1.0))
+    good = scene_model.render_scene(supported, None, grid=admitted.grid)
+    assert good.valid and jnp.isfinite(good.image.data).all()
+    expected = admitted.source_psfs(None, 0.125, 0.125)
+    np.testing.assert_allclose(good.image.data, expected.image.data[0], rtol=1e-12)
+    # Negative y lies outside the asymmetric domain even where positive y is supported.
+    unsupported = replace(supported, data=supported.data.at[0, 2].set(1.0))
+    bad = eqx.filter_jit(scene_model.render_scene)(
+        unsupported, None, grid=admitted.grid
+    )
+    assert not bad.valid and jnp.isnan(bad.image.data).all()
+
+
+@pytest.mark.medium(
+    reason="admits one coefficient table and compiles its raster render"
+)
+def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
+    """One lit pixel reproduces a source read, including photon conversion.
+
+    Binary64 accumulation differs by at most 1e-12 of the peak from the
+    differently ordered coefficient sum in a single read.
+    """
+    metadata = write_delivery(tmp_path)
+    metadata["support_extent_D"] = [0.8, 0.8]
+    metadata["served"]["bounds_lod"] = [[-0.2, 0.2], [-0.2, 0.5]]
+    metadata["sample_kind"] = "mean"
+    metadata["checks"] = []
+    save_manifest(tmp_path, metadata)
+    with jax.enable_x64():
+        model = open_yip(tmp_path).prepare(interpolation="sinc").with_scene_operator()
+        assert isinstance(model.operator, sc.SceneRenderer)
+        flux = jnp.zeros(model.grid.shape).at[2, 1].set(2.0)
+        scene = Image(flux, model.grid, (), "per_pixel", "flux")
+        result = eqx.filter_jit(model.render_scene)(scene, None, grid=model.grid)
+        point = model.source_psfs(None, -0.125, 0.125)
+        assert result.valid and point.valid[0]
+        expected = 2.0 * point.image.data[0]
+        np.testing.assert_allclose(
+            result.image.data, expected, rtol=0, atol=1e-12 * expected.max()
+        )
+        lit = replace(scene, data=flux.at[0, 0].set(1.0))
+        assert not model.render_scene(lit, None, grid=model.grid).valid
+
+        bounded = (
+            open_yip(tmp_path)
+            .prepare(
+                interpolation="sinc",
+                sinc_options=SincOptions(
+                    policy=sc.ReadPolicy("bounded", jnp.asarray(1.0))
+                ),
+            )
+            .with_scene_operator()
+        )
+        assert isinstance(bounded.operator, sc.SceneRenderer)
+        dark = replace(scene, data=jnp.zeros_like(flux))
+        result = bounded.render_scene(dark, None, grid=bounded.grid)
+        assert result.valid
+        np.testing.assert_array_equal(result.image.data, 0.0)
+        assert not bounded.render_scene(scene, None, grid=bounded.grid).valid
 
 
 @pytest.mark.slow
 def test_public_delivery(tmp_path):
     """Fails if independent images disagree by over 1e-5 of their local peaks."""
-    pytest.importorskip("sinchole")
     configured = os.environ.get("YIPPY_SINC_DELIVERY")
     if not configured or not (Path(configured) / "sinc-delivery.json").exists():
         pytest.skip("Set YIPPY_SINC_DELIVERY to an independent intensity delivery")
@@ -606,7 +609,7 @@ def test_public_delivery(tmp_path):
         coro = open_yip(root).prepare(interpolation="sinc")
         host = _YIPData(open_yip(root), interpolation="sinc")
         np.testing.assert_allclose(
-            coro.source_psfs(None, 4.0, 5.5).data[0],
+            coro.source_psfs(None, 4.0, 5.5).image.data[0],
             host.offax.create_psf(4.0, 5.5).data,
             rtol=1e-14,
         )
@@ -617,7 +620,7 @@ def test_public_delivery(tmp_path):
         )
         assert coro.stellar_grid.frame != coro.grid.frame
         np.testing.assert_allclose(
-            coro.background_transmission(500.0, grid=coro.sky_trans.grid).data,
+            coro.uniform_sky_map(500.0, grid=coro.sky_trans.grid).data,
             resample(host.sky_trans, coro.sky_trans.grid).data,
             atol=1e-14,
         )
@@ -628,7 +631,7 @@ def test_public_delivery(tmp_path):
         )
         x, y = jnp.array([4.0]), jnp.array([5.5])
         np.testing.assert_allclose(
-            coro.source_psfs(500.0, x, y, grid=coro.grid).data,
+            coro.source_psfs(500.0, x, y, grid=coro.grid).image.data,
             resample(host.offax.create_psfs(x, y), coro.grid).data,
             rtol=1e-14,
         )
@@ -650,30 +653,21 @@ def test_public_delivery(tmp_path):
             peak = image[region].max()
             assert peak > 0
             assert (
-                np.max(np.abs(np.asarray(coro.source_psfs(None, *q).data[0]) - image))
+                np.max(
+                    np.abs(np.asarray(coro.source_psfs(None, *q).image.data[0]) - image)
+                )
                 <= 1e-5 * peak
             )
 
 
-@pytest.mark.parametrize("extra_missing", [False, True])
-def test_bounded_legacy_refuses(tmp_path, monkeypatch, extra_missing):
+def test_bounded_legacy_refuses(tmp_path):
     """A bounded request cannot construct an unbounded legacy fallback."""
-    sc = pytest.importorskip("sinchole")
     legacy = write_synthetic_yip(
         tmp_path / "legacy", npix=4, max_offset_lod=1.0, offset_step_lod=0.5
     )
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
-    if extra_missing:
-        monkeypatch.setattr(importlib, "import_module", unavailable)
     with (
         jax.enable_x64(),
-        pytest.raises((ValueError, SincExtraMissing), match=r"[Bb]ounded|yippy"),
+        pytest.raises(ValueError, match=r"[Bb]ounded"),
     ):
         open_yip(legacy.path).prepare(
             interpolation="auto",
@@ -723,7 +717,7 @@ def test_header_invalid_angular_units(tmp_path, unit):
         route_interpolation(tmp_path, "auto", None, None)
 
 
-@pytest.mark.parametrize("gate", ["precision", "memory", "extra"])
+@pytest.mark.parametrize("gate", ["precision", "memory"])
 @pytest.mark.parametrize(
     "defect",
     [
@@ -740,9 +734,8 @@ def test_header_invalid_angular_units(tmp_path, unit):
         "coordinates",
     ],
 )
-def test_validation_precedes_fallback(tmp_path, monkeypatch, gate, defect):
+def test_validation_precedes_fallback(tmp_path, gate, defect):
     """Resource routing cannot hide corrupt declarations or independent files."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     if defect == "psf_hash":
         m["planes"][0]["psf_sha256"] = "0" * 64
@@ -775,15 +768,6 @@ def test_validation_precedes_fallback(tmp_path, monkeypatch, gate, defect):
     else:
         m["checks"][0]["image_index"] = -1
     save_manifest(tmp_path, m)
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
-    if gate == "extra":
-        monkeypatch.setattr(importlib, "import_module", unavailable)
     options = (
         SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1)) if gate == "memory" else None
     )
@@ -806,7 +790,6 @@ def test_validation_precedes_fallback(tmp_path, monkeypatch, gate, defect):
 )
 def test_missing_admission_metadata(tmp_path, field):
     """Absent physical claims route auto with METADATA_MISSING, never KeyError."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     del (m["planes"][0] if field == "sampling_min_wavelength_m" else m)[field]
     save_manifest(tmp_path, m)
@@ -821,7 +804,6 @@ def test_missing_admission_metadata(tmp_path, field):
 
 def test_campaign_claim_refuses(tmp_path):
     """A failed explicit campaign claim needs a revised manifest to proceed."""
-    pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     m["spectral_sampling"]["campaign_sampling_min_m"] = 450e-9
     save_manifest(tmp_path, m)
@@ -836,7 +818,6 @@ def test_campaign_claim_refuses(tmp_path):
 @pytest.mark.parametrize("gate", ["sampling", "precision"])
 def test_fallback_options_cache(tmp_path, monkeypatch, gate):
     """Distinct fallback domains/options generate and reload separate artifacts."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     if gate == "sampling":
         m["support_extent_D"] = [2.0, 2.0]
@@ -866,9 +847,9 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
             assert len({c._perf_filename() for c in objects}) == len(objects)
             for i, coro in enumerate(objects):
                 entry, reload = (
-                    (coro.create_psf_datacube, coro._create_psf_datacube_gpu)
+                    (coro._prepare_dense_psfs, coro._prepare_dense_psfs_gpu)
                     if i % 2 == 0
-                    else (coro._create_psf_datacube_gpu, coro.create_psf_datacube)
+                    else (coro._prepare_dense_psfs_gpu, coro._prepare_dense_psfs)
                 )
                 assert not coro._datacube_cache_path.exists()
                 entry(batch_size=4)
@@ -897,7 +878,6 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
 @pytest.mark.parametrize("measure,factor", [("integral", 2.0), ("mean", 0.125)])
 def test_intake_finite_error_units(tmp_path, measure, factor):
     """Real intake scales nonzero finite empirical residuals with pixel values."""
-    pytest.importorskip("sinchole")
     m = write_delivery(tmp_path)
     with jax.enable_x64():
         _, reference, _ = route_interpolation(tmp_path, "sinc", None, None)
@@ -963,7 +943,6 @@ def test_spatial_cross_frame_aperture():
 @pytest.mark.parametrize("budget", [1e-5, 1e-6])
 def test_policy_cache_generation(admitted, budget):
     """Bounded policies identify generated cubes and reloaded performance separately."""
-    sc = pytest.importorskip("sinchole")
     host = _YIPData(admitted.package, interpolation="sinc")
     changed = copy.copy(host)
     changed.offax = eqx.tree_at(
@@ -974,9 +953,9 @@ def test_policy_cache_generation(admitted, budget):
     assert changed._datacube_cache_path != host._datacube_cache_path
     assert changed._perf_filename() != host._perf_filename()
     changed._load_or_compute_performance()
-    changed._create_psf_datacube_gpu(batch_size=4)
+    changed._prepare_dense_psfs_gpu(batch_size=4)
     before = np.asarray(changed.psf_datacube)
-    changed.create_psf_datacube(batch_size=4)
+    changed._prepare_dense_psfs(batch_size=4)
     np.testing.assert_array_equal(changed.psf_datacube, before)
     assert not changed.psf_datacube_info["accepted"].any()
     assert changed._datacube_cache_path.exists()
@@ -985,7 +964,6 @@ def test_policy_cache_generation(admitted, budget):
 
 def test_original_offset_precision(tmp_path):
     """The core receipt retains the delivered float32 offset precision."""
-    pytest.importorskip("sinchole")
     m = write_delivery(tmp_path)
     path = tmp_path / "offsets.fits"
     values = fits.getdata(path).astype(np.float32)
@@ -1000,7 +978,7 @@ def test_original_offset_precision(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "gate", ["normal", "blend", "precision", "memory", "extra", "metadata", "sampling"]
+    "gate", ["normal", "blend", "precision", "memory", "metadata", "sampling"]
 )
 @pytest.mark.parametrize(
     "defect",
@@ -1028,9 +1006,8 @@ def test_original_offset_precision(tmp_path):
         "check_stencil",
     ],
 )
-def test_admission_declaration_errors(tmp_path, monkeypatch, gate, defect):
+def test_admission_declaration_errors(tmp_path, gate, defect):
     """Fails if a fallback masks hard invalid evidence or a physical conflict."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     if defect == "normalization":
         m["normalization"]["kind"] = "unknown_reference"
@@ -1080,15 +1057,6 @@ def test_admission_declaration_errors(tmp_path, monkeypatch, gate, defect):
     elif gate == "sampling" and defect != "support":
         m["support_extent_D"] = [2.0, 2.0]
     save_manifest(tmp_path, m)
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
-    if gate == "extra":
-        monkeypatch.setattr(importlib, "import_module", unavailable)
     options = (
         SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1)) if gate == "memory" else None
     )
@@ -1100,30 +1068,21 @@ def test_admission_declaration_errors(tmp_path, monkeypatch, gate, defect):
 
 @pytest.mark.medium
 @pytest.mark.parametrize("peak", ["absent", None, 0.001])
-def test_peak_reference_controls(tmp_path, monkeypatch, peak):
+def test_peak_reference_controls(tmp_path, peak):
     """Fails if unknown or positive peak evidence prevents admission or fallback.
 
-    Cold independent-check admission and finite reads cover all seven routes.
+    Cold independent-check admission and finite reads cover all six routes.
     """
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     if peak == "absent":
         del m["checks"][0]["local_peak_reference"]
     else:
         m["checks"][0]["local_peak_reference"] = peak
-    original = importlib.import_module
-
-    def unavailable(name, *args, **kwargs):
-        if name == "sinchole":
-            raise ModuleNotFoundError("no sinchole", name="sinchole")
-        return original(name, *args, **kwargs)
-
     for gate in (
         "normal",
         "blend",
         "precision",
         "memory",
-        "extra",
         "metadata",
         "sampling",
     ):
@@ -1138,9 +1097,7 @@ def test_peak_reference_controls(tmp_path, monkeypatch, peak):
             if gate == "memory"
             else None
         )
-        with monkeypatch.context() as patch, jax.enable_x64(gate != "precision"):
-            if gate == "extra":
-                patch.setattr(importlib, "import_module", unavailable)
+        with jax.enable_x64(gate != "precision"):
             _, backend, info = route_interpolation(
                 tmp_path, "blend" if gate == "blend" else "auto", options, None
             )
@@ -1151,7 +1108,6 @@ def test_peak_reference_controls(tmp_path, monkeypatch, peak):
 
 def test_override_domain_excludes_unreadable_checks(tmp_path):
     """A narrower caller domain excludes, rather than rejects, delivered checks."""
-    sc = pytest.importorskip("sinchole")
     m = write_delivery(tmp_path, full=True)
     save_manifest(tmp_path, m)
     check_ids = [r["id"] for r in m["checks"]]

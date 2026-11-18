@@ -10,6 +10,7 @@ dependencies = [
   "astropy>=6.1",
   "numpy>=2.0",
   "scipy>=1.13",
+  "sinchole>=0.1.0",
   "hwoutils>=1.10.0",
   "optixstuff>=3.0.0",
   "lod_unit>=1.8.0",
@@ -50,7 +51,6 @@ content-type = "text/markdown"
 path = "README.md"
 
 [project.optional-dependencies]
-sinc = ["sinchole>=0.1.0"]
 viz = ["eyepiece>=0.17.0"]
 docs = [
   "eyepiece>=0.17.0",
