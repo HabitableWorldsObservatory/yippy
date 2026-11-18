@@ -358,14 +358,12 @@ class _YIPData:
 
     def _initialize_profiles(self):
         """Prepare only the ancillary sky transmission on its radial grid."""
-        grid = self.sky_trans.grid
-        separation, values = radial_profile(
-            jnp.asarray(np.asarray(self.sky_trans.data, dtype=np.float64)),
-            grid.step,
-            center=(grid.center_y, grid.center_x),
-        )
+        separation, values, counts = radial_profile(self.sky_trans())
+        populated = np.asarray(counts) > 0
         self.occultation_record: PerformanceCurves = self._profile_record(
-            np.asarray(separation), "occulter_transmission", np.asarray(values)
+            np.asarray(separation)[populated],
+            "occulter_transmission",
+            np.asarray(values)[populated],
         )
 
     def _datacube_offsets(self):
