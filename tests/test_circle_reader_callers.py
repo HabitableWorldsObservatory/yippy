@@ -14,7 +14,7 @@ from scipy.ndimage import map_coordinates, spline_filter
 from scipy.special import j1
 from synthetic_yip import write_synthetic_yip
 
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy.performance import stellar_intensity_curves
 
 
@@ -109,7 +109,7 @@ def reader_coro(request, tmp_path_factory):
         )
         hdul[0].data[:] = image * levels
     with jax.enable_x64():
-        coro = Coronagraph(package.path, leakage_rule=leakage_rule)
+        coro = open_yip(package.path).prepare(leakage_rule=leakage_rule)
     return coro
 
 
@@ -123,7 +123,7 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
             stellar_intensity_curves(
                 coro, getattr(diameter, "value", diameter), interpolation="keys"
             )
-            .evaluate("core_mean_intensity", separation)
+            .evaluate(separation)
             .copy()
         )
         expected = quintic_ring_reference(
@@ -133,7 +133,7 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
         )
         actual = stellar_intensity_curves(
             coro, getattr(diameter, "value", diameter), interpolation="quintic"
-        ).evaluate("core_mean_intensity", separation)
+        ).evaluate(separation)
         view = coro
         traced = np.asarray(
             eqx.filter_jit(
@@ -141,14 +141,14 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
                     lambda separation, diameter=0.0, interpolation="keys": (
                         stellar_intensity_curves(
                             view, diameter, interpolation=interpolation
-                        ).evaluate("core_mean_intensity", separation)
+                        ).evaluate(separation)
                     )
                 )
             )(separation, diameter, interpolation="quintic")
         )
         keys_after = stellar_intensity_curves(
             coro, getattr(diameter, "value", diameter), interpolation="keys"
-        ).evaluate("core_mean_intensity", separation)
+        ).evaluate(separation)
     np.testing.assert_allclose(actual, expected, rtol=1e-12)
     np.testing.assert_allclose(traced, expected, rtol=1e-12)
     np.testing.assert_array_equal(
@@ -172,7 +172,7 @@ def test_curve_and_noise_callers_forward_reader(reader_coro):
                 nodes / grid.step,
             )
             queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
-            actual = record.evaluate("core_mean_intensity", queries)
+            actual = record.evaluate(queries)
             np.testing.assert_allclose(
                 actual, PchipInterpolator(nodes, expected)(queries), rtol=1e-12
             )
@@ -188,7 +188,7 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
             stellar_intensity_curves(
                 coro, getattr(diameter, "value", diameter), interpolation="keys"
             )
-            .evaluate("core_mean_intensity", separation)
+            .evaluate(separation)
             .copy()
         )
         # Opt-in spatial profiles and aperture records have separate meanings.
@@ -206,7 +206,7 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
                     lambda separation, diameter=0.0, interpolation="keys": (
                         stellar_intensity_curves(
                             view, diameter, interpolation=interpolation
-                        ).evaluate("core_mean_intensity", separation)
+                        ).evaluate(separation)
                     )
                 )
             )(separation, diameter)
@@ -215,13 +215,13 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
         np.testing.assert_allclose(
             stellar_intensity_curves(
                 coro, getattr(diameter, "value", diameter), interpolation="keys"
-            ).evaluate("core_mean_intensity", separation),
+            ).evaluate(separation),
             before,
             rtol=1e-12,
         )
         np.testing.assert_allclose(
             stellar_intensity_curves(coro, 0.0, interpolation="quintic").evaluate(
-                "core_mean_intensity", separation
+                separation
             ),
             quintic_ring_reference(
                 coro.stellar_map(None, 0.0).data,

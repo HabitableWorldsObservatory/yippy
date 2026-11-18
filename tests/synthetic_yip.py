@@ -42,15 +42,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import astropy.io.fits as pyfits
 import equinox as eqx
 import interpax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Frame, PixelGrid
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.performance import leakage_weights, performance_curves
 
-from yippy import Coronagraph
+from yippy import open_yip
+from yippy.testing import write_synthetic_yip as write_fixture_arrays
+from yippy.writer import yip_header
 
 # A package small enough to write and load inside a test, and coarse enough
 # that a pixel-membership aperture is a visible error source rather than a
@@ -156,27 +158,6 @@ def _gaussian_psf(npix, pixscale, center, x0_lod, y0_lod, sigma_lod, flux):
     return amplitude * np.exp(-r2 / (2.0 * sigma_lod**2))
 
 
-def _header(npix, n_plane, pixscale, center, design):
-    """A header carrying every keyword the reader recognizes."""
-    h = pyfits.Header()
-    h["DESIGN"] = (design, "synthetic analytic package")
-    h["D"] = (6.0, "meters, telescope diameter")
-    h["D_INSC"] = (5.0, "meters, inscribed diameter")
-    h["PIXSCALE"] = (pixscale, "lambda/D per pixel")
-    h["LAMBDA"] = (500.0, "nm, central wavelength")
-    h["MINLAM"] = (450.0, "nm")
-    h["MAXLAM"] = (550.0, "nm")
-    h["XCENTER"] = (center + 0.5, "00LL pixel corner count, x optical axis")
-    h["YCENTER"] = (center + 0.5, "00LL pixel corner count, y optical axis")
-    h["OBSCURED"] = (0.0, "fraction of the pupil obscured")
-    h["JITTER"] = (0.0, "mas")
-    h["N_LAM"] = (1, "wavelengths")
-    h["N_STAR"] = (n_plane, "stellar diameters")
-    h["ZERNIKE"] = ("none", "aberration set")
-    h["WFE"] = (0.0, "nm")
-    return h
-
-
 def write_synthetic_yip(
     directory: Path,
     kind: str = "1d",
@@ -221,7 +202,6 @@ def write_synthetic_yip(
             positive, or ``occulter_floor`` is negative.
     """
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     center = (npix - 1) / 2
     if occulter_floor < 0:
         raise ValueError("occulter_floor must be non-negative")
@@ -251,32 +231,43 @@ def write_synthetic_yip(
             for (x, y), t_occ in zip(offsets, occulter, strict=True)
         ]
     ).astype(np.float64)
-    pyfits.PrimaryHDU(
-        psfs, header=_header(npix, len(psfs), pixscale, center, "synthetic-offax")
-    ).writeto(directory / "offax_psf.fits", overwrite=True)
-    pyfits.PrimaryHDU(offset_payload).writeto(
-        directory / "offax_psf_offset_list.fits", overwrite=True
-    )
-
     # One constant map per stellar diameter: the mean over any aperture is the
     # constant, so core mean intensity has an exact expected value.
     diams = np.array(DIAMS_LOD, dtype=np.float64)
     stellar = np.full((len(diams), npix, npix), stellar_level, dtype=np.float64)
-    pyfits.PrimaryHDU(
-        stellar,
-        header=_header(npix, len(diams), pixscale, center, "synthetic-stellar"),
-    ).writeto(directory / "stellar_intens.fits", overwrite=True)
-    pyfits.PrimaryHDU(diams).writeto(
-        directory / "stellar_intens_diam_list.fits", overwrite=True
-    )
-
     xx, yy = _grids(npix, pixscale, center)
     radius = np.sqrt(xx**2 + yy**2)
     sky = 1.0 - np.exp(-((radius / sky_trans_r0) ** 2))
-    pyfits.PrimaryHDU(
-        sky.astype(np.float64),
-        header=_header(npix, 1, pixscale, center, "synthetic-sky"),
-    ).writeto(directory / "sky_trans.fits", overwrite=True)
+    grid = PixelGrid.focal(npix, pixscale, Frame(500.0, 6.0, "circumscribed"))
+    headers = {
+        product: yip_header(
+            grid,
+            design=design,
+            inscribed_diameter_m=5.0,
+            min_wavelength_nm=450.0,
+            max_wavelength_nm=550.0,
+            obscured=0.0,
+            jitter_mas=0.0,
+            n_wavelengths=1,
+            n_pointings=n_plane,
+            zernike="none",
+            wfe_nm=0.0,
+        )
+        for product, design, n_plane in (
+            ("offaxis_psfs", "synthetic-offax", len(psfs)),
+            ("stellar_intensity", "synthetic-stellar", len(diams)),
+            ("sky_transmission", "synthetic-sky", 1),
+        )
+    }
+    write_fixture_arrays(
+        directory,
+        grid=grid,
+        offsets_xy_lod=offset_payload,
+        psfs=psfs,
+        stellar=(diams, stellar),
+        sky=sky,
+        headers=headers,
+    )
 
     return SyntheticYIP(
         path=directory,
@@ -296,7 +287,6 @@ def write_synthetic_yip(
 
 def synthetic_coronagraph(path, n=24, *, rules=()):
     """Write an analytic quadrant YIP and return its immutable table model."""
-    path.mkdir(exist_ok=True)
     scale, center, sigma = 0.5, (n - 1) / 2, 0.7
     yy, xx = np.indices((n, n))
     xx, yy = (xx - center) * scale, (yy - center) * scale
@@ -313,45 +303,30 @@ def synthetic_coronagraph(path, n=24, *, rules=()):
             for x, y in offsets
         ]
     )
-    header = pyfits.Header(
-        {
-            "D": 6.0,
-            "D_INSC": 4.7,
-            "OBSCURED": 0.2,
-            "PIXSCALE": scale,
-            "LAMBDA": 500.0,
-            "MINLAM": 450.0,
-            "MAXLAM": 550.0,
-            "XCENTER": center + 0.5,
-            "YCENTER": center + 0.5,
-            "N_LAM": 1,
-            "N_STAR": 3,
-        }
-    )
-    for key, unit in (
-        ("D", "m"),
-        ("D_INSC", "m"),
-        ("LAMBDA", "nm"),
-        ("MINLAM", "nm"),
-        ("MAXLAM", "nm"),
-    ):
-        header.comments[key] = f"value in {unit}"
-    for filename, data in (
-        ("offax_psf", psfs),
-        ("offax_psf_offset_list", offsets),
-        (
-            "stellar_intens",
-            np.stack([np.full((n, n), 1e-8 * (1 + d * d)) for d in (0.0, 0.1, 0.2)]),
+    grid = PixelGrid.focal(n, scale, Frame(500.0, 6.0, "circumscribed"))
+    diams = np.array([0.0, 0.1, 0.2])
+    write_fixture_arrays(
+        path,
+        grid=grid,
+        offsets_xy_lod=offsets,
+        psfs=psfs,
+        stellar=(diams, np.stack([np.full((n, n), 1e-8 * (1 + d * d)) for d in diams])),
+        sky=1 - np.exp(-(xx * xx + yy * yy) / 4),
+        headers=yip_header(
+            grid,
+            inscribed_diameter_m=4.7,
+            obscured=0.2,
+            min_wavelength_nm=450.0,
+            max_wavelength_nm=550.0,
+            n_wavelengths=1,
+            n_pointings=3,
         ),
-        ("stellar_intens_diam_list", np.array([0.0, 0.1, 0.2])),
-        ("sky_trans", 1 - np.exp(-(xx * xx + yy * yy) / 4)),
-    ):
-        pyfits.PrimaryHDU(data, header).writeto(
-            path / f"{filename}.fits", overwrite=True
-        )
-    return Coronagraph(
-        path, rules=rules or (DEFAULT_APERTURE_RULE,)
-    ).create_psf_datacube()
+    )
+    return (
+        open_yip(path)
+        .prepare(rules=rules or (DEFAULT_APERTURE_RULE,))
+        .create_psf_datacube()
+    )
 
 
 def replace_stellar_tables(coro, grid, diameters_lod, maps):

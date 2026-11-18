@@ -10,7 +10,7 @@ from astropy.io import fits
 from hwoutils.grids import Image, PixelGrid, resample
 from synthetic_yip import synthetic_coronagraph
 
-from yippy import Coronagraph
+from yippy import open_yip
 
 
 def test_separate_stellar_and_sky_frames(cached_diameter_coro):
@@ -97,7 +97,7 @@ def test_simple_primary_from_yip(unit, tmp_path):
             hdus[0].header["D"] = (6.0 * scale, f"diameter in {unit}")
             hdus[0].header["D_INSC"] = (4.7 * scale, f"inscribed diameter in {unit}")
             hdus[0].header["OBSCURED"] = obscured
-        primary = Coronagraph(path).primary
+        primary = open_yip(path).prepare().primary
         assert primary.diameter("circumscribed") == 6.0
         assert primary.diameter("inscribed") == 4.7
         np.testing.assert_allclose(
@@ -122,4 +122,4 @@ def test_simple_primary_from_yip_requires_geometry(key, tmp_path):
             "OBSCURED": "obscured",
         }[key],
     ):
-        _ = Coronagraph(path).primary
+        _ = open_yip(path).prepare().primary

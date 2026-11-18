@@ -1,12 +1,12 @@
 """FITS byte order must be converted before JAX PSF downsampling."""
 
 import astropy.io.fits as fits
-import astropy.units as u
 import jax
 import numpy as np
 import pytest
 from hwoutils.grids import Frame, PixelGrid
 
+from yippy.header import HeaderData
 from yippy.offax import OffAx
 
 
@@ -27,14 +27,12 @@ def test_downsample_fits_psfs(tmp_path):
     # The parent reader bypassed metadata; it supplied no default PIXSCALE.
     # A physical grid now needs it, unless an explicit grid is supplied.
     with pytest.raises(ValueError, match="PIXSCALE"):
-        OffAx(tmp_path, "psfs.fits", "offsets.fits", 0.1 * u.arcsec / u.pix, True, True)
+        HeaderData.from_fits_header(fits.getheader(tmp_path / "psfs.fits")).pixel_grid()
     result = OffAx(
-        tmp_path,
-        "psfs.fits",
-        "offsets.fits",
-        0.1 * u.arcsec / u.pix,
-        True,
-        True,
+        fits.getdata(tmp_path / "psfs.fits"),
+        fits.getdata(tmp_path / "offsets.fits"),
+        x_symmetric=True,
+        y_symmetric=True,
         downsample_shape=(4, 4),
         grid=PixelGrid.focal(8, 0.1, Frame(500, 6, "circumscribed")),
     )

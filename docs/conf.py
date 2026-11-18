@@ -79,7 +79,7 @@ nb_execution_excludepatterns = [
 
 
 def _generate_yip_catalog_table(app):
-    """Pre-build hook: write docs/_generated/yip_catalog.md from CATALOG.
+    """Pre-build hook: write docs/_generated/yip_catalog.md from the archive catalog.
 
     Keeps the public docs page in lockstep with the catalog source.
     """
@@ -88,7 +88,7 @@ def _generate_yip_catalog_table(app):
 
     repo_root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(repo_root / "src"))
-    from yippy.datasets import CATALOG
+    from yippy.datasets import list_yips, yip_info
 
     rows = [
         "| YIP name | Telescope | Coronagraph | Sampling | Designer |",
@@ -96,12 +96,13 @@ def _generate_yip_catalog_table(app):
     ]
     # Telescope is optional for design-study YIPs that have no fixed
     # telescope-architecture pairing; render those cells as an em dash.
-    for name, meta in sorted(CATALOG.items()):
-        telescope = meta.get("telescope")
+    for name in sorted(list_yips()):
+        archive = yip_info(name)
+        telescope = archive.telescope
         telescope_cell = f"`{telescope}`" if telescope else "--"
         rows.append(
-            f"| `{name}` | {telescope_cell} | `{meta['coronagraph']}` | "
-            f"`{meta['sampling']}` | {meta['designer']} |"
+            f"| `{name}` | {telescope_cell} | `{archive.coronagraph}` | "
+            f"`{archive.sampling}` | {archive.designer} |"
         )
 
     out_dir = Path(__file__).parent / "_generated"

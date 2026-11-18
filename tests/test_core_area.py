@@ -29,7 +29,7 @@ from optixstuff.performance import performance_curves
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy.performance import CORE_STEP_LOD, core_separations
 
 # Separations (lambda/D) probed, on and between the tabulated offsets.
@@ -88,7 +88,7 @@ def test_core_area_of_a_gaussian_is_its_closed_form(gaussian_package, ratio):
     centered on a pixel the cells cross the threshold in symmetric rings and
     the area is off by 9 percent at a ratio of 0.5.
     """
-    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(gaussian_package.path).prepare(rules=(HalfMaximum(ratio),))
     expected = gaussian_core_area(gaussian_package.psf_sigma_lod, ratio)
     got = np.array(
         [
@@ -182,7 +182,7 @@ def test_core_area_follows_the_synthesized_psf_between_offsets(growth_package, r
     overstates it by 4 to 9 percent here, because the core of the mixed PSF
     is not the mix of the two cores.
     """
-    coro = Coronagraph(growth_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(growth_package.path).prepare(rules=(HalfMaximum(ratio),))
     record = performance_curves(
         lambda s: coro.off_axis_psf(None, s, grid=None),
         coro.stellar_map(None, 0.0, grid=None),
@@ -257,7 +257,7 @@ def shipped_trunc_coro():
         if REFERENCE_DATA_REQUIRED:
             pytest.fail(message)
         pytest.skip(message)
-    return Coronagraph(yip_path, rules=(HalfMaximum(SHIPPED_RATIO),))
+    return open_yip(yip_path).prepare(rules=(HalfMaximum(SHIPPED_RATIO),))
 
 
 @pytest.mark.parametrize("separation_lod", (3.3, 4.7, 6.1, 9.4))
@@ -315,7 +315,7 @@ def test_core_throughput_of_a_gaussian_is_its_closed_form(gaussian_package, rati
     pixels misplaces the core boundary and is off by several percent for a
     core centered on a pixel.
     """
-    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(gaussian_package.path).prepare(rules=(HalfMaximum(ratio),))
     nodes = np.sort(gaussian_package.offsets[:, 0])
     flux = np.interp(
         GAUSSIAN_SEPARATIONS_LOD,
@@ -346,7 +346,7 @@ def test_core_throughput_follows_the_synthesized_psf_between_offsets(
     Interpolating the tabulated throughputs linearly in separation instead
     overstates it by 2 to 7 percent here.
     """
-    coro = Coronagraph(growth_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(growth_package.path).prepare(rules=(HalfMaximum(ratio),))
     record = performance_curves(
         lambda s: coro.off_axis_psf(None, s, grid=None),
         coro.stellar_map(None, 0.0, grid=None),
@@ -440,7 +440,7 @@ def test_core_near_the_image_edge_is_its_closed_form(edge_package, ratio):
     interpolant evaluated next to the edge would wrap light from the
     opposite border into it.
     """
-    coro = Coronagraph(edge_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(edge_package.path).prepare(rules=(HalfMaximum(ratio),))
     separations = (6.0, 6.5, 7.0)
     t_expected, a_expected = gaussian_core_expected(edge_package, separations, ratio)
     t_got = np.array(
@@ -466,7 +466,7 @@ def test_core_inside_the_inner_working_angle_is_its_closed_form(
     magnitude near the axis without changing their shape, so the core is
     defined relative to the PSF's own peak and keeps its closed form.
     """
-    coro = Coronagraph(gaussian_package.path, rules=(HalfMaximum(ratio),))
+    coro = open_yip(gaussian_package.path).prepare(rules=(HalfMaximum(ratio),))
     separations = (0.1, 0.25, 0.5, 0.8)
     t_expected, a_expected = gaussian_core_expected(
         gaussian_package, separations, ratio
@@ -565,7 +565,7 @@ def test_core_converges_in_subpixels(shipped_trunc_coro, separation_lod):
 def test_default_core_separations_are_the_package_offsets(growth_package):
     """Default curves rely only on PSFs supplied by the package."""
     rule = HalfMaximum(0.5)
-    coro = Coronagraph(growth_package.path, rules=(rule,))
+    coro = open_yip(growth_package.path).prepare(rules=(rule,))
     sep = coro.curves(rule).separation_lod
     nodes = np.unique(growth_package.offsets[:, 0])
     np.testing.assert_array_equal(sep, nodes[nodes >= 0])
@@ -573,7 +573,7 @@ def test_default_core_separations_are_the_package_offsets(growth_package):
 
 def test_synthesized_core_separations_remain_opt_in(growth_package):
     """Explicit synthesis adds the quarter-lambda/D grid between native offsets."""
-    coro = Coronagraph(growth_package.path)
+    coro = open_yip(growth_package.path).prepare()
     record = performance_curves(
         lambda s: coro.off_axis_psf(None, s, grid=None),
         coro.stellar_map(None, 0.0, grid=None),

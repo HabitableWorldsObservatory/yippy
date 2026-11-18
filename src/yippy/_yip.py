@@ -1,11 +1,10 @@
 """Private host-side YIP loading and cache preparation."""
 
-import hashlib
 import os
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
-import astropy.io.fits as pyfits
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,22 +14,20 @@ from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, RecordRule
 from optixstuff.performance import (
     CORE_OVERSAMPLE,
-    PerformanceCurves,
+    SampledProfile,
     performance_curves,
 )
 from tqdm import tqdm
 
 from ._precision import dtype_tag, float_dtype
 from ._version import __version__
-from .header import HeaderData
 from .interpolation import SincOptions, blend_read
 from .logger import logger
 from .offjax import OffJAX
 from .performance import _iter_xaxis_positions
-from .sky_trans import SkyTrans
+from .sky_trans import sky_transmission_image
 from .stellar_intens import StellarIntens
 from .util import (
-    PERFORMANCE_FIELDS,
     PERFORMANCE_VERSION,
     cache_identity_digest,
     load_coro_performance_from_fits,
@@ -88,12 +85,7 @@ class _YIPData:
 
     def __init__(
         self,
-        yip_path: Path,
-        stellar_intens_file: str = "stellar_intens.fits",
-        stellar_diam_file: str = "stellar_intens_diam_list.fits",
-        offax_data_file: str = "offax_psf.fits",
-        offax_offsets_file: str = "offax_psf_offset_list.fits",
-        sky_trans_file: str = "sky_trans.fits",
+        package,
         x_symmetric: bool = True,
         y_symmetric: bool = True,
         use_quarter_psf_datacube: bool = True,
@@ -104,84 +96,23 @@ class _YIPData:
         interpolation: str = "blend",
         sinc_options: SincOptions | None = None,
     ):
-        """Initialize the Coronagraph object.
-
-        Loads the coronagraph data from the given yield input package and creates
-        the interpolation functions for the stellar intensity and off-axis PSF.
-
-        Args:
-            yip_path (Path):
-                Yield input package directory. Must have fits files
-                    offax_psf_offset_list - The off-axis PSF list
-                    offax_psf - PSF of off-axis sources
-                    sky_trans - Sky transmission data
-            stellar_intens_file (str):
-                Name of the stellar intensity file. Default is stellar_intens.fits
-            stellar_diam_file (str):
-                Name of the stellar intensity diameter list file. Default is
-                stellar_intens_diam_list.fits
-            offax_data_file (str):
-                Name of the off-axis PSF file. Default is offax_psf.fits
-            offax_offsets_file (str):
-                Name of the off-axis PSF offset list file. Default is
-                offax_psf_offset_list.fits
-            sky_trans_file (str):
-                Name of the sky transmission data file. Default is sky_trans.fits.
-            performance_file (str):
-                Name of the coronagraph performance (contrast, throughput) fits file.
-            x_symmetric (bool):
-                Whether off-axis PSFs are symmetric about the x-axis. Default is True.
-            y_symmetric (bool):
-                Whether off-axis PSFs are symmetric about the y-axis. Default is True.
-            use_quarter_psf_datacube (bool):
-                Whether to compute the PSF datacube in only the first quadrant.
-                This is faster and uses less memory, but may not be accurate for
-                all coronagraphs. Default is False.
-            downsample_shape (tuple[int, int] | None):
-                Optional target shape (ny, nx) to downsample PSFs to. If provided,
-                all PSFs will be resampled to this shape immediately after loading,
-                conserving total flux. The pixel_scale_arcsec will be updated
-                accordingly.
-                Default is None (no downsampling).
-            rule: Static Circular or HalfMaximum photometric rule.
-            leakage_rule: aperture_mean or azimuthal_ring_mean for the density.
-            interpolation (str):
-                Off-axis backend: blend (default), legacy_blend, auto, or strict
-                sinc. Both explicit blend selectors use the same algorithm and
-                retain their requested names in provenance. Versioned quadrant
-                deliveries require sinc; they have no blend representation.
-            sinc_options (SincOptions | None):
-                Selected fixed product, permission restriction, allocation
-                ceilings and read policy. Error budgets use photons per pixel.
-        """
-        ###################
-        # Read input data #
-        ###################
-        yip_path = Path(yip_path)
-        self.yip_path = yip_path
+        """Prepare interpolation backends and aperture records from native samples."""
         from .sinc_routing import route_interpolation
 
+        self.package = package
+        yip_path = package.source.path
+        if package.product_id is not None:
+            sinc_options = sinc_options or SincOptions()
+            if sinc_options.product_id not in (None, package.product_id):
+                raise ValueError(
+                    "sinc_options.product_id differs from the open package"
+                )
+            if sinc_options.product_id is None and len(package._manifest["planes"]) > 1:
+                sinc_options = replace(sinc_options, product_id=package.product_id)
         delivery, backend, self.interpolation_info = route_interpolation(
-            yip_path, interpolation, sinc_options, downsample_shape
+            yip_path, interpolation, sinc_options, downsample_shape, package=package
         )
-        self._sinc_options = sinc_options or SincOptions()
         self._sinc_delivery = delivery
-        package_path = (
-            yip_path
-            if delivery is None
-            else yip_path / delivery.manifest["legacy_package_path"]
-        )
-
-        # Capture the source generation before reading any data, so cache
-        # entries written later by this object are labeled with the files it
-        # actually loaded even if the package is edited in the meantime.
-        self._source_sig = self._source_signature()
-        self._source_files = {
-            "stellar_intens": stellar_intens_file,
-            "stellar_diams": stellar_diam_file,
-            "offax_psf": offax_data_file,
-            "offax_offsets": offax_offsets_file,
-        }
         self.x_symmetric = x_symmetric
         self.y_symmetric = y_symmetric
 
@@ -194,28 +125,12 @@ class _YIPData:
         self.leakage_rule = leakage_rule
         self.curves_by_rule = {}
 
-        # Get header and calculate the lambda/D value
-        stellar_intens_header = pyfits.getheader(
-            Path(package_path, stellar_intens_file), 0
-        )
-
-        # Get pixel scale with units
-        self.header = HeaderData.from_fits_header(stellar_intens_header)
+        self.header = package.header.stellar_intensity
         self.pixel_scale_arcsec = self.header.pixscale
         self.frac_obscured = self.header.obscured
-
-        # Stellar intensity of the star being observed as function of stellar
-        # angular diameter (unitless)
-        self.stellar_intens = StellarIntens(
-            package_path, stellar_intens_file, stellar_diam_file
-        )
-
+        self.stellar_intens = StellarIntens(package)
         self.offaxis_header = (
-            delivery.header
-            if delivery is not None
-            else HeaderData.from_fits_header(
-                pyfits.getheader(package_path / offax_data_file)
-            )
+            delivery.header if delivery else package.header.offaxis_psfs
         )
         if delivery is None and (
             self.offaxis_header.pixel_grid() != self.header.pixel_grid()
@@ -230,14 +145,12 @@ class _YIPData:
             backend
             if backend is not None
             else OffJAX(
-                yip_path,
-                offax_data_file,
-                offax_offsets_file,
-                self.offaxis_header.pixscale,
+                package.offaxis_psfs,
+                package.offsets_xy_lod,
+                self.offaxis_header.pixel_grid(),
                 x_symmetric,
                 y_symmetric,
                 downsample_shape=downsample_shape,
-                grid=self.offaxis_header.pixel_grid(),
             )
         )
 
@@ -248,9 +161,7 @@ class _YIPData:
             self.stellar_pixel_scale_arcsec = self.header.pixscale
             self.offaxis_header = delivery.header
             self.pixel_scale_arcsec = self.offax.pixel_scale_arcsec
-            self.sky_header = HeaderData.from_fits_header(
-                pyfits.getheader(package_path / sky_trans_file)
-            )
+            self.sky_header = package.header.sky_transmission
 
         # Update pixel_scale_arcsec if downsampling was applied
         if downsample_shape is not None:
@@ -268,7 +179,7 @@ class _YIPData:
             )
 
         # Get the sky_trans mask
-        self.sky_trans = SkyTrans(package_path, sky_trans_file)
+        self.sky_trans = sky_transmission_image(package)
 
         # PSF datacube axes are (source_y, source_x, y, x).
         # Given the computational cost of generating this
@@ -341,29 +252,17 @@ class _YIPData:
         """Select the current rule's complete record from a validated cache."""
         return self._prepare_record()
 
-    def _profile_record(self, separation, name, values):
-        """Put ancillary sampled quantities through the common curve evaluator."""
-        base = self.performance
-        fields = {key: base.evaluate(key, separation) for key in PERFORMANCE_FIELDS}
-        return PerformanceCurves(
-            separation,
-            base.frame,
-            base.rule,
-            **fields,
-            iwa_lod=base.iwa_lod,
-            data_extent_lod=base.data_extent_lod,
-            leakage_rule=base.leakage_rule,
-            extra={name: values},
-        )
-
     def _initialize_profiles(self):
-        """Prepare only the ancillary sky transmission on its radial grid."""
-        separation, values, counts = radial_profile(self.sky_trans())
+        """Measure radial transmission on the ancillary product's native grid."""
+        sky = self.sky_trans
+        separation, values, counts = radial_profile(sky)
         populated = np.asarray(counts) > 0
-        self.occultation_record: PerformanceCurves = self._profile_record(
+        self.occulter_transmission_profile = SampledProfile(
             np.asarray(separation)[populated],
-            "occulter_transmission",
             np.asarray(values)[populated],
+            quantity="occulter_transmission",
+            frame=sky.grid.frame,
+            interpolation="linear",
         )
 
     def _datacube_offsets(self):
@@ -618,7 +517,7 @@ class _YIPData:
 
     def __repr__(self):
         """String representation of the Coronagraph object."""
-        base_str = f"Coronagraph {self.name} ({self.yip_path})\n"
+        base_str = f"Coronagraph {self.name} ({self.package.source.path})\n"
         base_str += f"{self.offax.type} off-axis PSFs, {self.offax.n_psfs} provided"
 
         if hasattr(self, "performance"):
@@ -634,45 +533,17 @@ class _YIPData:
     @property
     def _cache_dir(self) -> Path:
         """Directory for all yippy-computed artifacts."""
-        d = self.yip_path / "yippy_cache"
+        d = self.package.source.path / "yippy_cache"
         d.mkdir(exist_ok=True)
         return d
 
-    def _source_signature(self) -> str:
-        """Short signature over the source YIP FITS files' size and mtime.
-
-        Folded into every cache filename so that an in-place overwrite of the
-        source YIP data (same filenames, new content) invalidates cached
-        performance curves and PSF datacubes, even when the aperture
-        settings, downsample target, and yippy version are unchanged. Cheap:
-        stats top-level FITS files only, never reads their contents, and does
-        not descend into ``yippy_cache`` itself (``glob`` is non-recursive).
-        """
-        stat_bits = []
-        source_path = self.yip_path
-        if getattr(self, "_sinc_delivery", None) is not None:
-            source_path = (
-                self.yip_path / self._sinc_delivery.manifest["legacy_package_path"]
-            )
-        for fits_path in sorted(source_path.glob("*.fits")):
-            st = fits_path.stat()
-            stat_bits.append(f"{fits_path.name}:{st.st_size}:{st.st_mtime_ns}")
-        return hashlib.sha1("|".join(stat_bits).encode()).hexdigest()[:8]
-
-    def _cache_identity_base(self, artifact: str, source_roles) -> dict:
-        """Identity components shared by every automatically cached artifact.
-
-        Args:
-            artifact: Artifact kind, e.g. ``"performance"``.
-            source_roles: Keys of ``self._source_files`` whose selected file
-                names the artifact depends on.
-        """
+    def _cache_identity_base(self, artifact: str) -> dict:
+        """Identity shared by artifacts computed from this source generation."""
         identity = {
             "artifact": artifact,
             "schema": _CACHE_SCHEMA_VERSION,
             "sampling": _SAMPLING_CACHE_VERSION,
-            "source_signature": self._source_sig,
-            "source_files": {role: self._source_files[role] for role in source_roles},
+            "source_signature": self.package.source.digest,
             "npixels": int(self.npixels),
             "dtype": dtype_tag(),
         }
@@ -690,9 +561,7 @@ class _YIPData:
         offsets, which a quarter cube never evaluates, so they are part of the
         identity of full cubes only.
         """
-        identity = self._cache_identity_base(
-            "psf_datacube", ("offax_psf", "offax_offsets")
-        )
+        identity = self._cache_identity_base("psf_datacube")
         identity["layout"] = 2
         identity["grid"] = {
             "center_xy": (self.grid.center_x, self.grid.center_y),
@@ -718,7 +587,7 @@ class _YIPData:
         digest = cache_identity_digest(self._datacube_identity())[:16]
         return (
             self._cache_dir / f"psf_datacube{ext}_{dtype_tag()}_{self.npixels}px_"
-            f"{self._source_sig}_{digest}.npy"
+            f"{self.package.source.digest}_{digest}.npy"
         )
 
     @property
@@ -734,10 +603,7 @@ class _YIPData:
         """Complete identity of a weighted photometry record."""
         from dataclasses import asdict
 
-        identity = self._cache_identity_base(
-            "performance",
-            ("stellar_intens", "stellar_diams", "offax_psf", "offax_offsets"),
-        )
+        identity = self._cache_identity_base("performance")
         identity.update(
             {
                 "performance_record": PERFORMANCE_VERSION,
@@ -766,7 +632,7 @@ class _YIPData:
         digest = cache_identity_digest(self._auto_perf_identity())[:16]
         return (
             f"perf_{type(self.rule).__name__}_{self.npixels}px_{dtype_tag()}_"
-            f"{self._source_sig}_{digest}.fits"
+            f"{self.package.source.digest}_{digest}.fits"
         )
 
     def _prepare_record(
@@ -803,7 +669,7 @@ class _YIPData:
         directory.mkdir(parents=True, exist_ok=True)
         filename = performance_file or (
             f"perf_{type(rule).__name__}_{self.npixels}px_{dtype_tag()}_"
-            f"{self._source_sig}_{expected[:16]}.fits"
+            f"{self.package.source.digest}_{expected[:16]}.fits"
         )
         path = directory / (load_from_file or filename)
         record = None

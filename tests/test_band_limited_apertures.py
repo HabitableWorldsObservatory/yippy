@@ -215,7 +215,7 @@ def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
     """Quantify 10x boundary quadrature against 40x on a native shipped PSF."""
     coro = shipped_coro
     pixel_lod = float(coro.grid.step)
-    for pos in _iter_xaxis_positions(_YIPData(coro.yip_path)):
+    for pos in _iter_xaxis_positions(_YIPData(coro.package)):
         values = []
         for factor in (10, 40):
             with jax.enable_x64():
@@ -248,7 +248,7 @@ def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
 def test_shipped_contrast_is_repeatable_for_faint_stellar_sums(shipped_coro):
     """Faint stellar DFT sums are stable despite cancellation of bright modes."""
     coro = shipped_coro
-    positions = list(_iter_xaxis_positions(_YIPData(coro.yip_path)))
+    positions = list(_iter_xaxis_positions(_YIPData(coro.package)))
     images = {
         pos.separation: Image(
             pos.psf, coro.grid, (), "per_pixel", "stellar_flux_fraction"
@@ -389,7 +389,7 @@ def test_truncation_peak_only_safeguard(value, ratio):
 
 def test_shipped_truncation_stays_near_nominal_source(shipped_coro):
     """The on-axis core excludes unrelated bright leakage outside its window."""
-    pos = next(_iter_xaxis_positions(_YIPData(shipped_coro.yip_path)))
+    pos = next(_iter_xaxis_positions(_YIPData(shipped_coro.package)))
     with jax.enable_x64():
         flux, _ = truncation_core(
             jnp.asarray(pos.psf, dtype=jnp.float64),

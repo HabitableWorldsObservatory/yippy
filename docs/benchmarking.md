@@ -22,7 +22,7 @@ Select an aperture with `Circular(radius_lod, centre="source")` or
 position, keeping the aperture centre fixed in angle independently of
 pixelization. Use `centre="peak"` for a circle following the refined local PSF
 peak. HalfMaximum includes only the region connected to the source peak.
-Declare the rules with `Coronagraph(path, rules=(...))`. Select a prepared
+Declare the rules with `open_yip(path).prepare(rules=(...))`. Select a prepared
 record with `record = coro.curves(rule)` and evaluate every curve with
 `record.evaluate(name, separation_lod)`, including export samples. Generic
 `PerformanceCurves` interpolation and aperture photometry are owned by

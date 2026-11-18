@@ -1,22 +1,7 @@
 """Public catalog and loader for yield input packages (YIPs).
 
-The CATALOG dict is the source of truth: keys are flat YIP names like
-``eac1_aavc_2d``; values carry just enough metadata to drive downloads
-and filtered discovery (``telescope``, ``coronagraph``, ``sampling``,
-``md5``). Descriptive metadata (designer, wavelengths, dark-zone
-extent, ...) lives in the FITS headers inside each YIP, not here.
-
-Archives are hosted as assets on a tagged GitHub release of this repo
-(currently ``data-v1``) and fetched via pooch over HTTPS. The release
-tag is separate from the code-release lifecycle managed by
-release-please. To publish new YIPs: bump ``DATA_RELEASE_TAG`` to a new
-``data-vN``, attach the updated zips to that release, and refresh the
-md5 hashes here.
-
-The catalog currently includes only the two reference YIPs used by the
-yippy paper validation pipeline. Long-term YIP hosting will be provided
-by ExEP, and when that catalog comes online the discovery API here will
-grow back into a thin proxy over it.
+Each catalog entry describes a release asset and its download identity.
+The FITS products inside the asset carry the optical metadata.
 
 Public API:
 
@@ -33,8 +18,8 @@ from __future__ import annotations
 import difflib
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pooch
 from pooch import Untar, Unzip
@@ -54,77 +39,66 @@ logging.getLogger("pooch").setLevel(logging.WARNING)
 #   3. pooch.os_cache("yippy") -- platform default via platformdirs
 CACHE_DIR_ENV_VAR = "YIPPY_CACHE_DIR"
 
-# ---------------------------------------------------------------------------
-# Release tag carrying the YIP zip assets on this repo's GitHub releases.
-# Bump to ``data-vN`` when the underlying YIP files change.
-# ---------------------------------------------------------------------------
-DATA_RELEASE_TAG: str = "data-v2"
-_DATA_BASE_URL: str = f"https://github.com/HabitableWorldsObservatory/yippy/releases/download/{DATA_RELEASE_TAG}/"
 
+@dataclass(frozen=True)
+class Archive:
+    """A catalog YIP and the release asset that contains its native files."""
 
-# ---------------------------------------------------------------------------
-# Catalog
-#
-# Currently a handful of reference YIPs from the Coronagraph Design Survey.
-# Long-term YIP hosting will be provided by ExEP.
-# ---------------------------------------------------------------------------
-CATALOG: dict[str, dict[str, Any]] = {
-    "eac1_aavc_2d": {
-        "telescope": "eac1",
-        "coronagraph": "aavc",
-        "designer": "Susan Redmond",
-        "md5": "md5:1f4892faff18e55cbec9781a055bea4d",
-    },
-    "eac1_optimal_order_6_1d": {
-        "telescope": "eac1",
-        "coronagraph": "optimal_order_6",
-        "designer": "Rus Belikov",
-        "md5": "md5:df52540008a0e85467720ec91c3a84b8",
-    },
-    "usort_offaxis_ovc": {
-        # No telescope-architecture label; an off-axis vortex coronagraph
-        # design study with no fixed EAC pairing.
-        "coronagraph": "offaxis_ovc",
-        "designer": "Susan Redmond, Emiel Por",
-        "sampling": "1d",
-        "md5": "md5:f288b20f329412917d0a393a4d135439",
-    },
-}
+    name: str
+    coronagraph: str
+    designer: str
+    sampling: str
+    digest: str
+    telescope: str | None = None
+    release: str = "data-v2"
 
+    @property
+    def filename(self) -> str:
+        """Name of the archive as published on the release."""
+        return f"{self.name}.zip"
 
-# Inject the sampling regime as a derived field on each catalog entry. Names
-# that follow the ``{telescope}_{coronagraph}_(1d|2d)`` convention can omit
-# ``sampling`` from their entry and have it parsed from the key suffix;
-# entries whose name does not fit the convention (e.g. legacy or
-# unconventionally-named YIPs) must set ``sampling`` explicitly.
-for _name, _meta in CATALOG.items():
-    if "sampling" in _meta:
-        continue
-    if _name.endswith("_1d"):
-        _meta["sampling"] = "1d"
-    elif _name.endswith("_2d"):
-        _meta["sampling"] = "2d"
-    else:
-        raise RuntimeError(
-            f"Catalog entry {_name!r} must either set 'sampling' explicitly "
-            "or end with `_1d` / `_2d`."
+    @property
+    def url(self) -> str:
+        """Upstream URL of the release asset."""
+        return (
+            "https://github.com/HabitableWorldsObservatory/yippy/releases/download/"
+            f"{self.release}/{self.filename}"
         )
-del _name, _meta
+
+    def archive_path(self, cache_path: str | Path | None = None) -> Path:
+        """Locate the compressed archive without downloading or unpacking it."""
+        root = cache_dir() if cache_path is None else Path(cache_path).expanduser()
+        return root / self.filename
 
 
-def _make_pikachu(cache_dir_path: str | Path) -> pooch.Pooch:
-    """Build a pooch instance for the YIP catalog at ``cache_dir_path``."""
-    return pooch.create(
-        path=cache_dir_path,
-        base_url=_DATA_BASE_URL,
-        registry={f"{name}.zip": meta["md5"] for name, meta in CATALOG.items()},
+_CATALOG = {
+    archive.name: archive
+    for archive in (
+        Archive(
+            name="eac1_aavc_2d",
+            telescope="eac1",
+            coronagraph="aavc",
+            designer="Susan Redmond",
+            sampling="2d",
+            digest="md5:1f4892faff18e55cbec9781a055bea4d",
+        ),
+        Archive(
+            name="eac1_optimal_order_6_1d",
+            telescope="eac1",
+            coronagraph="optimal_order_6",
+            designer="Rus Belikov",
+            sampling="1d",
+            digest="md5:df52540008a0e85467720ec91c3a84b8",
+        ),
+        Archive(
+            name="usort_offaxis_ovc",
+            coronagraph="offaxis_ovc",
+            designer="Susan Redmond, Emiel Por",
+            sampling="1d",
+            digest="md5:f288b20f329412917d0a393a4d135439",
+        ),
     )
-
-
-# Default pooch instance for yippy's YIP cache (platform-default location).
-# Named after Corey's dog. The env-var and per-call overrides build their own
-# pooch on demand; this is the fast path for zero-config users.
-_PIKACHU = _make_pikachu(pooch.os_cache("yippy"))
+}
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +106,7 @@ _PIKACHU = _make_pikachu(pooch.os_cache("yippy"))
 #
 # One small public delivery (a physical-optics propagation of the public
 # LUVOIR-A APLC design) that exercises the sinc-delivery-0.1 format. It is a
-# separate tarball, not a YIP, so it is outside CATALOG.
+# separate tarball, not a YIP, so it is outside the YIP catalog.
 # ---------------------------------------------------------------------------
 SINC_STARTER_NAME: str = "sinc-starter"
 SINC_STARTER_ARCHIVE: str = f"{SINC_STARTER_NAME}.tar.gz"
@@ -204,7 +178,7 @@ def cache_dir() -> Path:
     env = os.environ.get(CACHE_DIR_ENV_VAR)
     if env:
         return Path(env).expanduser()
-    return Path(_PIKACHU.path)
+    return Path(pooch.os_cache("yippy"))
 
 
 def fetch_yip(
@@ -246,13 +220,7 @@ def fetch_yip(
     if name is None and not filters:
         raise TypeError("Pass either `name` or filter kwargs.")
 
-    if name is not None:
-        if name not in CATALOG:
-            suggestions = difflib.get_close_matches(name, CATALOG.keys(), n=5)
-            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
-            raise KeyError(f"Unknown YIP {name!r}.{hint}")
-        resolved = name
-    else:
+    if name is None:
         matches = list_yips(**filters)
         if not matches:
             raise ValueError(
@@ -263,19 +231,20 @@ def fetch_yip(
                 f"Filters {filters!r} matched multiple YIPs: {matches}. "
                 "Pass `name=` directly or narrow filters."
             )
-        resolved = matches[0]
+        name = matches[0]
 
-    if cache_path is not None:
-        pikachu = _make_pikachu(cache_path)
-    elif os.environ.get(CACHE_DIR_ENV_VAR):
-        pikachu = _make_pikachu(cache_dir())
-    else:
-        pikachu = _PIKACHU
-    logger.info(f"Fetching YIP {resolved!r} (cache: {pikachu.path})")
-    paths = pikachu.fetch(f"{resolved}.zip", processor=Unzip())
-    yip_dir = _yip_dir([Path(p) for p in paths], resolved)
-
-    logger.info(f"YIP {resolved!r} available at {yip_dir}")
+    archive = yip_info(name)
+    path = archive.archive_path(cache_path)
+    pikachu = pooch.create(
+        path=path.parent,
+        base_url="",
+        urls={path.name: archive.url},
+        registry={path.name: archive.digest},
+    )
+    logger.info(f"Fetching YIP {name!r} (cache: {path.parent})")
+    paths = pikachu.fetch(path.name, processor=Unzip())
+    yip_dir = _yip_dir([Path(p) for p in paths], name)
+    logger.info(f"YIP {name!r} available at {yip_dir}")
     return str(yip_dir)
 
 
@@ -318,23 +287,26 @@ def list_yips(**filters: str) -> list[str]:
             f"Valid keys are {sorted(_FILTERABLE_FIELDS)}."
         )
     out = []
-    for name, meta in CATALOG.items():
-        if all(meta.get(k) == v for k, v in filters.items()):
+    for name, archive in _CATALOG.items():
+        if all(getattr(archive, k) == v for k, v in filters.items()):
             out.append(name)
     return out
 
 
 def yip_exists(name: str) -> bool:
     """True iff ``name`` is an available YIP in the catalog."""
-    return name in CATALOG
+    return name in _CATALOG
 
 
-def yip_info(name: str) -> dict[str, Any]:
-    """Return the catalog metadata dict for ``name``.
+def yip_info(name: str) -> Archive:
+    """Describe a catalog asset without downloading it.
 
     Raises:
         KeyError: if ``name`` is not in the catalog.
     """
-    if name not in CATALOG:
-        raise KeyError(name)
-    return CATALOG[name]
+    try:
+        return _CATALOG[name]
+    except KeyError:
+        suggestions = difflib.get_close_matches(name, _CATALOG, n=5)
+        hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+        raise KeyError(f"Unknown YIP {name!r}.{hint}") from None

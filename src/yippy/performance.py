@@ -5,15 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import equinox as eqx
-import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.performance import (
     CORE_WINDOW_LOD,
-    PerformanceCurves,
+    SampledProfile,
     azimuthal_mean_profile,
     profile_radii,
 )
@@ -106,13 +103,13 @@ def core_separations(coro: Coronagraph, step_lod: float = CORE_STEP_LOD) -> np.n
 
 
 def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="keys"):
-    """Return a radial per-stellar-pixel intensity record from a Coronagraph.
+    """Measure a radial stellar ring mean in flux fraction per stellar pixel.
 
     This measurement is the ring mean of the stellar map, independent of an
     aperture rule's local leakage density. A traced diameter recomputes the
     profile from the interpolated map. A single supplied profile has no
     diameter dependence; otherwise out-of-range diameters yield NaN.
-    Evaluate ``core_mean_intensity`` on the returned PerformanceCurves.
+    The profile interpolates in linear intensity between sampled radii.
     The spatial reader is static under JIT; use ``eqx.filter_jit``.
     """
     if interpolation not in ("keys", "quintic"):
@@ -120,24 +117,6 @@ def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="ke
     grid = backend.stellar_grid
     radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
     nodes = radii * grid.step
-    zeros = np.zeros_like(nodes)
-    base = PerformanceCurves(
-        nodes,
-        grid.frame,
-        DEFAULT_APERTURE_RULE,
-        throughput=zeros,
-        throughput_variance=zeros,
-        core_area_lod2=zeros,
-        core_area_variance_lod2=zeros,
-        leakage_fraction=zeros,
-        leakage_fraction_variance=zeros,
-        leakage_density_lod2=zeros,
-        leakage_density_variance_lod2=zeros,
-        raw_contrast=zeros,
-        iwa_lod=0.0,
-        data_extent_lod=min(grid.shape) * grid.step / 2,
-        extra={"core_mean_intensity": zeros},
-    )
     knots = backend._stellar_ln_interp.x
     diameter = jnp.asarray(stellar_diam_lod)
     valid = (diameter >= 0) & (diameter <= knots[-1])
@@ -151,26 +130,10 @@ def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="ke
         jnp.asarray(radii),
         interpolation=interpolation,
     )
-    coefficients = interpax.PchipInterpolator(
-        jnp.asarray(nodes), profile, extrapolate=False, check=False
-    ).c
-    tails = jnp.stack(
-        (
-            profile[0],
-            profile[-1],
-            (profile[1] - profile[0]) / (nodes[1] - nodes[0]),
-            (profile[-1] - profile[-2]) / (nodes[-1] - nodes[-2]),
-        )
-    )
-    values = tuple(
-        jnp.where(valid, value, jnp.nan) for value in (profile, coefficients, tails)
-    )
-    return eqx.tree_at(
-        lambda record: (
-            record._extra["core_mean_intensity"],
-            record._coefficients["core_mean_intensity"],
-            record._tails["core_mean_intensity"],
-        ),
-        base,
-        values,
+    return SampledProfile(
+        nodes,
+        jnp.where(valid, profile, jnp.nan),
+        quantity="stellar_ring_mean_per_pixel",
+        frame=grid.frame,
+        interpolation="linear",
     )

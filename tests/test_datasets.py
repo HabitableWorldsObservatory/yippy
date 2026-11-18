@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pooch
 import pytest
 
-from yippy import datasets
+from yippy import datasets, open_yip
 
 VALID_HASH = re.compile(r"^md5:[0-9a-f]{32}$")
 
@@ -20,39 +21,25 @@ VALID_SAMPLING_SUFFIXES = ("_1d", "_2d")
 def test_catalog_keys_match_telescope_coronagraph_sampling_when_conventional():
     """Conventionally-named keys must equal ``{telescope}_{coronagraph}_(1d|2d)``.
 
-    Entries that omit the suffix are exempt and must instead set
-    ``sampling`` explicitly (covered by :func:`test_catalog_sampling_set`).
+    Legacy names without a sampling suffix are exempt.
     """
-    for name, meta in datasets.CATALOG.items():
-        if not (name.endswith("_1d") or name.endswith("_2d")):
-            continue
-        prefix = f"{meta['telescope']}_{meta['coronagraph']}"
-        assert name.startswith(prefix), f"key {name!r} doesn't start with {prefix!r}"
-        suffix = name[len(prefix) :]
-        assert suffix in VALID_SAMPLING_SUFFIXES, (
-            f"key {name!r} has unknown sampling suffix {suffix!r}"
-        )
+    for name in datasets.list_yips():
+        if name.endswith(VALID_SAMPLING_SUFFIXES):
+            archive = datasets.yip_info(name)
+            assert name == "_".join(
+                (archive.telescope, archive.coronagraph, archive.sampling)
+            )
 
 
-def test_catalog_required_fields():
-    """Every entry must carry coronagraph, designer, md5, and sampling.
-
-    ``telescope`` is optional for design-study YIPs that have no fixed
-    telescope-architecture pairing.
-    """
-    required = {"coronagraph", "designer", "md5", "sampling"}
-    for name, meta in datasets.CATALOG.items():
-        missing = required - set(meta)
-        assert not missing, f"{name!r} missing fields: {missing}"
-
-
-def test_catalog_md5_format():
-    """Every catalog entry must have a valid ``md5:<32 hex>`` hash."""
-    for name, meta in datasets.CATALOG.items():
-        md5 = meta["md5"]
-        assert md5 is not None and VALID_HASH.match(md5), (
-            f"{name!r} has bad md5: {md5!r}"
-        )
+def test_catalog_download_identities():
+    """Every catalog name describes a release asset with a pinned hash."""
+    for name in datasets.list_yips():
+        archive = datasets.yip_info(name)
+        assert archive.name == name
+        assert archive.designer and archive.coronagraph
+        assert archive.sampling in {"1d", "2d"}
+        assert VALID_HASH.fullmatch(archive.digest)
+        assert archive.url.endswith(f"/{archive.release}/{archive.filename}")
 
 
 def test_fetch_coronagraph_removed():
@@ -63,7 +50,11 @@ def test_fetch_coronagraph_removed():
 def test_list_yips_no_filter_returns_all():
     """list_yips() with no filters returns all catalog keys."""
     names = datasets.list_yips()
-    assert sorted(names) == sorted(datasets.CATALOG.keys())
+    assert set(names) == {
+        "eac1_aavc_2d",
+        "eac1_optimal_order_6_1d",
+        "usort_offaxis_ovc",
+    }
 
 
 def test_list_yips_telescope_filter():
@@ -117,12 +108,23 @@ def test_yip_exists_unknown_name():
     assert datasets.yip_exists("not_a_real_yip") is False
 
 
-def test_yip_info_returns_metadata_dict():
-    """yip_info() returns the catalog metadata dict for a known entry."""
-    info = datasets.yip_info("eac1_aavc_2d")
-    assert info["telescope"] == "eac1"
-    assert info["coronagraph"] == "aavc"
-    assert "md5" in info
+def test_archive_identity_and_cache_location(monkeypatch, tmp_path):
+    """Describe an immutable asset offline, including cache precedence."""
+    env_cache = tmp_path / "env"
+    monkeypatch.setenv(datasets.CACHE_DIR_ENV_VAR, str(env_cache))
+    archive = datasets.yip_info("eac1_aavc_2d")
+    filename = "eac1_aavc_2d.zip"
+    assert archive.release == "data-v2"
+    assert archive.digest == "md5:1f4892faff18e55cbec9781a055bea4d"
+    assert archive.url == (
+        "https://github.com/HabitableWorldsObservatory/yippy/releases/download/"
+        f"data-v2/{filename}"
+    )
+    assert archive.archive_path() == env_cache / filename
+    assert archive.archive_path(cache_path=tmp_path) == tmp_path / filename
+    assert not env_cache.exists()
+    with pytest.raises(FrozenInstanceError):
+        archive.release = "other"
 
 
 def test_yip_info_unknown_raises_keyerror():
@@ -174,7 +176,7 @@ def test_cache_dir_returns_platform_default_when_env_unset(monkeypatch):
     monkeypatch.delenv(datasets.CACHE_DIR_ENV_VAR, raising=False)
     result = datasets.cache_dir()
     assert isinstance(result, Path)
-    assert result == Path(datasets._PIKACHU.path)
+    assert result == pooch.os_cache("yippy")
 
 
 def test_cache_dir_honors_env_var(monkeypatch, tmp_path):
@@ -240,6 +242,8 @@ def test_fetch_yip_cache_path_builds_separate_pooch(monkeypatch, tmp_path):
     def fake_fetch(self, fname, processor=None):
         captured["path"] = self.path
         captured["fname"] = fname
+        captured["url"] = self.get_url(fname)
+        captured["digest"] = self.registry[fname]
         # Mimic Unzip's output: a single file path inside an unzipped folder.
         target = self.path / f"{fname}.unzip" / fname.removesuffix(".zip")
         target.mkdir(parents=True, exist_ok=True)
@@ -252,20 +256,21 @@ def test_fetch_yip_cache_path_builds_separate_pooch(monkeypatch, tmp_path):
     result = datasets.fetch_yip("eac1_aavc_2d", cache_path=tmp_path)
 
     assert captured["path"] == tmp_path
-    assert captured["fname"] == "eac1_aavc_2d.zip"
+    archive = datasets.yip_info("eac1_aavc_2d")
+    assert captured["fname"] == archive.filename
+    assert captured["url"] == archive.url
+    assert captured["digest"] == archive.digest
     assert result.endswith("eac1_aavc_2d")
 
 
 @pytest.mark.network
 @pytest.mark.skipif(
-    datasets.DATA_RELEASE_TAG.endswith("PLACEHOLDER"),
+    datasets.yip_info("eac1_aavc_2d").release.endswith("PLACEHOLDER"),
     reason="Release tag not yet set; data-vN release pending.",
 )
 def test_fetch_smallest_yip_loads_as_coronagraph(tmp_path):
     """End-to-end: pull the smallest available YIP and load yippy.Coronagraph."""
     from pathlib import Path
-
-    from yippy import Coronagraph
 
     yip_path = Path(datasets.fetch_yip("eac1_aavc_2d"))
     for required in (
@@ -277,7 +282,7 @@ def test_fetch_smallest_yip_loads_as_coronagraph(tmp_path):
     ):
         assert (yip_path / required).is_file(), f"missing {required}"
 
-    coro = Coronagraph(yip_path)
+    coro = open_yip(yip_path).prepare()
     assert coro is not None
 
 
@@ -312,12 +317,7 @@ def test_fetch_yip_returns_the_yip_folder_despite_clutter(tmp_path, monkeypatch)
     root = tmp_path / "eac1_aavc_2d.zip.unzip"
     paths = _unpacked(root, "eac1_aavc_2d", clutter=(".DS_Store",))
 
-    class Stub:
-        path = tmp_path
-
-        def fetch(self, fname, processor=None):
-            return [str(p) for p in paths]
-
-    monkeypatch.setattr(datasets, "_PIKACHU", Stub())
-    monkeypatch.delenv(datasets.CACHE_DIR_ENV_VAR, raising=False)
-    assert datasets.fetch_yip("eac1_aavc_2d") == str(root / "eac1_aavc_2d")
+    monkeypatch.setattr(pooch.Pooch, "fetch", lambda *a, **kw: [str(p) for p in paths])
+    assert datasets.fetch_yip("eac1_aavc_2d", cache_path=tmp_path) == str(
+        root / "eac1_aavc_2d"
+    )

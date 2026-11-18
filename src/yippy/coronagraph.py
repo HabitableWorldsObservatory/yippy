@@ -1,8 +1,8 @@
 """Immutable YIP tables implementing the shared coronagraph contract."""
 
+from copy import copy
 from dataclasses import replace
 from math import pi
-from pathlib import Path
 
 import equinox as eqx
 import interpax
@@ -13,7 +13,7 @@ from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.spectral import Band
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
 from optixstuff.coronagraph import AbstractTableCoronagraph
-from optixstuff.performance import PerformanceCurves, leakage_weights
+from optixstuff.performance import PerformanceCurves, SampledProfile, leakage_weights
 from optixstuff.primary import SimplePrimary
 
 from ._precision import float_dtype
@@ -35,8 +35,8 @@ def _jax_record(record):
     )
 
 
-def _native_samples(offaxis, separations_lod, synthesize):
-    """Retain the shipped PSFs and nearest-to-zero YIP row for native weights."""
+def _aperture_samples(offaxis, separations_lod, synthesize):
+    """Select the nearest axis row, synthesizing PSFs at unmeasured separations."""
     separations_lod = np.asarray(separations_lod)
     y_offsets = np.asarray(offaxis.y_offsets)
     iy = int(np.argmin(np.abs(y_offsets)))
@@ -68,7 +68,6 @@ class Coronagraph(AbstractTableCoronagraph):
     sky_trans: Image
     psf_datacube: object
     header: HeaderData = eqx.field(static=True)
-    yip_path: Path
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
     outer_working_angle_lod: None
@@ -76,24 +75,22 @@ class Coronagraph(AbstractTableCoronagraph):
     _stellar_ln_interp: interpax.CubicSpline
     _records: tuple[PerformanceCurves, ...]
     _leakage_operators: tuple
-    _occultation_record: PerformanceCurves
-    _load_options: tuple = eqx.field(static=True)
-    _sinc_configuration: tuple
-    _source_signature: str = eqx.field(static=True)
+    occulter_transmission_profile: SampledProfile
+    _host: _YIPData = eqx.field(static=True)
+
+    @property
+    def package(self):
+        """Native package from which this model was prepared."""
+        return self._host.package
 
     def __init__(
         self,
-        yip_path,
-        stellar_intens_file="stellar_intens.fits",
-        stellar_diam_file="stellar_intens_diam_list.fits",
-        offax_data_file="offax_psf.fits",
-        offax_offsets_file="offax_psf_offset_list.fits",
-        sky_trans_file="sky_trans.fits",
+        package,
+        *,
         x_symmetric=True,
         y_symmetric=True,
         use_quarter_psf_datacube=True,
         downsample_shape=None,
-        *,
         rules=(DEFAULT_APERTURE_RULE,),
         leakage_rule="aperture_mean",
         interpolation="blend",
@@ -103,36 +100,20 @@ class Coronagraph(AbstractTableCoronagraph):
         rules = tuple(dict.fromkeys(rules))
         if not rules:
             raise ValueError("rules must contain at least one aperture rule")
-        options = (
-            stellar_intens_file,
-            stellar_diam_file,
-            offax_data_file,
-            offax_offsets_file,
-            sky_trans_file,
+        package._check_source()
+        host = _YIPData(
+            package,
             x_symmetric,
             y_symmetric,
             use_quarter_psf_datacube,
             downsample_shape,
-        )
-        host = _YIPData(
-            yip_path,
-            *options,
             rule=rules[0],
             leakage_rule=leakage_rule,
             interpolation=interpolation,
             sinc_options=sinc_options,
         )
-        self.yip_path = Path(yip_path)
-        self._load_options = (options, interpolation)
-        config = host._sinc_options
-        self._sinc_configuration = (
-            config.product_id,
-            config.domain,
-            config.memory,
-            config.policy,
-            config.taps,
-        )
-        self._source_signature = host._source_sig
+        package._check_source()
+        self._host = host
         self.header = host.header
         self.grid = host.grid
         self.stellar_grid = host.stellar_intens.grid
@@ -162,15 +143,17 @@ class Coronagraph(AbstractTableCoronagraph):
                     lambda s: host.create_psf(s, 0.0),
                     self._native_stellar_map(0.0),
                     record,
-                    samples=_native_samples(
+                    samples=_aperture_samples(
                         host.offax, record.separation_lod, host.create_psf
                     ),
                 ),
             )
             for record in self._records
         )
-        self._occultation_record = _jax_record(host.occultation_record)
-        self.sky_trans = host.sky_trans()
+        self.occulter_transmission_profile = _jax_record(
+            host.occulter_transmission_profile
+        )
+        self.sky_trans = host.sky_trans
         self.psf_datacube = None
 
     @property
@@ -221,14 +204,6 @@ class Coronagraph(AbstractTableCoronagraph):
                 return weights
         raise ValueError("No prepared stellar-map weights for this rule")
 
-    def occulter_transmission(self, separation_lod, wavelength_nm=None, *, time_d=0.0):
-        """Dimensionless transmission measured from the ancillary sky product."""
-        if hasattr(separation_lod, "unit"):
-            raise TypeError("separation_lod must be floats in lambda/D")
-        return self._occultation_record.evaluate(
-            "occulter_transmission", separation_lod
-        )
-
     def stellar_frame(self, wavelength_nm) -> Frame:
         """Return the frame of the native stellar intensity product."""
         return self.stellar_grid.frame
@@ -248,8 +223,8 @@ class Coronagraph(AbstractTableCoronagraph):
         )
 
     def aperture_psfs(self, wavelength_nm, separations_lod) -> Image:
-        """Stack the shipped PSFs on the native record row for host preparation."""
-        samples = _native_samples(
+        """Stack PSFs selected or interpolated for this aperture record."""
+        samples = _aperture_samples(
             self._offaxis_backend, separations_lod, self._offaxis_backend.create_psf
         )
         return replace(
@@ -278,7 +253,7 @@ class Coronagraph(AbstractTableCoronagraph):
         )
 
     def source_psfs_with_info(self, x_lod, y_lod):
-        """Native source samples with admission status and backend diagnostics.
+        """Interpolated source PSFs with admission status and backend diagnostics.
 
         Unlike source_psfs, this returns InterpolationRead diagnostics, whose
         intensity has shape (source, y, x), on the native grid only.
@@ -322,7 +297,7 @@ class Coronagraph(AbstractTableCoronagraph):
             raise ValueError("rules must contain at least one aperture rule")
         if leakage_rule is None:
             leakage_rule = self._records[0].leakage_rule
-        host = self._reopen_host(rules[0], leakage_rule)
+        host = self._host_for_rule(rules[0], leakage_rule)
         records = tuple(_jax_record(host._prepare_record(rule)) for rule in rules)
         operators = tuple(
             jax.tree.map(
@@ -331,7 +306,7 @@ class Coronagraph(AbstractTableCoronagraph):
                     lambda s: host.create_psf(s, 0.0),
                     self._native_stellar_map(0.0),
                     record,
-                    samples=_native_samples(
+                    samples=_aperture_samples(
                         host.offax, record.separation_lod, host.create_psf
                     ),
                 ),
@@ -342,19 +317,12 @@ class Coronagraph(AbstractTableCoronagraph):
             lambda c: (c._records, c._leakage_operators), self, (records, operators)
         )
 
-    def _reopen_host(self, rule, leakage_rule):
-        """Reopen the YIP on the host with this coronagraph's load options."""
-        options, interpolation = self._load_options
-        host = _YIPData(
-            self.yip_path,
-            *options,
-            rule=rule,
-            leakage_rule=leakage_rule,
-            interpolation=interpolation,
-            sinc_options=SincOptions(*self._sinc_configuration),
-        )
-        if host._source_sig != self._source_signature:
-            raise ValueError("YIP source files changed; construct a new Coronagraph")
+    def _host_for_rule(self, rule, leakage_rule):
+        """Use the loaded host tables with independent per-request state."""
+        self.package._check_source()
+        host = copy(self._host)
+        host.curves_by_rule = {}
+        host.rule, host.leakage_rule = rule, leakage_rule
         host.offax = self._offaxis_backend
         return host
 
@@ -365,7 +333,7 @@ class Coronagraph(AbstractTableCoronagraph):
         and cache writes happen on the host, outside JAX transformations.
         """
         record = self._records[0]
-        host = self._reopen_host(record.rule, record.leakage_rule)
+        host = self._host_for_rule(record.rule, record.leakage_rule)
         host.create_psf_datacube(batch_size)
         return eqx.tree_at(
             lambda c: c.psf_datacube,
@@ -374,9 +342,11 @@ class Coronagraph(AbstractTableCoronagraph):
             is_leaf=lambda x: x is None,
         )
 
-    def to_exosims(self, units="LAMBDA/D", *, separations_lod=None):
+    def to_exosims(self, units="LAMBDA/D", *, separations_lod=None, output_dir=None):
         """Export the first prepared record to EXOSIMS FITS tables."""
-        return export_exosims(self, units=units, separations_lod=separations_lod)
+        return export_exosims(
+            self, units=units, separations_lod=separations_lod, output_dir=output_dir
+        )
 
     def dump_ayo_csv(
         self,
@@ -404,6 +374,6 @@ class Coronagraph(AbstractTableCoronagraph):
     def __repr__(self):
         """Summarize the native grid and prepared rules."""
         return (
-            f"Coronagraph({self.yip_path.name!r}, grid={self.grid.shape}, "
+            f"Coronagraph({self.package.source.path.name!r}, grid={self.grid.shape}, "
             f"rules={len(self._records)})"
         )

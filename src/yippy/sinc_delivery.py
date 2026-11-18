@@ -163,13 +163,47 @@ def _header_checks(header, manifest, plane, tolerance_lod):
         raise ValueError("Incompatible midpoint detector frame")
 
 
-def load_delivery(root, manifest, options):
+def select_plane(manifest, selected):
+    """Resolve exactly one named monochromatic plane in a versioned delivery."""
+    planes = manifest["planes"]
+    ids = [p["id"] for p in planes]
+    if (
+        not ids
+        or any(not isinstance(value, str) or not value for value in ids)
+        or len(set(ids)) != len(ids)
+    ):
+        raise ValueError("Delivery plane IDs must be nonempty and unique")
+    if selected is None:
+        if len(planes) != 1:
+            raise ValueError("sinc_options.product_id is required for multiple planes")
+        selected = ids[0]
+    if selected not in ids:
+        raise ValueError(f"Unknown product_id: {selected}")
+    return planes[ids.index(selected)]
+
+
+def delivery_header(header, manifest, plane):
+    """Resolve the selected plane's geometry in the manifest reference frame."""
+    return replace(
+        HeaderData.from_fits_header(header),
+        pixscale=float(manifest["pixel_scale_lod_xy"][0]) * lod / u.pix,
+        lambda0=float(manifest["lambda0_m"]) * m2nm * u.nm,
+        diameter_convention=manifest.get("diameter_convention") or "circumscribed",
+        coordinate_model=manifest.get("coordinate_model") or "paraxial_entrance_tilt",
+        diameter=float(manifest["diameter_m"]) * u.m,
+        minlam=float(plane["wavelength_m"]) * u.m,
+        maxlam=float(plane["wavelength_m"]) * u.m,
+    )
+
+
+def load_delivery(root, manifest, options, *, package=None):
     """Validate selected metadata, hashes, coordinates and native FITS arrays.
 
     Args:
         root: Delivery directory.
         manifest: Recognized versioned manifest.
         options: SincOptions selecting exactly one monochromatic plane.
+        package: Open native package providing its measured arrays and header cards.
 
     Returns:
         A Delivery ready for sinchole construction, with no legacy transforms.
@@ -188,21 +222,7 @@ def load_delivery(root, manifest, options):
         if manifest.get(key) is None:
             raise ValueError("Missing required geometry or output units: " + key)
     planes = manifest["planes"]
-    ids = [p["id"] for p in planes]
-    if (
-        not ids
-        or any(not isinstance(value, str) or not value for value in ids)
-        or len(set(ids)) != len(ids)
-    ):
-        raise ValueError("Delivery plane IDs must be nonempty and unique")
-    selected = options.product_id
-    if selected is None:
-        if len(planes) != 1:
-            raise ValueError("sinc_options.product_id is required for multiple planes")
-        selected = ids[0]
-    if selected not in ids:
-        raise ValueError(f"Unknown product_id: {selected}")
-    plane = planes[ids.index(selected)]
+    plane = select_plane(manifest, options.product_id)
     if plane.get("photon_conversion") is None:
         raise ValueError("Missing required photon_conversion")
     if plane["kind"] != "monochromatic":
@@ -278,11 +298,17 @@ def load_delivery(root, manifest, options):
     for name, digest in manifest.get("extensions", {}).get("file_sha256", {}).items():
         _check_hash(root / name, digest, required=True)
     psf_path, offsets_path = root / plane["psf_path"], root / plane["offsets_path"]
-    header = fits.getheader(psf_path)
+    header = (
+        package.fits_header("offaxis_psfs") if package else fits.getheader(psf_path)
+    )
     if header["NAXIS"] != 3 or header["BITPIX"] not in (-32, -64):
         raise ValueError("PSF cube requires native float32/float64 [source,y,x]")
     count = header["NAXIS3"]
-    offsets_header = fits.getheader(offsets_path)
+    offsets_header = (
+        package.fits_header("offsets_xy_lod")
+        if package
+        else fits.getheader(offsets_path)
+    )
     if (
         offsets_header.get("NAXIS"),
         offsets_header.get("NAXIS1"),
@@ -330,7 +356,7 @@ def load_delivery(root, manifest, options):
         raise ValueError("Quadrant lattice must be anchored at zero with both axes")
     if sc.lattice_reasons(origin, spacing):
         raise ValueError("Source lattice outside supported numeric range")
-    offsets = _native(fits.getdata(offsets_path))
+    offsets = _native(package.offsets_xy_lod if package else fits.getdata(offsets_path))
     if offsets.dtype not in (np.dtype("float32"), np.dtype("float64")):
         raise ValueError("Offsets require float32 or float64")
     if not np.all(np.isfinite(offsets)):
@@ -362,7 +388,7 @@ def load_delivery(root, manifest, options):
         conversion *= float(np.prod(manifest["pixel_scale_lod_xy"]))
     if not np.isfinite(conversion) or conversion <= 0:
         raise ValueError("Invalid pixel-area photon conversion")
-    nodes = _native(fits.getdata(psf_path))
+    nodes = _native(package.offaxis_psfs if package else fits.getdata(psf_path))
     if nodes.dtype != np.dtype(manifest["storage_dtype"]):
         raise ValueError("Conflicting storage_dtype")
     for start in range(0, nodes.size, 65536):
@@ -393,32 +419,14 @@ def load_delivery(root, manifest, options):
         reference = record.get("local_peak_reference")
         if reference is not None and not (0 < reference / conversion < np.inf):
             raise ValueError("DATA_INVALID: unrepresentable local_peak_reference")
-    grid = PixelGrid(
-        tuple(manifest["detector_shape_yx"]),
-        *manifest["detector_center_xy"],
-        np.diag(manifest["pixel_scale_lod_xy"]),
-        "lod",
-        Frame(
-            float(manifest["lambda0_m"]) * m2nm,
-            manifest["diameter_m"],
-            manifest.get("diameter_convention") or "circumscribed",
-            manifest.get("coordinate_model") or "paraxial_entrance_tilt",
-        ),
-    )
+    metadata = delivery_header(header, manifest, plane)
     return Delivery(
         root,
         manifest,
         file_sha256(root / "sinc-delivery.json"),
         plane,
-        replace(
-            HeaderData.from_fits_header(header),
-            pixscale=float(manifest["pixel_scale_lod_xy"][0]) * lod / u.pix,
-            lambda0=float(manifest["lambda0_m"]) * u.m,
-            diameter=float(manifest["diameter_m"]) * u.m,
-            minlam=float(plane["wavelength_m"]) * u.m,
-            maxlam=float(plane["wavelength_m"]) * u.m,
-        ),
-        grid,
+        metadata,
+        metadata.pixel_grid(),
         nodes,
         offsets,
         (indices - lower).astype(np.int32),

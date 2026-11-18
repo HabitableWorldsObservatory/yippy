@@ -7,10 +7,10 @@ contract quantities:
 ```python notest
 import numpy as np
 from optixstuff import Circular
-from yippy import Coronagraph
+from yippy import open_yip
 
 rule = Circular(0.7)
-coro = Coronagraph("path/to/yip", rules=(rule,))
+coro = open_yip("path/to/yip").prepare(rules=(rule,))
 curves = coro.curves(rule)
 separations = np.array([3.0, 5.0, 10.0, 20.0])
 contrast = np.maximum(np.abs(coro.raw_contrast(separations, rule=rule)), 4e-10)
@@ -26,7 +26,7 @@ divided by `ppf`. The corresponding residual density is
 `coro.leakage_density_lod2(separations) / ppf`;
 per-stellar-pixel ring intensity is read with
 `yippy.performance.stellar_intensity_curves` as
-`stellar_intensity_curves(coro).evaluate("core_mean_intensity", separations)`.
+`stellar_intensity_curves(coro).evaluate(separations)`.
 Multiply density by the stellar pixel area only when a per-pixel consumer
 requires it, accounting for the two products' Frames when they differ.
 

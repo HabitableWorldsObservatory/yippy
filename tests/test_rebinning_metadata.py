@@ -3,10 +3,8 @@
 import copy
 
 import astropy.io.fits as fits
-import astropy.units as u
 import numpy as np
 from hwoutils.grids import Frame, PixelGrid
-from lod_unit import lod
 
 from yippy.offax import OffAx
 
@@ -19,12 +17,10 @@ def test_rebinning_transforms_optical_center(tmp_path):
         np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
     )
     offax = OffAx(
-        tmp_path,
-        "psfs.fits",
-        "offsets.fits",
-        0.1 * lod / u.pix,
-        True,
-        True,
+        fits.getdata(tmp_path / "psfs.fits"),
+        fits.getdata(tmp_path / "offsets.fits"),
+        x_symmetric=True,
+        y_symmetric=True,
         downsample_shape=(4, 4),
         grid=PixelGrid.focal(8, 0.1, Frame(500, 6, "circumscribed")),
     )
@@ -45,12 +41,10 @@ def test_optical_center_axes_are_not_transposed(tmp_path):
         np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
     )
     offax = OffAx(
-        tmp_path,
-        "psfs.fits",
-        "offsets.fits",
-        0.1 * lod / u.pix,
-        True,
-        True,
+        fits.getdata(tmp_path / "psfs.fits"),
+        fits.getdata(tmp_path / "offsets.fits"),
+        x_symmetric=True,
+        y_symmetric=True,
         grid=PixelGrid.regular(
             (8, 12), 0.1, "lod", frame=Frame(500, 6, "circumscribed")
         ),
@@ -63,7 +57,7 @@ def test_performance_cache_distinguishes_rebinned_psfs(coro):
     """Changing detector bins changes the aperture calculation's cache entry."""
     from yippy._yip import _YIPData
 
-    host = _YIPData(coro.yip_path)
+    host = _YIPData(coro.package)
     reduced = copy.copy(host)
     reduced.npixels = host.npixels // 2
     assert reduced._perf_filename() != host._perf_filename()
@@ -73,12 +67,12 @@ def test_datacube_cache_does_not_reuse_pre_rebinning_schema(coro):
     """Cubes made with center-sampled PSFs cannot be reused for integrated bins."""
     from yippy._yip import _YIPData
 
-    host = _YIPData(coro.yip_path)
+    host = _YIPData(coro.package)
     current = host._datacube_cache_path
     parts = current.name.split("_")
     dtype_tag = next(part for part in parts if part in ("f32", "f64"))
     old = (
         f"psf_datacube_quarter_{dtype_tag}_{host.npixels}px_"
-        f"{host._source_signature()}.npy"
+        f"{host.package.source.digest}.npy"
     )
     assert current.name != old

@@ -1,9 +1,7 @@
 """Package loading and coordinate handling for off-axis PSFs."""
 
 from dataclasses import replace
-from pathlib import Path
 
-import astropy.io.fits as pyfits
 import astropy.units as u
 import jax
 import numpy as np
@@ -12,127 +10,32 @@ from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.transforms import downsample_psfs
 from lod_unit import lod
 
-from .header import HeaderData
 from .logger import logger
 
 
 class OffAx:
-    """Base class for off-axis PSF handling.
-
-    Handles YIP data loading, offset parsing, and symmetry detection.
-    ``OffJAX`` inherits the loader and supplies PSF synthesis.
-
-    This class loads and processes PSF data from the yield input package (YIP).
-    It currently supports oneD and quarter symmetric PSF YIPs. The primary use
-    is to interpolate the PSF data to a given x/y position. This is done by
-    calling the OffAx object with the x/y position as arguments, which itself
-    calls the psf object after converting units.
-
-    Attributes:
-        pixel_scale_arcsec (Quantity):
-            Pixel scale of the PSF data in lambda/D.
-        grid (PixelGrid):
-            Pixel-center geometry in the package reference frame.
-        psf:
-            Instance of the appropriate PSF class (e.g., OneD, TwoD) based on input YIP.
-
-    Args:
-        yip_dir (Path):
-            Path to the directory containing PSF and offset data.
-        logger (Logger):
-            Logger for logging events and information.
-        offax_data_file (str):
-            Name of the file containing the PSF data.
-        offax_offsets_file (str):
-            Name of the file containing the offsets data.
-        pixel_scale_arcsec (Quantity):
-            Pixel scale of the PSF data in lambda/D.
-    """
+    """Symmetry-extended off-axis samples used by the blend interpolator."""
 
     def __init__(
         self,
-        yip_dir: Path,
-        offax_data_file: str,
-        offax_offsets_file: str,
-        pixel_scale_arcsec: Quantity,
+        psfs,
+        offsets,
+        grid: PixelGrid,
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
-        *,
-        grid: PixelGrid | None = None,
     ) -> None:
-        """Initializes the OffAx class by loading PSF and offset data from YIP.
-
-        Args:
-            yip_dir:
-                Path to the directory containing PSF and offset data.
-            offax_data_file:
-                Name of the file containing the PSF data.
-            offax_offsets_file:
-                Name of the file containing the offsets data.
-            pixel_scale_arcsec:
-                Pixel scale of the PSF data in lambda/D.
-            x_symmetric:
-                Whether the PSFs are symmetric in x.
-            y_symmetric:
-                Whether the PSFs are symmetric in y.
-            grid: Native package grid, built from its authoritative header.
-            downsample_shape:
-                Optional target shape (ny, nx) to downsample PSFs to.
-                If provided, all PSFs will be resampled to this shape
-                immediately after loading, conserving total flux.
-                The pixel_scale_arcsec will be updated accordingly.
-        """
-        # Pixel scale in lambda/D
-        self.pixel_scale_arcsec = pixel_scale_arcsec
-
-        # Load symmetry
+        """Prepare interpolation geometry from shipped samples and their grid."""
+        self.pixel_scale_arcsec = grid.step * lod / u.pix
         self.x_symmetric = x_symmetric
         self.y_symmetric = y_symmetric
-
-        # Load off-axis PSF data (e.g. the planet) (unitless intensity maps)
-        psfs = pyfits.getdata(Path(yip_dir, offax_data_file), 0)
-        # FITS is big-endian; JAX downsampling requires native-endian arrays.
+        self.grid = grid
         psfs = psfs.astype(psfs.dtype.newbyteorder("="), copy=False)
-
-        self.grid = (
-            grid
-            if grid is not None
-            else HeaderData.from_fits_header(
-                pyfits.getheader(Path(yip_dir, offax_data_file), 0)
-            ).pixel_grid(psfs.shape[-2:])
-        )
-
-        # Load the offset list, which is in units of lambda/D
-        offsets = pyfits.getdata(Path(yip_dir, offax_offsets_file), 0)
-
-        # Check whether offsets are given as 1D or 2D
-        one_d_offsets = len(offsets.shape) == 1
-        if one_d_offsets:
-            # Add a second dimension if the offsets are 1D
-            offsets = np.vstack((offsets, np.zeros_like(offsets)))
-
-        if len(offsets.shape) > 1:
-            if (offsets.shape[1] != 2) and (offsets.shape[0] == 2):
-                # This condition occurs when the offsets is transposed
-                # from the expected format
-                offsets = offsets.T
-        assert len(offsets) == psfs.shape[0], (
-            "Offsets and PSFs do not have the same number of elements"
-        )
-
-        ########################################################################
-        # Determine the format of the input coronagraph files so we can handle #
-        # the coronagraph correctly (e.g. radially symmetric in x direction)   #
-        ########################################################################
-
-        # Get the unique values of the offset list so that we can format the
-        # data into
         offsets_x = np.unique(offsets[:, 0])
         offsets_y = np.unique(offsets[:, 1])
 
         if len(offsets_x) == 1:
-            logger.info(f"{yip_dir.stem} is radially symmetric")
+            logger.info("Off-axis response is radially symmetric")
             self.type = "1d"
             # Instead of handling angles for 1dy, swap the x and y
             offsets_x, offsets_y = (offsets_y, offsets_x)
@@ -143,10 +46,10 @@ class OffAx:
                 " probably need to be rotated by 90 degrees."
             )
         elif len(offsets_y) == 1:
-            logger.info(f"{yip_dir.stem} is radially symmetric")
+            logger.info("Off-axis response is radially symmetric")
             self.type = "1d"
         elif np.min(offsets) >= 0:
-            logger.info(f"{yip_dir.stem} is quarterly symmetric")
+            logger.info("Off-axis response is quarterly symmetric")
             self.type = "2dq"
             # Check if 0 is included
             if 0 not in offsets_x:
@@ -183,7 +86,7 @@ class OffAx:
                 # Create an array of negative_min_x with the y offsets
                 offsets = np.insert(offsets, 0, new_offsets, axis=0)
         else:
-            logger.info(f"{yip_dir.stem} response is full 2D")
+            logger.info("Off-axis response is full 2D")
             self.type = "2df"
 
         # A lambda/D offset that represents the greatest separation where the PSF's

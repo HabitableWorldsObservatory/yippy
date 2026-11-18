@@ -48,14 +48,14 @@ class TestCoreMeanIntensityMap:
     def test_shape(self, coro):
         """Output shape matches (npix, npix)."""
         m = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", np.hypot(*coro.stellar_grid.coordinates())
+            np.hypot(*coro.stellar_grid.coordinates())
         )
         assert m.shape == (coro.grid.shape[0], coro.grid.shape[0])
 
     def test_radially_symmetric(self, coro):
         """Output should be perfectly radially symmetric."""
         m = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", np.hypot(*coro.stellar_grid.coordinates())
+            np.hypot(*coro.stellar_grid.coordinates())
         )
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
@@ -65,7 +65,7 @@ class TestCoreMeanIntensityMap:
     def test_positive_values(self, coro):
         """All values are non-negative."""
         m = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", np.hypot(*coro.stellar_grid.coordinates())
+            np.hypot(*coro.stellar_grid.coordinates())
         )
         assert np.all(m >= 0)
 
@@ -73,13 +73,13 @@ class TestCoreMeanIntensityMap:
         """Map values should match point-query at the same separation."""
         r = coro.separation_map()
         m = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", np.hypot(*coro.stellar_grid.coordinates())
+            np.hypot(*coro.stellar_grid.coordinates())
         )
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 15
         sep = r[cy, cx + d]
         expected = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            "core_mean_intensity", sep
+            sep
         )
         assert m[cy, cx + d] == pytest.approx(expected, rel=1e-10)
 

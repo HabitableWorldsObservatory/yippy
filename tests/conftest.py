@@ -9,9 +9,9 @@ import pytest
 from hypothesis import settings
 from synthetic_yip import synthetic_coronagraph
 
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy._precision import float_dtype
-from yippy.datasets import CATALOG, DATA_RELEASE_TAG
+from yippy.datasets import yip_info
 from yippy.performance import stellar_intensity_curves
 
 pytest_plugins = []
@@ -49,13 +49,13 @@ def assert_eqx_arrays_match_active_dtype(eqx_coro):
     if len(eqx_coro._stellar_ln_interp.x) > 1:
         out_2d = stellar_intensity_curves(
             eqx_coro, 1e-3, interpolation="keys"
-        ).evaluate("core_mean_intensity", jnp.asarray(5.0))
+        ).evaluate(jnp.asarray(5.0))
         assert np.dtype(out_2d.dtype) == expected, "core_mean_intensity_2d"
 
 
 requires_available_yip = pytest.mark.skipif(
-    CATALOG["eac1_aavc_2d"]["md5"] is None or DATA_RELEASE_TAG.endswith("PLACEHOLDER"),
-    reason="YIP not yet fetchable: md5 unset or release tag is placeholder.",
+    yip_info("eac1_aavc_2d").release.endswith("PLACEHOLDER"),
+    reason="YIP not yet fetchable: release tag is placeholder.",
 )
 
 
@@ -65,7 +65,7 @@ def coro():
     from yippy import fetch_yip
 
     yip_path = fetch_yip("eac1_aavc_2d")
-    return Coronagraph(yip_path)
+    return open_yip(yip_path).prepare()
 
 
 @pytest.fixture(scope="session")
@@ -104,13 +104,13 @@ def synthetic_2d(tmp_path_factory):
 @pytest.fixture(scope="session")
 def syn_coro_1d(synthetic_1d):
     """Coronagraph over the radially symmetric analytic package."""
-    return Coronagraph(synthetic_1d.path)
+    return open_yip(synthetic_1d.path).prepare()
 
 
 @pytest.fixture(scope="session")
 def syn_coro_2d(synthetic_2d):
     """Coronagraph over the quarterly symmetric analytic package."""
-    return Coronagraph(synthetic_2d.path)
+    return open_yip(synthetic_2d.path).prepare()
 
 
 @pytest.fixture(scope="session")
@@ -147,7 +147,7 @@ def shipped_coro():
         if REFERENCE_DATA_REQUIRED:
             pytest.fail(message)
         pytest.skip(message)
-    return Coronagraph(yip_path)
+    return open_yip(yip_path).prepare()
 
 
 @pytest.fixture(scope="session")

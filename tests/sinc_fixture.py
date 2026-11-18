@@ -6,7 +6,10 @@ import json
 
 import numpy as np
 from astropy.io import fits
-from synthetic_yip import _header, write_synthetic_yip
+from hwoutils.grids import Frame, PixelGrid
+from synthetic_yip import write_synthetic_yip
+
+from yippy.writer import yip_header
 
 _PREMISES = (
     "entrance_tilt_model",
@@ -46,9 +49,19 @@ def write_delivery(root, *, full=False):
             np.float32,
         )
 
-    header = _header(4, 1, 0.25, 1.5, "symmetric")
-    header["MINLAM"] = (500.0, "nm")
-    header["MAXLAM"] = (500.0, "nm")
+    header = yip_header(
+        PixelGrid.focal(4, 0.25, Frame(500, 6, "circumscribed")),
+        design="symmetric",
+        inscribed_diameter_m=5.0,
+        min_wavelength_nm=500.0,
+        max_wavelength_nm=500.0,
+        obscured=0.0,
+        jitter_mas=0.0,
+        n_wavelengths=1,
+        n_pointings=1,
+        zernike="none",
+        wfe_nm=0.0,
+    )
     fits.writeto(root / "nodes.fits", images(offsets), header)
     fits.writeto(root / "offsets.fits", offsets)
     with (root / "training.csv").open("w", newline="") as stream:

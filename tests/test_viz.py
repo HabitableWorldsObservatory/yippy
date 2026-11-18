@@ -10,10 +10,10 @@ import pytest
 from hwoutils.grids import Frame
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
-from optixstuff.performance import PerformanceCurves
+from optixstuff.performance import PerformanceCurves, SampledProfile
 
 import yippy
-from yippy import performance, viz
+from yippy import open_yip, performance, viz
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def test_default_curve_calls_return_data(curves, tmp_path, monkeypatch):
     from synthetic_yip import write_synthetic_yip
 
     package = write_synthetic_yip(tmp_path / "package")
-    coro = _YIPData(package.path)
+    coro = _YIPData(open_yip(package.path))
     record = coro._prepare_record()
     assert "plot" not in inspect.signature(coro._prepare_record).parameters
     assert record.rule == curves.rule
@@ -96,7 +96,7 @@ def test_viz_records_arrays_and_axes(curves):
     """Fails if drawing computes science, alters data or shrinks a handed slot.
 
     Basis: exact array equality; 8 float64 eps for normalized axes geometry.
-    Covers every record metric, the array-only transmission, and multiple
+    Covers every record metric, the transmission profile, and multiple
     stellar diameters. Log scales must preserve the original line values.
     """
     import eyepiece as ep
@@ -128,23 +128,41 @@ def test_viz_records_arrays_and_axes(curves):
             np.testing.assert_array_equal(line.get_xdata(), [0.0, 2.0])
             np.testing.assert_array_equal(line.get_ydata(), getattr(curves, metric))
             assert result.ax.get_ylabel()
-        result = viz.plot_performance_curve(
-            [0.0, 2.0], [0.0, 1.0], metric="occulter_transmission"
+        transmission = SampledProfile(
+            [0.0, 2.0],
+            [0.0, 1.0],
+            quantity="occulter_transmission",
+            frame=curves.frame,
+            interpolation="linear",
         )
+        result = viz.plot_performance_curve(transmission)
         assert isinstance(result, ep.plot.PlotResult)
         assert result.ax.get_yscale() == "linear"
         plt.close(result.fig)
-        profiles = {0.0 * lod: np.array([1e-8, 2e-8]), 0.1 * lod: [2e-8, 4e-8]}
-        result = viz.plot_core_mean_intensity([0.0, 2.0], profiles, ax=axes[1])
+        profiles = {
+            diameter * lod: SampledProfile(
+                radius,
+                intensity,
+                quantity="stellar_ring_mean_per_pixel",
+                frame=curves.frame,
+                interpolation="linear",
+            )
+            for diameter, radius, intensity in (
+                (0.0, [0, 2], [1e-8, 2e-8]),
+                (0.1, [0, 1], [2e-8, 4e-8]),
+            )
+        }
+        result = viz.plot_core_mean_intensity(profiles, ax=axes[1])
         assert isinstance(result, ep.plot.PlotResult)
         assert set(result.artists) == {"lines"}
         assert result.ax.get_yscale() == "log"
         lines = result.artists["lines"]
         for line, expected in zip(lines, profiles.values(), strict=True):
-            np.testing.assert_array_equal(line.get_ydata(), expected)
+            np.testing.assert_array_equal(line.get_xdata(), expected.separation_lod)
+            np.testing.assert_array_equal(line.get_ydata(), expected.values)
         assert lines[0].get_color() != lines[1].get_color()
         assert lines[0].get_marker() != lines[1].get_marker()
-        result = viz.plot_core_mean_intensity([0, 2], {0.0: [1e-8, 2e-8]})
+        result = viz.plot_core_mean_intensity(profiles)
         plt.close(result.fig)
         fig.canvas.draw()
         np.testing.assert_allclose(
@@ -161,5 +179,5 @@ def test_viz_records_arrays_and_axes(curves):
             with pytest.raises(ValueError):
                 viz.plot_performance_curve(*args, **kw)
         with pytest.raises(ValueError, match="at least one"):
-            viz.plot_core_mean_intensity([0, 2], {})
+            viz.plot_core_mean_intensity({})
         plt.close(fig)

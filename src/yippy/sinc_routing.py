@@ -22,7 +22,7 @@ class SincExtraMissing(ImportError):
     """The requested reader requires the optional yippy[sinc] extra."""
 
 
-def route_interpolation(path, requested, options, downsample_shape):
+def route_interpolation(path, requested, options, downsample_shape, *, package=None):
     """Select and validate the off-axis route before legacy data loading."""
     if requested not in ("blend", "legacy_blend", "auto", "sinc"):
         raise ValueError(
@@ -35,7 +35,7 @@ def route_interpolation(path, requested, options, downsample_shape):
         raise TypeError("sinc_options must be SincOptions")
     if is_blend and options.policy is not None and options.policy.mode == "bounded":
         raise ValueError("Bounded policies require sinc; blend has no error bound")
-    manifest = detect_delivery(path)
+    manifest = package._manifest if package else detect_delivery(path)
     if manifest is not None and is_blend and manifest["layout"] == "quadrant_rectangle":
         raise ValueError(
             "blend is unavailable for a quadrant delivery: "
@@ -49,7 +49,7 @@ def route_interpolation(path, requested, options, downsample_shape):
     if manifest is not None:
         if downsample_shape is not None:
             raise ValueError("Downsampling versioned sinc deliveries is not supported")
-        delivery = load_delivery(path, manifest, options)
+        delivery = load_delivery(path, manifest, options, package=package)
         if campaign_sampling_failed(delivery):
             raise ValueError(
                 "Failed campaign sampling claim must be removed by a revised manifest"

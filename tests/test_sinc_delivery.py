@@ -20,7 +20,7 @@ from lod_unit import lod
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 
-from yippy import Coronagraph, SincOptions
+from yippy import SincOptions, open_yip
 from yippy._yip import _YIPData
 from yippy.performance import stellar_intensity_curves
 from yippy.sinc_delivery import detect_delivery, file_sha256, load_delivery
@@ -49,7 +49,7 @@ def admitted(tmp_path_factory):
 
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr("yippy._yip.OffJAX", reject_legacy)
-            coro = Coronagraph(root, interpolation="sinc")
+            coro = open_yip(root).prepare(interpolation="sinc")
         yield coro
     jax.clear_caches()
 
@@ -63,6 +63,8 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
     synthetic_1d = write_synthetic_yip(
         tmp_path / "legacy", npix=4, max_offset_lod=1.0, offset_step_lod=0.5
     )
+    with pytest.raises(ValueError, match="product_id"):
+        open_yip(synthetic_1d.path, product_id="mono")
     original = importlib.import_module
 
     def unavailable(name, *args, **kwargs):
@@ -71,9 +73,9 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib, "import_module", unavailable)
-    blend = Coronagraph(synthetic_1d.path)
-    auto = Coronagraph(synthetic_1d.path, interpolation="auto")
-    explicit = Coronagraph(synthetic_1d.path, interpolation="legacy_blend")
+    blend = open_yip(synthetic_1d.path).prepare()
+    auto = open_yip(synthetic_1d.path).prepare(interpolation="auto")
+    explicit = open_yip(synthetic_1d.path).prepare(interpolation="legacy_blend")
     np.testing.assert_array_equal(
         explicit.source_psfs(None, 0.3, 0.2).data,
         blend.source_psfs(None, 0.3, 0.2).data,
@@ -95,9 +97,12 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
     assert not auto.source_psfs_with_info(np.nan, 0.0).accepted[0]
     assert np.isnan(auto.source_psfs(None, np.nan, 0.0).data).all()
     assert auto.interpolation_info.reasons == ("EXTRA_MISSING",)
-    assert "interpolation" not in _YIPData(synthetic_1d.path)._datacube_identity()
+    assert (
+        "interpolation"
+        not in _YIPData(open_yip(synthetic_1d.path))._datacube_identity()
+    )
     with pytest.raises(SincExtraMissing, match=r"yippy\[sinc\]"):
-        Coronagraph(synthetic_1d.path, interpolation="sinc")
+        open_yip(synthetic_1d.path).prepare(interpolation="sinc")
 
     def broken(name):
         raise ModuleNotFoundError(
@@ -106,7 +111,7 @@ def test_default_and_missing_extra(tmp_path, monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", broken)
     with pytest.raises(ModuleNotFoundError, match="internal dependency"):
-        Coronagraph(synthetic_1d.path, interpolation="auto")
+        open_yip(synthetic_1d.path).prepare(interpolation="auto")
 
 
 @pytest.mark.parametrize("defect", ["schema", "hash", "header", "duplicate", "hole"])
@@ -174,6 +179,7 @@ def test_full_blend_extra_isolation(tmp_path, monkeypatch):
 def test_product_selection(tmp_path):
     """Fails if a multi-plane manifest silently selects by list position."""
     m = write_delivery(tmp_path)
+    m["diameter_convention"] = "inscribed"
     m["planes"].append(dict(m["planes"][0], id="other"))
     m["spectral_sampling"]["node_count"] = 2
     save_manifest(tmp_path, m)
@@ -188,7 +194,23 @@ def test_product_selection(tmp_path):
         hdus[0].header["PIXSCALE"] = (m["pixel_scale_arcsec_xy"][0], "arcsec/pixel")
     m["planes"][0]["psf_sha256"] = file_sha256(tmp_path / "nodes.fits")
     m["planes"][1]["psf_sha256"] = file_sha256(tmp_path / "nodes.fits")
-    chosen = load_delivery(tmp_path, m, SincOptions(product_id="other"))
+    save_manifest(tmp_path, m)
+    package = open_yip(tmp_path, product_id="other")
+    from yippy import write_yip
+
+    copied = open_yip(write_yip(tmp_path / "copied", package), product_id="other")
+    assert copied.source.digest == package.source.digest
+    assert copied.fits_header("offaxis_psfs") == package.fits_header("offaxis_psfs")
+    chosen = load_delivery(
+        copied.source.path,
+        detect_delivery(copied.source.path),
+        SincOptions(product_id="other"),
+        package=copied,
+    )
+    assert package.header.offaxis_psfs.pixel_grid() == chosen.grid
+    assert chosen.grid.frame.diameter_convention == "inscribed"
+    np.testing.assert_array_equal(package.offaxis_psfs, chosen.nodes)
+    np.testing.assert_array_equal(package.offsets_xy_lod, chosen.offsets)
     assert chosen.header.pixscale.value == 0.25
     np.testing.assert_allclose(chosen.header.lambda0.to_value("nm"), 500.0, atol=1e-12)
     assert chosen.plane["id"] == "other"
@@ -239,7 +261,9 @@ def test_reads_units_refusals(admitted):
     )
     for measure, conversion in (("integral", 2.0), ("mean", 2.0 * 0.25**2)):
         d = load_delivery(
-            admitted.yip_path, detect_delivery(admitted.yip_path), SincOptions()
+            admitted.package.source.path,
+            detect_delivery(admitted.package.source.path),
+            SincOptions(),
         )
         metadata = copy.deepcopy(d.manifest)
         metadata["sample_kind"] = measure
@@ -290,10 +314,10 @@ def test_reads_units_refusals(admitted):
     )
 
 
-def test_stellar_frame_and_eqx(admitted):
+def test_stellar_frame_and_eqx(admitted, tmp_path):
     """Fails if stellar pitch is overwritten or reader tables hide in closures."""
     view = admitted
-    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    host = _YIPData(admitted.package, interpolation="sinc")
     assert np.ptp(view.stellar_map(None, 0.0).data) > 0
     # Independent Fourier series integrated over target pixel boxes.
     # The 1e-14 bound allows float64 DFT and exponential roundoff.
@@ -328,6 +352,20 @@ def test_stellar_frame_and_eqx(admitted):
     assert view.grid.frame.reference_wavelength_nm == pytest.approx(500.0)
     assert view.grid.step == 0.25
     assert view.header.pixscale.value == 0.4
+    separations = np.array([0.2, 0.3])
+    exported = view.to_exosims(
+        "arcsec", separations_lod=separations, output_dir=tmp_path
+    )
+    assert exported["starlightSuppressionSystems"][0]["lam"] == 500.0
+    sky = fits.getdata(tmp_path / "occ_trans.fits")
+    np.testing.assert_allclose(
+        sky[:, 0], separations * view.grid.frame.lod_to_arcsec(500), rtol=1e-14
+    )
+    np.testing.assert_allclose(
+        sky[:, 1],
+        view.occulter_transmission_profile.evaluate(separations * (500 / 400)),
+        rtol=1e-14,
+    )
     np.testing.assert_allclose(stellar_intensity_curves(view).separation_lod[1], 0.1)
     np.testing.assert_allclose(
         view.stellar_map(None, 0.0).data,
@@ -337,7 +375,7 @@ def test_stellar_frame_and_eqx(admitted):
     sky_grid = PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_trans.grid.frame)
     np.testing.assert_allclose(
         view.background_transmission(500.0, grid=sky_grid).data,
-        resample(host.sky_trans(), sky_grid).data,
+        resample(host.sky_trans, sky_grid).data,
         atol=1e-14,
     )
     assert any(
@@ -461,7 +499,7 @@ def test_auto_fallback_and_bounded(tmp_path):
 
 def test_table_consumer(admitted):
     """Fails if the table consumer rescales densities or resamples off its frame."""
-    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    host = _YIPData(admitted.package, interpolation="sinc")
     # The record stores density per (lambda/D)^2: no pitch factor.
     density = host.performance.evaluate("leakage_density_lod2", 0.0)
     np.testing.assert_allclose(
@@ -493,7 +531,7 @@ def test_table_consumer(admitted):
 
 def test_cache_identity_and_selections(admitted, monkeypatch):
     """Fails if route provenance collides or cube cache loses refusal selections."""
-    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    host = _YIPData(admitted.package, interpolation="sinc")
     original = host.interpolation_info
     base_cube = host._datacube_cache_path
     base_perf = host._perf_filename()
@@ -565,8 +603,8 @@ def test_public_delivery(tmp_path):
     with jax.enable_x64():
         root = tmp_path / "delivery"
         shutil.copytree(configured, root, ignore=shutil.ignore_patterns("yippy_cache"))
-        coro = Coronagraph(root, interpolation="sinc")
-        host = _YIPData(root, interpolation="sinc")
+        coro = open_yip(root).prepare(interpolation="sinc")
+        host = _YIPData(open_yip(root), interpolation="sinc")
         np.testing.assert_allclose(
             coro.source_psfs(None, 4.0, 5.5).data[0],
             host.offax.create_psf(4.0, 5.5).data,
@@ -580,7 +618,7 @@ def test_public_delivery(tmp_path):
         assert coro.stellar_grid.frame != coro.grid.frame
         np.testing.assert_allclose(
             coro.background_transmission(500.0, grid=coro.sky_trans.grid).data,
-            resample(host.sky_trans(), coro.sky_trans.grid).data,
+            resample(host.sky_trans, coro.sky_trans.grid).data,
             atol=1e-14,
         )
         np.testing.assert_allclose(
@@ -637,8 +675,7 @@ def test_bounded_legacy_refuses(tmp_path, monkeypatch, extra_missing):
         jax.enable_x64(),
         pytest.raises((ValueError, SincExtraMissing), match=r"[Bb]ounded|yippy"),
     ):
-        Coronagraph(
-            legacy.path,
+        open_yip(legacy.path).prepare(
             interpolation="auto",
             sinc_options=SincOptions(
                 policy=sc.ReadPolicy("bounded", jnp.asarray(1e-20))
@@ -821,7 +858,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
         )
         with jax.enable_x64(gate != "precision"):
             objects = [
-                _YIPData(tmp_path, interpolation="auto", sinc_options=o)
+                _YIPData(open_yip(tmp_path), interpolation="auto", sinc_options=o)
                 for o in requests
             ]
             assert all(c.interpolation_info.effective == "blend" for c in objects)
@@ -850,7 +887,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
                 perf_path = coro._perf_dir / coro._perf_filename()
                 stamp = perf_path.stat().st_mtime_ns
                 again = _YIPData(
-                    tmp_path, interpolation="auto", sinc_options=requests[i]
+                    open_yip(tmp_path), interpolation="auto", sinc_options=requests[i]
                 )
                 assert again._perf_filename() == coro._perf_filename()
                 assert again._datacube_cache_path == coro._datacube_cache_path
@@ -927,7 +964,7 @@ def test_spatial_cross_frame_aperture():
 def test_policy_cache_generation(admitted, budget):
     """Bounded policies identify generated cubes and reloaded performance separately."""
     sc = pytest.importorskip("sinchole")
-    host = _YIPData(admitted.yip_path, interpolation="sinc")
+    host = _YIPData(admitted.package, interpolation="sinc")
     changed = copy.copy(host)
     changed.offax = eqx.tree_at(
         lambda b: b.reader.policy,

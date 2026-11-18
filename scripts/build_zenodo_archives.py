@@ -10,7 +10,7 @@ r"""Build per-YIP zip archives ready for upload to Zenodo.
 Reads source YIPs from a directory tree organized as
 ``<root>/<TELESCOPE>/<CORONAGRAPH>/`` (case-insensitive), stages the
 5 canonical files, zips each YIP, computes md5 hashes, and emits an
-updated CATALOG dict for ``yippy.datasets``.
+updated archive catalog for ``yippy.datasets``.
 
 Usage::
 
@@ -18,9 +18,8 @@ Usage::
         --source ~/path/to/for_rus \
         --out ./dist
 
-After this runs, the engineer uploads dist/*.zip to a new Zenodo
-record version, pastes the printed CATALOG block into
-src/yippy/datasets.py, and updates ZENODO_DOI to the new DOI.
+The printed archive declarations carry fresh digests for the staged assets.
+Upload the archives and update the entries in src/yippy/datasets.py together.
 
 Cache files are excluded by name pattern (see :data:`EXCLUDE_BASENAMES`,
 :data:`EXCLUDE_GLOBS`, and :data:`EXCLUDE_DIRS`).
@@ -33,27 +32,25 @@ import fnmatch
 import hashlib
 import importlib.util
 import shutil
+import sys
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
-
-# Load just yippy/datasets.py without going through yippy/__init__.py
-# (which would trigger jax/equinox imports we don't need here).
-_DATASETS_PATH = Path(__file__).resolve().parents[1] / "src" / "yippy" / "datasets.py"
-_spec = importlib.util.spec_from_file_location("_yippy_datasets", _DATASETS_PATH)
-_datasets = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_datasets)
-CATALOG: dict[str, dict[str, Any]] = _datasets.CATALOG
 
 
-CANONICAL_FILES: tuple[str, ...] = (
-    "offax_psf.fits",
-    "offax_psf_offset_list.fits",
-    "stellar_intens.fits",
-    "stellar_intens_diam_list.fits",
-    "sky_trans.fits",
-)
+def _load_source(module):
+    """Load a source module for this standalone script without JAX imports."""
+    path = Path(__file__).resolve().parents[1] / "src" / "yippy" / f"{module}.py"
+    spec = importlib.util.spec_from_file_location(f"_yippy_{module}", path)
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = loaded
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+_datasets = _load_source("datasets")
+CANONICAL_FILES = tuple(_load_source("schema").PRODUCT_FILES.values())
 
 # Map catalog `coronagraph` value to the source subfolder name. (Telescope
 # is uppercased directly: eac{1,2,3} -> EAC{1,2,3}.)
@@ -145,35 +142,19 @@ def build_archive(src: Path, out_dir: Path, name: str) -> tuple[Path, str]:
     return zip_path, md5
 
 
-def format_catalog_block(updates: dict[str, str | None]) -> str:
-    """Return the full CATALOG dict as Python source code.
-
-    Entries in ``updates`` take the provided md5 (or None for entries
-    awaiting a fresh build). Entries not in ``updates`` keep their
-    existing md5.
-    """
-    lines = ["CATALOG = {"]
-    for name, meta in CATALOG.items():
-        md5 = updates.get(name, meta["md5"])
-        md5_repr = "None" if md5 is None else repr(md5)
-        # telescope is optional for design-study YIPs without a fixed
-        # telescope-architecture pairing; sampling may be inferred from
-        # the key suffix when not set explicitly.
-        parts = []
-        if "telescope" in meta:
-            parts.append(f'"telescope": {meta["telescope"]!r}')
-        parts.append(f'"coronagraph": {meta["coronagraph"]!r}')
-        parts.append(f'"designer": {meta["designer"]!r}')
-        if "sampling" in meta and not (name.endswith("_1d") or name.endswith("_2d")):
-            parts.append(f'"sampling": {meta["sampling"]!r}')
-        parts.append(f'"md5": {md5_repr}')
-        lines.append(f"    {name!r}: {{{', '.join(parts)}}},")
-    lines.append("}")
+def format_catalog_block(updates: dict[str, str]) -> str:
+    """Render catalog declarations with the hashes of rebuilt archives."""
+    lines = []
+    for name in _datasets.list_yips():
+        archive = _datasets.yip_info(name)
+        if name in updates:
+            archive = replace(archive, digest=updates[name])
+        lines.append(f"{archive!r},")
     return "\n".join(lines)
 
 
 def main() -> int:
-    """CLI entry point: package every catalog YIP and print updated CATALOG."""
+    """Package the catalog YIPs and print updated archive declarations."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--source",
@@ -189,11 +170,12 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    updates: dict[str, str | None] = {}
+    updates: dict[str, str] = {}
     available = 0
     missing = 0
     skipped = 0
-    for name, meta in CATALOG.items():
+    for name in _datasets.list_yips():
+        archive = _datasets.yip_info(name)
         # Only the 1D YIPs come from the for_rus/ tree. 2D YIPs (and any
         # other out-of-band entries) are packaged separately and we leave
         # their existing md5 alone.
@@ -203,12 +185,11 @@ def main() -> int:
             continue
         src = locate_source_dir(
             args.source,
-            telescope=meta["telescope"],
-            coronagraph=meta["coronagraph"],
+            telescope=archive.telescope,
+            coronagraph=archive.coronagraph,
         )
         if src is None:
             print(f"  MISSING    {name}  (source missing or empty)")
-            updates[name] = None
             missing += 1
             continue
         zip_path, md5 = build_archive(src, args.out, name=name)

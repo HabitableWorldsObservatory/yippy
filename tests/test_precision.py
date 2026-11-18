@@ -12,13 +12,11 @@ from conftest import assert_eqx_arrays_match_active_dtype
 def test_datacube_cache_path_is_dtype_keyed(coro):
     """The PSF datacube cache filename carries the active dtype tag (f32 default).
 
-    Also carries the realized PSF pixel shape and a source-file signature (see
-    ``Coronagraph._source_signature``), so the exact name is not pinned here --
-    only the parts this test is actually about.
+    The filename also carries the realized pixel shape and native source digest.
     """
     from yippy._yip import _YIPData
 
-    host = _YIPData(coro.yip_path)
+    host = _YIPData(coro.package)
     p = host._datacube_cache_path
     assert p.name.startswith(f"psf_datacube_quarter_f32_{coro.grid.shape[0]}px_")
     assert p.suffix == ".npy"

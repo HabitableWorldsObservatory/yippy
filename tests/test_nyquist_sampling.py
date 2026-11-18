@@ -7,7 +7,7 @@ import pytest
 from optixstuff.apertures import HalfMaximum
 from synthetic_yip import write_synthetic_yip
 
-from yippy import Coronagraph
+from yippy import open_yip
 
 
 @pytest.mark.parametrize("pixel_lod", [0.5, 0.6])
@@ -17,7 +17,7 @@ def test_nyquist_warning_once_per_coronagraph(tmp_path, pixel_lod):
     for _ in range(2):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", UserWarning)
-            coro = Coronagraph(package.path, rules=(HalfMaximum(0.5),))
+            coro = open_yip(package.path).prepare(rules=(HalfMaximum(0.5),))
             throughput = coro.curves(HalfMaximum(0.5)).throughput
         sampling = [w for w in caught if "Nyquist" in str(w.message)]
         assert len(sampling) == (1 if pixel_lod > 0.5 else 0)

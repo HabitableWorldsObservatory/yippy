@@ -7,9 +7,10 @@ coronagraph designer:
 This example needs a user-supplied YIP directory.
 
 ```python notest
-from yippy import Coronagraph
+from yippy import open_yip
 
-coro = Coronagraph("path/to/eac1_aavc_2d")
+package = open_yip("path/to/eac1_aavc_2d")
+coro = package.prepare()
 ```
 
 For convenience, yippy also ships a small curated catalog of YIPs that
@@ -23,16 +24,14 @@ Coronagraph Design Survey. Long-term YIP hosting will be provided by
 ExEP, and the discovery API here will grow back into a thin proxy over
 that catalog when it comes online. For production work or YIPs outside
 this set, manage your own YIP paths and pass them to
-`Coronagraph(path)` directly.
+`open_yip(path)`.
 ```
 
 ## Available datasets
 
-The table below is generated from `yippy.datasets.CATALOG` at doc-build
-time and lists every YIP yippy knows about. Every entry in the catalog
-is fetchable; new YIPs are added only when the underlying release is
-bumped (see `DATA_RELEASE_TAG` in `yippy.datasets`) and the md5 hash is
-locked into the catalog.
+The table below lists the releases available through `list_yips()`. Each
+archive has a pinned digest. Call `yip_info(name)` to inspect its release,
+download URL and cache location.
 
 ```{include} _generated/yip_catalog.md
 ```
@@ -67,7 +66,7 @@ YIP names end with a sampling-regime suffix:
 Three call styles, all equivalent for clean cases:
 
 ```python
-from yippy import fetch_yip, Coronagraph
+from yippy import fetch_yip, open_yip
 
 # Flat name (best when you already know it)
 path = fetch_yip("eac1_aavc_2d")
@@ -81,7 +80,7 @@ import yippy
 path = yippy.fetch_yip("eac1_aavc_2d")
 
 # Then load it
-coro = Coronagraph(path)
+coro = open_yip(path).prepare()
 ```
 
 The first call downloads and unpacks the archive into the pooch cache
@@ -144,15 +143,16 @@ There are two override mechanisms, in priority order:
    )
    ```
 
-   **From inside a Python script** (only affects this script's run, and
-   must be set *before* importing yippy):
+   **From inside a Python script** (affects lookups in this process):
 
    This example sets a user-specific cache directory.
 
    ```python notest
    import os
+   from yippy import yip_info
+
    os.environ["YIPPY_CACHE_DIR"] = "/path/to/YIPs"
-   from yippy import fetch_yip   # picks up the value above
+   print(yip_info("eac1_aavc_2d").archive_path())
    ```
 
    To confirm the variable is set, run `echo $YIPPY_CACHE_DIR` in your
@@ -207,9 +207,10 @@ print(yip_exists("not_a_yip"))  # False
 ```python
 from yippy import yip_info
 
-print(yip_info("eac1_aavc_2d"))
-# {'telescope': 'eac1', 'coronagraph': 'aavc', 'designer': 'Susan Redmond',
-#  'md5': 'md5:1f4892faff18e55cbec9781a055bea4d', 'sampling': '2d'}
+archive = yip_info("eac1_aavc_2d")
+print(archive.release, archive.digest)
+print(archive.url)
+print(archive.archive_path())  # Resolve the cache location without fetching.
 ```
 
 Descriptive metadata beyond these fields (wavelengths, dark-zone extent,

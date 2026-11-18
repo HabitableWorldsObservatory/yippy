@@ -27,9 +27,9 @@ profile = read(image, center, radii_pix, n_theta=256, interpolation="quintic")
 `interpolation` is a static string under JIT; with raw `jax.jit`, include it
 and `n_theta` in `static_argnames`. Enable JAX float64 for the precision
 reported here. The option is also available on `stellar_intensity_curves`.
-Evaluate `core_mean_intensity` on the returned record for radial queries.
+Call `profile.evaluate(separation_lod)` on the returned `SampledProfile`.
 This controls spatial interpolation; the resulting profile
-uses the shared record evaluator for PCHIP interpolation between radial knots.
+uses the shared profile evaluator for PCHIP interpolation between radial knots.
 
 The quintic implementation is pure JAX, with no SciPy at read time. It follows
 P. Thevenaz, T. Blu and M. Unser, "Interpolation Revisited", *IEEE Transactions
@@ -51,7 +51,7 @@ or for negative lobes introduced by interpolation near a null.
 
 `stellar_intensity_curves(coro, diameter_lod, interpolation="quintic")`
 computes a profile from the interpolated stellar map using the selected spatial
-reader. It returns a separate record without mutating the frozen coronagraph.
+reader. It returns a sampled profile without mutating the frozen coronagraph.
 Keys remains the default. These radial diagnostics are distinct from the
 aperture performance records selected by `coro.curves(rule)`. Consumers saving
 their own quintic-derived products must distinguish them from Keys-derived

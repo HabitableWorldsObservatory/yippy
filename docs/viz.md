@@ -16,8 +16,8 @@ Install `yippy[viz]` to draw curves with eyepiece. All compute methods return
 data and take no `plot` argument. Plotting lives in `yippy.viz`, with no
 top-level plotting exports. Importing either module leaves the style unchanged.
 
-The plotting functions accept precomputed arrays; `plot_performance_curve`
-also accepts a `PerformanceCurves` record and a `metric` name. They return
+`plot_performance_curve` accepts a `SampledProfile`, a `PerformanceCurves` record
+with a metric name, or precomputed arrays. They return
 eyepiece `PlotResult` objects and draw into a single caller-supplied `ax`, or
 create an axes when it is omitted. They never show or save figures themselves.
 
@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from hwoutils.grids import Frame
 
-from optixstuff import DEFAULT_APERTURE_RULE, PerformanceCurves
+from optixstuff import DEFAULT_APERTURE_RULE, PerformanceCurves, SampledProfile
 from yippy import viz
 
 hwostyle.use("light")
@@ -59,28 +59,31 @@ result.ax.set_title("Synthetic raw contrast")
 plt.show()
 ```
 
-For an occulter transmission curve, pass its arrays and name the metric.
+The occulter transmission profile carries its sampled radii and quantity.
 
 ```{code-cell} python
-transmission = 1 - np.exp(-separations**2 / 4)
-result = viz.plot_performance_curve(
-    separations, transmission, metric="occulter_transmission"
+transmission = SampledProfile(
+    separations, 1 - np.exp(-separations**2 / 4),
+    quantity="occulter_transmission", frame=curves.frame, interpolation="linear",
 )
+result = viz.plot_performance_curve(transmission)
 plt.show()
 ```
 
-`plot_core_mean_intensity` consumes a separation array and diameter-to-profile
-mapping. Build each profile with
-`stellar_intensity_curves(coro, diameter_lod).evaluate("core_mean_intensity", separations)`.
-Values are per pixel, not per unit angular area. Distinct colors and markers
-distinguish diameters.
+`plot_core_mean_intensity` takes a mapping from stellar diameter to
+`SampledProfile`, such as those returned by
+`stellar_intensity_curves(coro, diameter_lod)`. Each profile carries
+its own separation axis and the ring mean in flux fraction per stellar pixel.
 
 ```{code-cell} python
 profiles = {
-    0.0: 1e-10 * (1 + np.exp(-separations)),
-    0.1: 2e-10 * (1 + np.exp(-separations)),
+    diameter: SampledProfile(
+        separations, level * (1 + np.exp(-separations)),
+        quantity="stellar_ring_mean_per_pixel", frame=curves.frame, interpolation="linear",
+    )
+    for diameter, level in ((0.0, 1e-10), (0.1, 2e-10))
 }
-result = viz.plot_core_mean_intensity(separations, profiles)
+result = viz.plot_core_mean_intensity(profiles)
 result.ax.legend(frameon=False)
 plt.show()
 ```
@@ -100,9 +103,9 @@ method is needed after loading:
 
 ```python notest
 from optixstuff import Circular
-from yippy import Coronagraph, viz
+from yippy import open_yip, viz
 
 rule = Circular(0.7)
-coro = Coronagraph("path/to/yip", rules=(rule,))
+coro = open_yip("path/to/yip").prepare(rules=(rule,))
 result = viz.plot_performance_curve(coro.curves(rule), metric="throughput")
 ```

@@ -13,7 +13,7 @@ from synthetic_yip import (
     synthetic_coronagraph,
 )
 
-from yippy import Coronagraph, fetch_yip
+from yippy import open_yip
 
 
 def test_yippy_diameter_forwarding(cached_diameter_coro):
@@ -97,7 +97,7 @@ def finite_coro(request, tmp_path_factory):
     with jax.enable_x64():
         if isinstance(request.param, str):
             return tuple(
-                Coronagraph(fetch_yip(request.param), rules=rules, leakage_rule=lr)
+                open_yip(request.param).prepare(rules=rules, leakage_rule=lr)
                 for lr in ("aperture_mean", "azimuthal_ring_mean")
             )
         path = tmp_path_factory.mktemp("finite_stellar_maps")
@@ -121,7 +121,7 @@ def finite_coro(request, tmp_path_factory):
             )
         return tuple(
             replace_stellar_tables(
-                Coronagraph(path, rules=rules, leakage_rule=lr), grid, knots, maps
+                open_yip(path).prepare(rules=rules, leakage_rule=lr), grid, knots, maps
             )
             for lr in ("aperture_mean", "azimuthal_ring_mean")
         )

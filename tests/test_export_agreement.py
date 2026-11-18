@@ -18,11 +18,13 @@ def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
     FITS binary doubles and 17-digit CSV text preserve evaluated float64 values;
     four epsilons allow only floating-point parsing/serialization roundoff.
     """
-    coro = eqx.tree_at(lambda c: c.yip_path, syn_coro_1d, tmp_path)
+    coro = syn_coro_1d
     record = coro.curves()
     knots = np.asarray(record.separation_lod, dtype=np.float64)
     separations = (knots[:-1] + knots[1:]) / 2
-    specs = export_exosims(coro, separations_lod=separations)
+    specs = export_exosims(
+        coro, separations_lod=separations, output_dir=tmp_path / "exosims"
+    )
     csv_path = export_ayo_csv(coro, tmp_path / "ayo.csv", separations_lod=separations)
     csv_data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
     tolerance = 4 * np.finfo(np.float64).eps
@@ -68,10 +70,12 @@ def test_arcsec_export_converts_separation_and_area(syn_coro_1d, tmp_path):
     Both sides perform one angular multiplication (two for area); four float64
     epsilons cover arithmetic and FITS serialization, not a unit discrepancy.
     """
-    coro = eqx.tree_at(lambda c: c.yip_path, syn_coro_1d, tmp_path)
+    coro = syn_coro_1d
     record = coro.curves()
     separations = np.array([1.125, 2.375, 4.125])
-    specs = export_exosims(coro, "arcsec", separations_lod=separations)
+    specs = export_exosims(
+        coro, "arcsec", separations_lod=separations, output_dir=tmp_path / "exosims"
+    )
     scale = float(record.frame.lod_to_arcsec(coro.header.lambda0.to_value(u.nm)))
     tolerance = 4 * np.finfo(np.float64).eps
     for filename in (
@@ -123,7 +127,9 @@ def test_arcsec_export_converts_separation_and_area(syn_coro_1d, tmp_path):
     )
     coro = eqx.tree_at(lambda c: c._records, coro, (updated,))
     midpoints = (separations[:-1] + separations[1:]) / 2
-    export_exosims(coro, "arcsec", separations_lod=midpoints)
+    export_exosims(
+        coro, "arcsec", separations_lod=midpoints, output_dir=tmp_path / "exosims"
+    )
     np.testing.assert_allclose(
         fits.getdata(tmp_path / "exosims/core_mean_intensity.fits")[:, 1],
         stellar_level,
@@ -139,7 +145,7 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
     geometric mean for contrast-like fields. Sixteen float64 epsilons cover
     logarithm/exponentiation; the wrong interpolation space differs by order one.
     """
-    coro = eqx.tree_at(lambda c: c.yip_path, syn_coro_1d, tmp_path)
+    coro = syn_coro_1d
     updated = replace(
         coro.curves(),
         separation_lod=np.array([1.0, 3.0]),

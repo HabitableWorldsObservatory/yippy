@@ -19,7 +19,7 @@ import pytest
 from conftest import REFERENCE_DATA_REQUIRED
 from scipy.interpolate import RectBivariateSpline
 
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy.performance import stellar_intensity_curves
 
 # Separations (lambda/D) and stellar diameters (lambda/D) probed on the
@@ -67,7 +67,7 @@ def relative_errors(coro, diameter_lod, separations_lod):
     )
     curve = np.asarray(
         stellar_intensity_curves(coro, diameter_lod, interpolation="keys").evaluate(
-            "core_mean_intensity", separations_lod
+            separations_lod
         ),
         dtype=np.float64,
     )
@@ -89,7 +89,7 @@ def shipped(request):
         if REFERENCE_DATA_REQUIRED:
             pytest.fail(message)
         pytest.skip(message)
-    return Coronagraph(path)
+    return open_yip(path).prepare()
 
 
 @pytest.mark.parametrize("diameter_lod", DIAMETERS_LOD)
@@ -98,7 +98,7 @@ def test_curve_is_the_azimuthal_mean_of_the_map(shipped, diameter_lod):
     err, _ = relative_errors(shipped, diameter_lod, SEPARATIONS_LOD)
     worst = SEPARATIONS_LOD[np.argmax(err)]
     summary = (
-        f"{shipped.yip_path.name} at {diameter_lod} lambda/D: "
+        f"{shipped.package.source.path.name} at {diameter_lod} lambda/D: "
         f"median {np.median(err):.4f}, "
         f"90th percentile {np.percentile(err, 90):.4f}, max {err.max():.4f} "
         f"at {worst:.2f} lambda/D"
@@ -143,7 +143,7 @@ def ring_coro(tmp_path_factory):
     pyfits.PrimaryHDU(np.asarray(RING_DIAMS_LOD)).writeto(
         package.path / "stellar_intens_diam_list.fits", overwrite=True
     )
-    return Coronagraph(package.path)
+    return open_yip(package.path).prepare()
 
 
 @pytest.mark.parametrize("diameter_lod", (0.0, 0.03, 0.05, 0.075, 0.15, 0.2))
@@ -174,7 +174,7 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
     from scipy.interpolate import PchipInterpolator
 
     with jax.enable_x64():
-        coro = Coronagraph(ring_coro.yip_path, leakage_rule=leakage_rule)
+        coro = ring_coro.package.prepare(leakage_rule=leakage_rule)
         grid = coro.stellar_grid
         radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
         nodes = radii * grid.step
@@ -214,9 +214,7 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
             )
 
             def method(s, d):
-                return stellar_intensity_curves(coro, d).evaluate(
-                    "core_mean_intensity", s
-                )
+                return stellar_intensity_curves(coro, d).evaluate(s)
 
             np.testing.assert_allclose(
                 method(separations, diameter), expected, rtol=1e-12, atol=1e-24
@@ -229,9 +227,7 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
 def test_diameter_outside_the_tabulated_range_is_nan(ring_coro):
     """The loader does not extrapolate the curve past its largest diameter."""
     assert np.isnan(
-        stellar_intensity_curves(ring_coro, 0.3, interpolation="keys").evaluate(
-            "core_mean_intensity", 2.5
-        )
+        stellar_intensity_curves(ring_coro, 0.3, interpolation="keys").evaluate(2.5)
     )
 
 
@@ -247,20 +243,20 @@ def test_eqx_separation_arrays_keep_shape(ring_coro, diameter, shape):
     expected = jax.vmap(
         lambda s: stellar_intensity_curves(
             coro, getattr(diameter, "value", diameter), interpolation="keys"
-        ).evaluate("core_mean_intensity", s)
+        ).evaluate(s)
     )(separations.ravel()).reshape(shape)
     for evaluate in (
         (
             lambda separation, diameter=0.0, interpolation="keys": (
                 stellar_intensity_curves(
                     coro, diameter, interpolation=interpolation
-                ).evaluate("core_mean_intensity", separation)
+                ).evaluate(separation)
             )
         ),
         jax.jit(
             lambda s, d: stellar_intensity_curves(
                 coro, d, interpolation="keys"
-            ).evaluate("core_mean_intensity", s)
+            ).evaluate(s)
         ),
     ):
         result = evaluate(separations, diameter)
@@ -282,13 +278,11 @@ def test_public_diameter_bounds_under_jit(ring_coro, diameter):
                 coro,
                 getattr(diameter, "value", diameter),
                 interpolation="keys",
-            ).evaluate("core_mean_intensity", 2.5)
+            ).evaluate(2.5)
         )
     )()
     traced = jax.jit(
-        lambda d: stellar_intensity_curves(coro, d, interpolation="keys").evaluate(
-            "core_mean_intensity", 2.5
-        )
+        lambda d: stellar_intensity_curves(coro, d, interpolation="keys").evaluate(2.5)
     )(diameter)
     assert np.isnan(host)
     assert np.isnan(traced)

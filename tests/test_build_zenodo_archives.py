@@ -129,20 +129,15 @@ def test_build_archive_is_deterministic(tmp_path):
     assert md5a == md5b
 
 
-def test_emit_catalog_block_is_valid_python(tmp_path):
-    """The printed CATALOG block must be re-parseable as a Python dict."""
-    updates = {
-        "eac1_aavc_2d": "md5:" + "a" * 32,
-        "eac1_optimal_order_6_1d": None,  # awaiting fresh build
-    }
-    block = bza.format_catalog_block(updates)
-    # Confirm Python can evaluate it
-    ns: dict = {}
-    exec(block, ns)
-    parsed = ns["CATALOG"]
-    assert parsed["eac1_aavc_2d"]["md5"] == "md5:" + "a" * 32
-    assert parsed["eac1_aavc_2d"]["designer"] == "Susan Redmond"
-    assert parsed["eac1_optimal_order_6_1d"]["md5"] is None
-    assert parsed["eac1_optimal_order_6_1d"]["designer"] == "Rus Belikov"
-    # All catalog entries are emitted even when only some are updated.
-    assert len(parsed) == len(bza.CATALOG)
+def test_emit_catalog_block_preserves_unbuilt_archives():
+    """A rebuilt asset changes its digest and retains discovery metadata."""
+    from yippy.datasets import Archive, list_yips, yip_info
+
+    digest = "md5:" + "a" * 32
+    block = bza.format_catalog_block({"eac1_aavc_2d": digest})
+    archives = eval(f"[{block}]", {"Archive": Archive})
+    parsed = {a.name: a for a in archives}
+    assert parsed["eac1_aavc_2d"].digest == digest
+    assert parsed["eac1_aavc_2d"].designer == "Susan Redmond"
+    assert parsed["eac1_optimal_order_6_1d"] == yip_info("eac1_optimal_order_6_1d")
+    assert set(parsed) == set(list_yips())

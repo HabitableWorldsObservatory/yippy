@@ -36,12 +36,15 @@ lambda/D frame. Convert unit-bearing values before querying the model.
 
 ```python notest
 from optixstuff import Circular, HalfMaximum
-from yippy import Coronagraph
+from yippy import open_yip
 
 circle, core = Circular(0.7), HalfMaximum(0.3)
-coro = Coronagraph("path/to/yip", rules=(circle, core))
+package = open_yip("path/to/yip")
+native_psf = package.offaxis_psfs[0]
+native_xy_lod = package.offsets_xy_lod[0]
+coro = package.prepare(rules=(circle, core))
 
-# Native source samples: data has shape (source, y, x).
+# Model PSFs evaluated at the requested positions, on the native pixel grid.
 planet = coro.source_psfs(None, [2.0], [5.0], grid=None)
 star = coro.stellar_map(None, 0.01, grid=None)
 
@@ -56,6 +59,19 @@ area = record.evaluate("core_area_lod2", 5.0)
 throughput_map = coro.throughput_map()
 core_area_map = coro.core_area_map()
 ```
+
+`open_yip` reads the FITS headers and hashes the source files. It decodes the
+image arrays on first access. The read-only arrays preserve sample order,
+precision and zeros. `package.header.offaxis_psfs.pixel_grid()`,
+`package.header.stellar_intensity.pixel_grid()` and
+`package.header.sky_transmission.pixel_grid()` describe their individual grids.
+Use `package.fits_header("offaxis_psfs")` for the original cards and comments.
+
+`package.source.path` and `package.source.digest` identify the input.
+Preparation reuses the package's open files. A metadata change on the same
+file triggers a content check. Replacing a file requires a fresh `open_yip`.
+`yippy.write_yip(destination, package)` copies the original products. It also
+accepts measured arrays and their grids or headers from a producer.
 
 Supply every required rule in `rules=` at construction. `curves(rule)` selects
 a prepared record and raises for an unprepared rule. Reading a curve never
@@ -73,9 +89,12 @@ and geometry in `.grid`. Source arrays have leading axis `"source"`; stellar
 and sky maps are two-dimensional for scalar diameters. Source and stellar
 images are per-pixel fractions of unocculted stellar flux. Sky transmission is
 dimensionless and uses sampled-value semantics. The off-axis, stellar, and sky
-products can have different frames and pitches.
+products carry separate grids. Model preparation requires matching off-axis and
+stellar grids for a five-file native YIP. A versioned sinc delivery can specify
+its own off-axis grid. The sky map retains its own grid in both layouts.
 
-Use `grid=None` for native source or stellar samples. An explicit target
+Use `grid=None` to evaluate the prepared model on its native pixel grid.
+The shipped source positions and images are available on the package. An explicit target
 `PixelGrid` integrates the declared reconstruction onto its pixels. Native
 coordinates remain in each product's lambda/D frame; convert a grid to sky
 coordinates with `grid.to_arcsec(wavelength_nm)` when needed.
@@ -139,8 +158,9 @@ the same keyword and are independent of stellar diameter. `time_d` is days
 from the scene epoch and is unused by these fixed tables.
 
 The separate stellar ring profile remains available from
-`yippy.performance.stellar_intensity_curves(coro, diameter_lod)`. Evaluate
-`"core_mean_intensity"` for per-stellar-pixel flux fractions; divide by the
+`yippy.performance.stellar_intensity_curves(coro, diameter_lod)`. Its
+`stellar_ring_mean_per_pixel` quantity gives per-stellar-pixel flux fractions
+at `profile.evaluate(separation_lod)`. Divide by the
 stellar grid pixel area for density per square lambda/D.
 
 ## Post-processing and export
@@ -170,10 +190,10 @@ and can be fetched on demand. This is useful for tutorials, CI, and "I just
 want to try it" exploration:
 
 ```python
-from yippy import Coronagraph, fetch_yip
+from yippy import open_yip
 
-yip_path = fetch_yip("eac1_aavc_2d")  # download (cached after first call)
-coro = Coronagraph(yip_path)
+package = open_yip("eac1_aavc_2d")  # Download and cache the catalog entry.
+coro = package.prepare()
 ```
 
 The catalog is currently minimal. Long-term YIP hosting will be provided
@@ -182,7 +202,7 @@ Survey are shipped here: `eac1_aavc_2d` and `eac1_optimal_order_6_1d`
 (used by the yippy paper validation pipeline and as the pyEDITH default
 coronagraph) and `usort_offaxis_ovc` (an off-axis vortex coronagraph
 design study). For production work or YIPs outside this set, manage your
-own YIP paths and pass them to `Coronagraph(path)` directly.
+own YIP paths and load them with `open_yip(path)`.
 
 The `eac1_aavc_2d` design is Susan Redmond's EAC1 apodized vortex
 coronagraph, described in D. P. Mawet et al., "Apodized vortex
@@ -211,6 +231,8 @@ export YIPPY_CACHE_DIR=~/Documents/YIPs
 This example downloads a YIP into a user-configured shared cache directory.
 
 ```python notest
+from yippy import fetch_yip
+
 # Per-call override (wins over the env var)
 yip_path = fetch_yip("eac1_aavc_2d", cache_path="/data/shared/yips")
 
@@ -227,10 +249,10 @@ sampled-intensity reader requires double precision:
 
 ```python notest
 import jax
-from yippy import Coronagraph
+from yippy import open_yip
 
 jax.config.update("jax_enable_x64", True)
-coro = Coronagraph("path/to/yip")
+coro = open_yip("path/to/yip").prepare()
 ```
 
 There is no per-object dtype option. Datacube caches distinguish float32 and
@@ -246,12 +268,11 @@ The `sinchole` dependency must be available separately until its first release.
 
 ```python notest
 import jax
-from yippy import Coronagraph, SincOptions
+from yippy import open_yip
 
 jax.config.update("jax_enable_x64", True)
-coro = Coronagraph(
-    "delivery", interpolation="sinc", sinc_options=SincOptions(product_id="mono-000")
-)
+package = open_yip("delivery", product_id="mono-000")
+coro = package.prepare(interpolation="sinc")
 image = coro.source_psfs(None, [4.0], [5.5], grid=None)
 result = coro.source_psfs_with_info([4.0], [5.5])
 ```
@@ -287,8 +308,8 @@ The model selects one monochromatic product and reads stellar and sky data
 from the manifest's separate package. Each `Image` carries its own `PixelGrid`
 and wavelength/diameter `Frame`. `source_psfs`, `stellar_map`, and
 `background_transmission` accept explicit target grids and reconcile different
-frames through angular coordinates. `grid=None` retains native source or stellar
-samples. The wavelength argument does not select another product; use
+frames through angular coordinates. `grid=None` retains the native pixel grid
+for the interpolated image. The wavelength argument does not select another product; use
 `optixstuff.MultiBandCoronagraph` to dispatch among products.
 
 `SincOptions` accepts sinchole domain, memory and policy objects, plus an

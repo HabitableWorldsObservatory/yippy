@@ -78,12 +78,12 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
     eager = float(
         stellar_intensity_curves(
             syn_eqx_1d, getattr(diameter, "value", diameter), interpolation="keys"
-        ).evaluate("core_mean_intensity", 5.0)
+        ).evaluate(5.0)
     )
     traced = eqx.filter_jit(
         lambda d: stellar_intensity_curves(
             syn_eqx_1d, d, interpolation="keys"
-        ).evaluate("core_mean_intensity", 5.0)
+        ).evaluate(5.0)
     )(jnp.asarray(diameter))
 
     assert float(traced) == pytest.approx(eager, rel=1e-6), (

@@ -1,10 +1,7 @@
 """Module for handling off-axis PSFs using JAX."""
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
-from astropy.units import Quantity
 from hwoutils.grids import Image, PixelGrid
 from jax import device_put, jit, shard_map, vmap
 from jax.experimental import mesh_utils
@@ -35,46 +32,16 @@ class OffJAX(OffAx):
 
     def __init__(
         self,
-        yip_dir: Path,
-        offax_data_file: str,
-        offax_offsets_file: str,
-        pixel_scale_arcsec: Quantity,
+        psfs,
+        offsets,
+        grid: PixelGrid,
         x_symmetric: bool,
         y_symmetric: bool,
         downsample_shape: tuple[int, int] | None = None,
-        *,
-        grid: PixelGrid | None = None,
     ) -> None:
-        """Initializes the OffJAX class by casting YIP data to JAX arrays.
-
-        Args:
-            yip_dir:
-                Path to the directory containing PSF and offset data.
-            offax_data_file:
-                Name of the file containing the PSF data.
-            offax_offsets_file:
-                Name of the file containing the offsets data.
-            pixel_scale_arcsec:
-                Pixel scale of the PSF data in lambda/D.
-            x_symmetric:
-                Whether the PSFs are symmetric in x.
-            y_symmetric:
-                Whether the PSFs are symmetric in y.
-            grid: Native package grid, built from its authoritative header.
-            downsample_shape:
-                Optional target shape (ny, nx) to downsample PSFs to.
-                If provided, all PSFs will be resampled to this shape
-                immediately after loading, conserving total flux.
-        """
+        """Prepare JAX interpolation arrays from the native samples."""
         super().__init__(
-            yip_dir,
-            offax_data_file,
-            offax_offsets_file,
-            pixel_scale_arcsec,
-            x_symmetric,
-            y_symmetric,
-            downsample_shape=downsample_shape,
-            grid=grid,
+            psfs, offsets, grid, x_symmetric, y_symmetric, downsample_shape
         )
 
         ##############

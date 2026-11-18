@@ -12,7 +12,7 @@ from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.performance import PerformanceCurves
 from scipy.interpolate import PchipInterpolator, make_interp_spline
 
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy._yip import _YIPData
 from yippy.performance import stellar_intensity_curves
 
@@ -58,7 +58,7 @@ class TestTruncationThroughputCurve:
         throughput = prepared.curves(rule).throughput
         assert np.all(throughput >= 0)
         assert np.all(throughput <= 1.0)
-        constructed = Coronagraph(coro.yip_path, rules=(rule,)).curves(rule)
+        constructed = coro.package.prepare(rules=(rule,)).curves(rule)
         np.testing.assert_array_equal(throughput, constructed.throughput)
 
 
@@ -135,10 +135,12 @@ class TestCoreMeanIntensityCurve:
             diameters = np.r_[0.0, np.asarray(coro._stellar_ln_interp.x)[1:]]
             assert len(diameters) == len(coro._stellar_ln_interp.x)
             for diameter in diameters:
-                record = stellar_intensity_curves(coro, diameter)
-                nodes = record.separation_lod
+                profile = stellar_intensity_curves(coro, diameter)
+                assert profile.quantity == "stellar_ring_mean_per_pixel"
+                assert profile.frame == coro.stellar_grid.frame
+                nodes = profile.separation_lod
                 queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
-                actual = record.evaluate("core_mean_intensity", queries)
+                actual = profile.evaluate(queries)
                 tol = (
                     4
                     * max(1.0, abs(np.log(synthetic_1d.stellar_level)))
@@ -174,7 +176,7 @@ class TestPreparedPerformanceCurves:
 def performance_interpolation(synthetic_1d):
     """The one record evaluator on real measured tables."""
     with jax.enable_x64():
-        coro = Coronagraph(synthetic_1d.path)
+        coro = open_yip(synthetic_1d.path).prepare()
     return (coro, coro.curves())
 
 
@@ -186,7 +188,7 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
     """
     coro, record = performance_interpolation
     with pytest.raises(TypeError, match="interp_order"):
-        Coronagraph(coro.yip_path, interp_order=1)
+        coro.package.prepare(interp_order=1)
     for name in (
         "throughput",
         "throughput_variance",
@@ -228,9 +230,7 @@ def test_performance_interpolation_linear_tails(performance_interpolation):
         np.testing.assert_allclose(record.evaluate(name, grid), expected, rtol=1e-13)
     with jax.enable_x64():
         assert np.isnan(
-            stellar_intensity_curves(coro, 0.3, interpolation="keys").evaluate(
-                "core_mean_intensity", 2.0
-            )
+            stellar_intensity_curves(coro, 0.3, interpolation="keys").evaluate(2.0)
         )
 
 
@@ -268,7 +268,7 @@ def test_default_preserves_a_steep_monotone_rise():
 def test_interpolation_does_not_change_cache_identity(performance_interpolation):
     """Off-grid evaluation cannot mutate the measured table or its identity."""
     coro, record = performance_interpolation
-    host = _YIPData(coro.yip_path)
+    host = _YIPData(coro.package)
     identity, filename = host._auto_perf_identity(), host._perf_filename()
     original = record.throughput.copy()
     record.evaluate("throughput", np.linspace(0.1, 5.1, 101))
@@ -288,7 +288,7 @@ def test_zero_on_axis_psf_builds_finite_curves(tmp_path, rule):
     from synthetic_yip import write_synthetic_yip
 
     yip = write_synthetic_yip(tmp_path / "zero_floor", occulter_floor=0.0)
-    coro = Coronagraph(yip.path, rules=(rule,))
+    coro = open_yip(yip.path).prepare(rules=(rule,))
     data = coro.curves(rule)
 
     zero = np.argmin(data.separation_lod)

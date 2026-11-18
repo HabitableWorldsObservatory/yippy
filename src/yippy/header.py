@@ -41,12 +41,20 @@ class HeaderData:
     n_star: int | None = None
     zernike: str | None = None
     wfe: u.Quantity | None = None
+    diameter_convention: str = "circumscribed"
+    coordinate_model: str = "paraxial_entrance_tilt"
+
+    def __post_init__(self):
+        """Protect the underlying quantity arrays as well as the header fields."""
+        for value in vars(self).values():
+            if isinstance(value, u.Quantity):
+                value.flags.writeable = False
 
     def pixel_grid(self, shape=None) -> PixelGrid:
         """Native grid; FITS 00LL centers count from the outer pixel corner.
 
         Missing centers use the geometric midpoint of the supplied (ny, nx)
-        shape, or the header image shape. D is the circumscribed diameter.
+        shape, or the header image shape. Native FITS products use circumscribed D.
         """
         shape = (self.naxis2, self.naxis1) if shape is None else tuple(shape)
         for key, value in (
@@ -66,7 +74,8 @@ class HeaderData:
             frame=Frame(
                 self.lambda0.to_value(u.nm),
                 self.diameter.to_value(u.m),
-                "circumscribed",
+                self.diameter_convention,
+                self.coordinate_model,
             ),
         )
 
@@ -217,7 +226,7 @@ class HeaderData:
             logger.warning(f"Unhandled header fields: {unhandled_keys}")
 
         return HeaderData(
-            simple=header.get("SIMPLE", "F") == "T",
+            simple=header.get("SIMPLE", False) in (True, "T"),
             bitpix=int(header.get("BITPIX", 0)),
             naxis=int(header.get("NAXIS", 0)),
             naxis1=int(header.get("NAXIS1", 0)),

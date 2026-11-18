@@ -22,8 +22,9 @@ def export_exosims(
     units: str = "LAMBDA/D",
     *,
     separations_lod=None,
+    output_dir=None,
 ) -> dict:
-    """Write the selected performance record to ``<yip_path>/exosims/``.
+    """Write the selected record to output_dir (default: the package's exosims folder).
 
     All performance quantities use the record's interpolation policy at the
     requested separations (its knots by default). ``arcsec`` converts both
@@ -38,19 +39,24 @@ def export_exosims(
         performance.separation_lod if separations_lod is None else separations_lod,
         dtype=float,
     )
+    offaxis = coro.package.header.offaxis_psfs
     angle_scale = (
-        float(performance.frame.lod_to_arcsec(coro.header.lambda0.to_value(u.nm)))
+        float(
+            performance.frame.lod_to_arcsec(performance.frame.reference_wavelength_nm)
+        )
         if units.lower() == "arcsec"
         else 1.0
     )
     output_separations = separations * angle_scale
-    exosims_dir = Path(coro.yip_path, "exosims")
-    exosims_dir.mkdir(exist_ok=True)
+    exosims_dir = (
+        coro.package.source.path / "exosims" if output_dir is None else Path(output_dir)
+    )
+    exosims_dir.mkdir(parents=True, exist_ok=True)
 
     header = pyfits.Header()
     header["PIXSCALE"] = (coro.grid.step, "Angular pixel scale")
-    header["LAMBDA"] = (coro.header.lambda0.to_value(u.um), "Wavelength in micrometers")
-    header["D"] = (coro.header.diameter.to_value(u.m), "Telescope diameter in meters")
+    header["LAMBDA"] = (offaxis.lambda0.to_value(u.um), "Wavelength in micrometers")
+    header["D"] = (offaxis.diameter.to_value(u.m), "Telescope diameter in meters")
     header["OBSCURED"] = (coro.header.obscured, "Obscuration fraction")
     header["UNITS"] = (units, "Angular units")
     header["APERRULE"] = (type(performance.rule).__name__, "Photometric weighting rule")
@@ -64,8 +70,8 @@ def export_exosims(
     if hasattr(performance.rule, "fraction"):
         header["FRACPEAK"] = (performance.rule.fraction, "Fraction of peak intensity")
     delta_lambda_nm = None
-    if coro.header.maxlam is not None and coro.header.minlam is not None:
-        bandwidth = coro.header.maxlam - coro.header.minlam
+    if offaxis.maxlam is not None and offaxis.minlam is not None:
+        bandwidth = offaxis.maxlam - offaxis.minlam
         header["DELTALAM"] = (bandwidth.to_value(u.um), "Bandpass width in micrometers")
         delta_lambda_nm = bandwidth.to_value(u.nm)
 
@@ -84,9 +90,7 @@ def export_exosims(
             performance.evaluate("leakage_density_lod2", separations)
         )
         * stellar_pixel_area_lod2,
-        "occ_trans": coro._occultation_record.evaluate(
-            "occulter_transmission", separations
-        ),
+        "occ_trans": coro.occulter_transmission(separations),
     }
     for name, values in curves.items():
         curve_header = header.copy()
@@ -99,12 +103,12 @@ def export_exosims(
         ).writeto(exosims_dir / f"{name}.fits", overwrite=True)
 
     specs = {
-        "pupilDiam": coro.header.diameter.to_value(u.m),
+        "pupilDiam": offaxis.diameter.to_value(u.m),
         "obscurFac": coro.header.obscured,
         "starlightSuppressionSystems": [
             {
-                "name": coro.yip_path.name,
-                "lam": coro.header.lambda0.to_value(u.nm),
+                "name": coro.package.source.path.name,
+                "lam": offaxis.lambda0.to_value(u.nm),
                 "deltaLam": delta_lambda_nm,
                 "occ_trans": "occ_trans.fits",
                 "core_thruput": "core_thruput.fits",
@@ -154,7 +158,7 @@ def export_ayo_csv(
     if contrast_floor is not None:
         contrast = np.maximum(contrast, contrast_floor)
     throughput = coro._records[0].evaluate("throughput", separations)
-    occ_trans = coro._occultation_record.evaluate("occulter_transmission", separations)
+    occ_trans = coro.occulter_transmission(separations)
     columns = np.column_stack(
         (separations, contrast, contrast / ppf, throughput, occ_trans)
     )

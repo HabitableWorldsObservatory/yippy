@@ -19,7 +19,7 @@ def test_datacube_cache_path_is_f64_keyed(coro):
     """The PSF datacube cache filename carries the 'f64' tag under x64."""
     from yippy._yip import _YIPData
 
-    host = _YIPData(coro.yip_path)
+    host = _YIPData(coro.package)
     p = host._datacube_cache_path
     assert p.name.startswith(f"psf_datacube_quarter_f64_{coro.grid.shape[0]}px_")
     assert p.suffix == ".npy"

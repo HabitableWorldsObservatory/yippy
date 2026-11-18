@@ -10,7 +10,7 @@ from optixstuff.apertures import Circular
 from optixstuff.performance import PerformanceCurves
 from scipy.interpolate import PchipInterpolator
 
-from yippy import Coronagraph
+from yippy import open_yip
 
 
 def _record(nodes, values):
@@ -95,7 +95,7 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
     1e-24 absolute tolerance remains far below the synthetic stellar flux.
     """
     with jax.enable_x64():
-        coro = Coronagraph(synthetic_1d.path)
+        coro = open_yip(synthetic_1d.path).prepare()
         eqx_coro = coro
         grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
         for field, method in [
@@ -138,7 +138,7 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
         ):
             assert not hasattr(eqx_coro, removed)
         with pytest.raises(TypeError):
-            Coronagraph(coro.yip_path, interp_order=1)
+            coro.package.prepare(interp_order=1)
 
 
 def test_pchip_conversion_uses_original_nodes():

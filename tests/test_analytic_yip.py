@@ -107,7 +107,7 @@ def test_core_mean_intensity_returns_the_constant_stellar_level(package, coro):
     for separation in (1.0, 3.0, 5.0):
         got = float(
             stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-                "core_mean_intensity", separation
+                separation
             )
         )
         assert got == pytest.approx(package.stellar_level, rel=1e-6), (
@@ -153,7 +153,7 @@ def test_raw_contrast_divides_two_aperture_sums_not_two_means(package, coro):
 def test_occulter_transmission_follows_the_radial_function(package, coro):
     """Sky transmission at a radius is the function the package was written with."""
     for radius in (1.0, 2.0, 3.0):
-        got = float(coro._occultation_record.evaluate("occulter_transmission", radius))
+        got = float(coro.occulter_transmission(radius))
         expected = package.sky_trans_at(radius)
         assert got == pytest.approx(expected, rel=0.03), (
             f"occulter_transmission({radius})"

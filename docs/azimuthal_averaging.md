@@ -50,14 +50,14 @@ This example needs a user-supplied YIP directory (`yip_path`).
 
 ```python notest
 from optixstuff import HalfMaximum
-from yippy import Coronagraph
+from yippy import open_yip
 from yippy.performance import stellar_intensity_curves
 
 rule = HalfMaximum(0.3)
-coro = Coronagraph(yip_path, rules=(rule,), leakage_rule="azimuthal_ring_mean")
+coro = open_yip(yip_path).prepare(rules=(rule,), leakage_rule="azimuthal_ring_mean")
 radial = stellar_intensity_curves(coro)
 r_lod = coro.separation_map()
-istar_az_avg = radial.evaluate("core_mean_intensity", r_lod)
+istar_az_avg = radial.evaluate(r_lod)
 ```
 
 This approach:
@@ -108,7 +108,7 @@ so the curve and the map an image simulator renders describe the same star.
 
 ## Recommendation
 
-Evaluate `core_mean_intensity` on the radial `PerformanceCurves` record instead of the
+Evaluate the radial `SampledProfile` instead of the
 rotate-and-average approach. It is faster, more accurate, and produces
 cleaner azimuthal averages.
 

@@ -4,7 +4,7 @@ Style activation and figure saving belong to the caller. Importing this module
 does not load eyepiece or Matplotlib or change the active style.
 """
 
-from optixstuff.performance import PerformanceCurves
+from optixstuff.performance import PerformanceCurves, SampledProfile
 
 __all__ = ["plot_core_mean_intensity", "plot_performance_curve"]
 
@@ -22,6 +22,10 @@ _METRICS = {
     "leakage_density_lod2": (r"Stellar leakage density [$(\lambda/D)^{-2}$]", True),
     "raw_contrast": ("Raw contrast", True),
     "occulter_transmission": ("Occulter transmission", False),
+    "stellar_ring_mean_per_pixel": (
+        "Stellar ring mean [stellar flux fraction / pixel]",
+        True,
+    ),
 }
 
 
@@ -40,19 +44,19 @@ def plot_performance_curve(
     curves_or_separations,
     values=None,
     *,
-    metric="throughput",
+    metric=None,
     ax=None,
     label=None,
     line_kw=None,
 ):
-    """Draw one metric from a record or precomputed curve arrays.
+    """Draw one quantity from a record, sampled profile or curve arrays.
 
     Args:
-        curves_or_separations: PerformanceCurves or separations in lambda/D.
-        values: Curve values when passing bare separations; omit for a record.
+        curves_or_separations: A record, sampled profile, or separations in lambda/D.
+        values: Curve values for bare separations.
         metric: Record field for throughput, collecting area, leakage fraction
-            or leakage density (mean or variance), or raw_contrast. Use
-            occulter_transmission with bare curve arrays.
+            or leakage density (mean or variance), or raw_contrast. A profile
+            supplies its own quantity. Otherwise the default is throughput.
         ax: Optional single destination axes; None creates a figure and axes.
         label: Optional series label for caller-managed legends or labels.
         line_kw: Properties routed to the eyepiece line primitive.
@@ -61,19 +65,27 @@ def plot_performance_curve(
         eyepiece.plot.PlotResult with the untransformed data in artist ``line``.
         Contrast and stellar leakage use a logarithmic y axis.
     """
+    if isinstance(curves_or_separations, SampledProfile):
+        profile = curves_or_separations
+        if values is not None or (metric is not None and metric != profile.quantity):
+            raise ValueError("the sampled profile supplies its own quantity and values")
+        metric = profile.quantity
+        separations, values = profile.separation_lod, profile.values
+    else:
+        metric = "throughput" if metric is None else metric
+        if isinstance(curves_or_separations, PerformanceCurves):
+            if values is not None or metric not in curves_or_separations.interpolation:
+                raise ValueError(
+                    f"select a metric stored in the record; got {metric!r}"
+                )
+            separations = curves_or_separations.separation_lod
+            values = getattr(curves_or_separations, metric)
+        else:
+            separations = curves_or_separations
+            if values is None:
+                raise ValueError("values are required with separation arrays")
     if metric not in _METRICS:
         raise ValueError(f"metric must be one of {tuple(_METRICS)}; got {metric!r}")
-    if isinstance(curves_or_separations, PerformanceCurves):
-        if values is not None:
-            raise ValueError("omit values when passing PerformanceCurves")
-        if metric == "occulter_transmission":
-            raise ValueError("occulter_transmission requires curve arrays")
-        separations = curves_or_separations.separation_lod
-        values = getattr(curves_or_separations, metric)
-    else:
-        separations = curves_or_separations
-        if values is None:
-            raise ValueError("values are required with separation arrays")
     ylabel, log = _METRICS[metric]
     ep = _eyepiece()
     result = ep.plot.plot_radial(
@@ -91,15 +103,11 @@ def plot_performance_curve(
     return result
 
 
-def plot_core_mean_intensity(
-    separations_lod, intensities, *, ax=None, styles=None, line_kw=None
-):
-    """Draw arrays evaluated from stellar_intensity_curves records.
+def plot_core_mean_intensity(profiles, *, ax=None, styles=None, line_kw=None):
+    """Draw per-pixel ring means returned by stellar_intensity_curves.
 
     Args:
-        separations_lod: One-dimensional radial separations in lambda/D.
-        intensities: Mapping from stellar diameter (numeric lambda/D)
-            to per-pixel stellar flux fractions, one array per diameter.
+        profiles: Mapping from stellar diameter in lambda/D to its SampledProfile.
         ax: Optional single destination axes; None creates a figure and axes.
         styles: Optional document-wide eyepiece SourceStyles, keyed by the
             string representation of each diameter. None assigns in mapping order.
@@ -111,18 +119,20 @@ def plot_core_mean_intensity(
         identify the stellar diameters for caller-managed legends; the y axis
         is logarithmic. No stellar maps or photometry are computed here.
     """
-    if not intensities:
-        raise ValueError("intensities must contain at least one diameter profile")
+    if not profiles:
+        raise ValueError("profiles must contain at least one diameter profile")
     ep = _eyepiece()
     if styles is None:
-        styles = ep.style.SourceStyles([str(diameter) for diameter in intensities])
+        styles = ep.style.SourceStyles([str(diameter) for diameter in profiles])
     lines = []
-    for diameter, profile in intensities.items():
+    for diameter, profile in profiles.items():
+        if profile.quantity != "stellar_ring_mean_per_pixel":
+            raise ValueError("expected a stellar_ring_mean_per_pixel profile")
         style = styles[str(diameter)]
         diameter_lod = float(getattr(diameter, "value", diameter))
         result = ep.plot.plot_radial(
-            separations_lod,
-            profile,
+            profile.separation_lod,
+            profile.values,
             ax=ax,
             label=f"Diameter = {diameter_lod:g} lambda/D",
             log=True,

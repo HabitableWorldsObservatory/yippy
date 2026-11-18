@@ -51,7 +51,9 @@ def test_the_header_declares_a_usable_pixel_scale(shipped_coro):
     given in arcseconds or in milliarcseconds without excluding any plausible
     lambda/D sampling.
     """
-    header = pyfits.getheader(shipped_coro.yip_path / "stellar_intens.fits", 0)
+    header = pyfits.getheader(
+        shipped_coro.package.source.path / "stellar_intens.fits", 0
+    )
     declared = header["PIXSCALE"]
 
     assert float(shipped_coro.grid.step) == pytest.approx(declared), (
@@ -107,13 +109,13 @@ def test_inscribed_conversion_is_explicit(syn_coro_1d):
 
     Exact-algebra: typed header values D=6 m, D_INSC=5 m give 1.2.
     """
-    from yippy import Coronagraph, lod_inscribed_to_circumscribed
+    from yippy import lod_inscribed_to_circumscribed
 
     coro = syn_coro_1d
     assert coro.header.diameter.to_value("m") == 6.0
     assert coro.header.diameter_inscribed.to_value("m") == 5.0
     with pytest.raises(TypeError, match="use_inscribed_diameter"):
-        Coronagraph(coro.yip_path, use_inscribed_diameter=True)
+        coro.package.prepare(use_inscribed_diameter=True)
     for separation in (5.0, 10.0):
         assert (
             lod_inscribed_to_circumscribed(separation, coro.grid.frame, 5.0)
@@ -212,10 +214,9 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     coro = syn_coro_1d
     grid = coro.header.pixel_grid()
     numpy_reader = OffAx(
-        coro.yip_path,
-        "offax_psf.fits",
-        "offax_psf_offset_list.fits",
-        coro.header.pixscale,
+        coro.package.offaxis_psfs,
+        coro.package.offsets_xy_lod,
+        grid,
         True,
         True,
     )
@@ -371,7 +372,7 @@ def test_public_geometric_leakage_change(shipped_coro):
 
     from yippy._yip import _YIPData
 
-    host = _YIPData(shipped_coro.yip_path)
+    host = _YIPData(shipped_coro.package)
     for rule, native_leakage, change_percent in (
         (
             Circular(0.7),

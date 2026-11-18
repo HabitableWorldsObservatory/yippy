@@ -3,7 +3,7 @@
 A sinc delivery is a directory of sampled off-axis planet PSFs that a coronagraph
 designer propagates at positions chosen by the reader, plus a manifest that declares
 what the samples mean. The reader is selected by the file-free `sinchole` engine, which is
-loaded through yippy with `Coronagraph(path, interpolation="sinc")`. This page is the
+loaded through yippy with `open_yip(path).prepare(interpolation="sinc")`. This page is the
 complete contract for schema `sinc-delivery-0.1`. The parser in
 `yippy.sinc_delivery` is the source of truth, and the notes below say which fields the
 parser reads and which it only carries along.
@@ -37,9 +37,9 @@ psf = backend.create_psf(3.9425, 5.415)
 
 The starter is not published yet, so `fetch_sinc_starter` raises a clear error
 unless the archive is already in the cache directory. It
-holds no stellar or sky products, so `Coronagraph(path, interpolation="sinc")` does not
+holds no stellar or sky products, so `open_yip(path).prepare(interpolation="sinc")` does not
 load it yet and the read goes through the router as shown. A full delivery that
-includes the stellar products loads through `Coronagraph` directly. The quickest check
+includes the stellar products can be opened and prepared through `open_yip`. The quickest check
 of the files is `yippy-sinc validate` on the unpacked directory.
 
 ## Choosing positions
@@ -137,7 +137,7 @@ hash.
 ### Planes
 
 Each entry of `planes` describes one monochromatic wavelength. Only one plane is read
-at a time, chosen with `--product` or `SincOptions(product_id=...)`. With one plane no
+at a time, chosen with `--product` or `open_yip(path, product_id=...)`. With one plane no
 choice is needed.
 
 | Key | Type | Required | Meaning |

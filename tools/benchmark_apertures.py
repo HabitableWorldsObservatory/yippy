@@ -21,9 +21,9 @@ from optixstuff import performance as perf
 from scipy.optimize import brentq
 from scipy.special import j0, j1
 
-from yippy import __version__, fetch_yip
+from yippy import __version__, open_yip
 from yippy._yip import _YIPData
-from yippy.datasets import CATALOG, DATA_RELEASE_TAG
+from yippy.datasets import yip_info
 from yippy.performance import _iter_xaxis_positions
 
 
@@ -76,6 +76,7 @@ def measure(psf, pixel_lod, factor, ratio, center):
 def main(directory, airy_only=False):
     """Measure all requested gates, including every native shipped offset."""
     directory.mkdir(parents=True, exist_ok=True)
+    archive = yip_info("eac1_aavc_2d")
     provenance = {
         "yippy_version": __version__,
         "dependencies": {
@@ -85,9 +86,9 @@ def main(directory, airy_only=False):
         "references": {
             "airy": "Born and Wolf, Principles of Optics, 7th ed., section 8.5.2",
             "shipped": {
-                "name": "eac1_aavc_2d",
-                "release": DATA_RELEASE_TAG,
-                "archive_md5": CATALOG["eac1_aavc_2d"]["md5"],
+                "name": archive.name,
+                "release": archive.release,
+                "archive_md5": archive.digest,
             },
         },
         "settings": {
@@ -147,7 +148,7 @@ def main(directory, airy_only=False):
         print(f"Wrote analytic Airy evidence to {directory}.")
         return
 
-    coro = _YIPData(fetch_yip("eac1_aavc_2d"))
+    coro = _YIPData(open_yip(archive.name))
     positions = list(_iter_xaxis_positions(coro))
     pixel_lod = float(coro.grid.step)
     ny, nx = coro.grid.shape

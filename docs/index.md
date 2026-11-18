@@ -52,7 +52,7 @@ develop/_changelog.md
 
 ## Performance API
 
-`yippy.Coronagraph(path, rules=(...))` directly implements
+`yippy.open_yip(path).prepare(rules=(...))` directly implements
 `optixstuff.AbstractTableCoronagraph`. Supply aperture rules at construction,
 select records with `coro.curves(rule)`, and query images through
 `source_psfs(None, x_lod, y_lod, grid=None)` or
