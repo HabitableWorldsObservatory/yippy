@@ -1,5 +1,58 @@
 # Changelog
 
+## [3.0.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.12.0...v3.0.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* declare point, integral and mean sampling for deliveries and YIP products
+* implement imaging, bind scene operators with validity and require sinchole
+* open YIPs as immutable packages with one writer, an archive descriptor and a synthetic test writer
+* drop Matched from performance records and scalar exports
+* record weighted-aperture variance moments and integrate hard-edged leakage over the planet region
+* build off-axis PSF grids from the off-axis header and refuse packages whose grids differ
+* one frozen Coronagraph implementing the optixstuff contract
+* call sinchole admission and reader selection instead of copied rules
+* delete Coronagraph query methods; the optixstuff contract is the query front end
+* compute methods return data only, plotting moves to yippy.viz, and dead helpers and rule literals are gone
+* off-axis coordinates come from the shared grid, and the deprecated Python synthesis path and transform copies are gone
+* the circular aperture centre is a named field that defaults to the source position
+* add aperture rules and a single performance-curve record with one evaluator
+* products carry shared pixel grids built from the header, with the axis at the pixel-centre coordinate
+
+### Features
+
+* add aperture rules and a single performance-curve record with one evaluator ([e2355b2](https://github.com/HabitableWorldsObservatory/yippy/commit/e2355b24033bebaffd75301f7a4b87fa50d1b680))
+* add Coronagraph.with_rules to prepare other aperture rules on a loaded coronagraph ([40f3a46](https://github.com/HabitableWorldsObservatory/yippy/commit/40f3a463b4ff6c923a31a5c93170dfa6f989937a))
+* coronagraph PSFs and stellar maps declare band-limited reconstruction ([aa86c9e](https://github.com/HabitableWorldsObservatory/yippy/commit/aa86c9e426d66dab683eed3c6df9b3202a25fb75))
+* declare point, integral and mean sampling for deliveries and YIP products ([57725da](https://github.com/HabitableWorldsObservatory/yippy/commit/57725da81a5f57f2554113ab0a4473332357d626))
+* export DEFAULT_APERTURE_RULE, the 0.7 lambda/D circle used when no rule is named ([abe8b16](https://github.com/HabitableWorldsObservatory/yippy/commit/abe8b16b490b86c283b0c036c1af77474a88ae28))
+* implement imaging, bind scene operators with validity and require sinchole ([9aaa7d7](https://github.com/HabitableWorldsObservatory/yippy/commit/9aaa7d77073890f0d4ed4c6874b9fd0681f75516))
+* implement the prepared and stellar_frame coronagraph contract methods ([703c8e7](https://github.com/HabitableWorldsObservatory/yippy/commit/703c8e7e4301ab47cbdcc96b57bc5ad7af3ad266))
+* one frozen Coronagraph implementing the optixstuff contract ([c27a456](https://github.com/HabitableWorldsObservatory/yippy/commit/c27a4561a5f027a5fbbe026b9dba0a4d4b211498))
+* open YIPs as immutable packages with one writer, an archive descriptor and a synthetic test writer ([e85778a](https://github.com/HabitableWorldsObservatory/yippy/commit/e85778af2670f88ea572ac37bc2fb6eecaf90c78))
+* **performance:** prepare linear leakage weights for finite-star queries ([57e701f](https://github.com/HabitableWorldsObservatory/yippy/commit/57e701f4ab2e4cd2053fe5978b55384218fb6b44))
+* products carry shared pixel grids built from the header, with the axis at the pixel-centre coordinate ([119bbb0](https://github.com/HabitableWorldsObservatory/yippy/commit/119bbb0ce56a7c4e9ae7866da98899a2cf9c105d))
+* stellar and sky maps declare that they continue past the tabulated field ([7abf3da](https://github.com/HabitableWorldsObservatory/yippy/commit/7abf3dac81a78d09fee7a1e7296dc26a0e5026cd))
+* the circular aperture centre is a named field that defaults to the source position ([510b08d](https://github.com/HabitableWorldsObservatory/yippy/commit/510b08d646ce6c374b6f021cd9337d221bed3313))
+
+
+### Bug Fixes
+
+* build off-axis PSF grids from the off-axis header and refuse packages whose grids differ ([cbd1bf9](https://github.com/HabitableWorldsObservatory/yippy/commit/cbd1bf9e3ba27551419a59b4b92301d4edbb86be))
+* compute the circle-square overlap angle with atan2 so a disk tiles to float64 rounding ([8526410](https://github.com/HabitableWorldsObservatory/yippy/commit/852641022fae83f4df1c03154794420f3ce08187))
+* **coronagraph:** warn when a PSF datacube is built from a 1D YIP ([0fae8d6](https://github.com/HabitableWorldsObservatory/yippy/commit/0fae8d61818fe2675c2fb83a7aae32af8522eb14))
+* record weighted-aperture variance moments and integrate hard-edged leakage over the planet region ([d02e8b9](https://github.com/HabitableWorldsObservatory/yippy/commit/d02e8b962d8328d9d2a9850f82966a1ab496fb8c))
+
+
+### Code Refactoring
+
+* call sinchole admission and reader selection instead of copied rules ([d4e78e6](https://github.com/HabitableWorldsObservatory/yippy/commit/d4e78e6c4602f240d52ec7e190006986ed01d665))
+* compute methods return data only, plotting moves to yippy.viz, and dead helpers and rule literals are gone ([a2f6f30](https://github.com/HabitableWorldsObservatory/yippy/commit/a2f6f30b0ee96a78d67495a1380c86a7a4f1f5d3))
+* delete Coronagraph query methods; the optixstuff contract is the query front end ([6dfec7a](https://github.com/HabitableWorldsObservatory/yippy/commit/6dfec7a207d68b3f366bc3d88074b1fde686c6c7))
+* drop Matched from performance records and scalar exports ([0a0b7e7](https://github.com/HabitableWorldsObservatory/yippy/commit/0a0b7e70cfb96840e646379a42376f28aef75972))
+* off-axis coordinates come from the shared grid, and the deprecated Python synthesis path and transform copies are gone ([5b980a7](https://github.com/HabitableWorldsObservatory/yippy/commit/5b980a7249be00735be061b28b6219992747667b))
+
 ## [2.12.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.11.0...v2.12.0) (2026-11-06)
 
 
