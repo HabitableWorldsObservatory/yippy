@@ -15,8 +15,8 @@ from astropy.io import fits
 
 from yippy import datasets
 from yippy.interpolation import SincOptions
-from yippy.sinc_delivery import detect_delivery, load_delivery
-from yippy.sinc_tools import (
+from yippy.sinc.delivery import detect_delivery, load_delivery
+from yippy.sinc.tools import (
     ACCEPTANCE_LEVEL,
     SincToolsError,
     main,
@@ -25,8 +25,8 @@ from yippy.sinc_tools import (
     write_plan,
 )
 
-DOCS = Path(__file__).parents[1] / "docs" / "sinc-delivery.md"
-DATA = Path(__file__).parent / "data"
+DOCS = Path(__file__).parents[2] / "docs" / "sinc-delivery.md"
+DATA = Path(__file__).parents[1] / "data"
 
 #: Mirror bases of the designer request, with its last base on row 26.
 STARTER_BASES = [

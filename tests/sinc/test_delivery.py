@@ -13,18 +13,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import sinchole as sc
 from astropy.io import fits
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, PixelGrid, resample
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 
+import yippy.sinc as sc
 from yippy import SincOptions, open_yip
 from yippy._yip import _YIPData
 from yippy.performance import stellar_intensity_curves
-from yippy.sinc_delivery import detect_delivery, file_sha256, load_delivery
-from yippy.sinc_routing import route_interpolation
+from yippy.sinc.delivery import detect_delivery, file_sha256, load_delivery
+from yippy.sinc.routing import route_interpolation
 from yippy.util import cache_identity_digest
 
 
@@ -465,7 +465,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         "product_id",
         "requested",
         "effective",
-        "sinchole_version",
+        "yippy_version",
         "kernel_profile",
         "receipt_id",
     ):
