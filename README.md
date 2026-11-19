@@ -60,7 +60,8 @@ throughput_map = coro.throughput_map()
 core_area_map = coro.core_area_map()
 ```
 
-`open_yip` reads the FITS headers and hashes the source files. It decodes the
+`package.prepare(...)` and `yippy.Coronagraph(package, ...)` build the same
+model. `open_yip` reads the FITS headers and hashes the source files. It decodes the
 image arrays on first access. The read-only arrays preserve sample order,
 precision and zeros. `package.header.offaxis_psfs.pixel_grid()`,
 `package.header.stellar_intensity.pixel_grid()` and
