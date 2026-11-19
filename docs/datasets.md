@@ -215,13 +215,3 @@ print(archive.archive_path())  # Resolve the cache location without fetching.
 
 Descriptive metadata beyond these fields (wavelengths, dark-zone extent,
 pixel scale, ...) lives in each YIP's FITS headers, not in the catalog.
-
-## Migration from `fetch_coronagraph`
-
-The old `fetch_coronagraph()` helper was removed in this release. The
-default it returned was a 2D AAVC YIP; the direct replacement is:
-
-| Old call | New call |
-|---|---|
-| `fetch_coronagraph()` | `fetch_yip("eac1_aavc_2d")` |
-| `fetch_coronagraph("eac1_aavc_512")` | `fetch_yip("eac1_aavc_2d")` |
