@@ -31,10 +31,10 @@ class TestSeparationMap:
         r = coro.separation_map()
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
-        assert r[cy, cx + d] == pytest.approx(r[cy + d, cx], rel=1e-10)
+        assert r[cy, cx + d] == pytest.approx(np.asarray(r[cy + d, cx]), rel=1e-10)
         # The axis sits between pixels cx - 1 and cx, so cx + d mirrors to
         # cx - 1 - d.
-        assert r[cy, cx + d] == pytest.approx(r[cy, cx - 1 - d], rel=1e-10)
+        assert r[cy, cx + d] == pytest.approx(np.asarray(r[cy, cx - 1 - d]), rel=1e-10)
 
     def test_all_nonnegative(self, coro):
         """All separations are non-negative."""
@@ -59,8 +59,8 @@ class TestCoreMeanIntensityMap:
         )
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
-        assert m[cy, cx + d] == pytest.approx(m[cy + d, cx], rel=1e-10)
-        assert m[cy, cx + d] == pytest.approx(m[cy - 1 - d, cx], rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(m[cy + d, cx]), rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(m[cy - 1 - d, cx]), rel=1e-10)
 
     def test_positive_values(self, coro):
         """All values are non-negative."""
@@ -81,7 +81,7 @@ class TestCoreMeanIntensityMap:
         expected = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
             sep
         )
-        assert m[cy, cx + d] == pytest.approx(expected, rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(expected), rel=1e-10)
 
 
 class TestNoiseFloorAyoMap:
@@ -147,7 +147,7 @@ class TestThroughputMap:
         m = coro.throughput_map()
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
-        assert m[cy, cx + d] == pytest.approx(m[cy + d, cx], rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(m[cy + d, cx]), rel=1e-10)
 
     def test_matches_1d(self, coro):
         """Map values match the 1D interpolator at the same separation."""
@@ -157,7 +157,7 @@ class TestThroughputMap:
         d = 15
         sep = r[cy, cx + d]
         expected = coro.curves().evaluate("throughput", sep)
-        assert m[cy, cx + d] == pytest.approx(expected, rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(expected), rel=1e-10)
 
 
 class TestCoreAreaMap:
@@ -181,4 +181,4 @@ class TestCoreAreaMap:
         d = 15
         sep = r[cy, cx + d]
         expected = coro.curves().evaluate("core_area_lod2", sep)
-        assert m[cy, cx + d] == pytest.approx(expected, rel=1e-10)
+        assert m[cy, cx + d] == pytest.approx(np.asarray(expected), rel=1e-10)
