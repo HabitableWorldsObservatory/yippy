@@ -309,15 +309,15 @@ frames through angular coordinates. `grid=None` retains the native pixel grid
 for the interpolated image. For a multiband instrument, select the imaging
 model with `multi.band(wavelength_nm)`.
 
-`SincOptions` accepts sinchole domain, memory and policy objects, plus an
-optional prefilter `taps` count (5 to 10). By default sinchole selects its
+`SincOptions` accepts `yippy.sinc` domain, memory and policy objects, plus an
+optional prefilter `taps` count (5 to 10). By default `yippy.sinc` selects its
 7-tap prefilter for sampling ratios up to 0.64 and the raw kernel up to 0.76.
 Prefilter tone-error estimates are not certified image-error bounds.
 yippy retains raw training samples for performance diagnostics and includes
 them in the prefiltered memory budget. Domain overrides
 can only restrict the declared served geometry. Policy error budgets use photon
 fractions per pixel. The default memory budget is computed from the actual
-native cube size using sinchole's admission and 1024-output estimates, one-query
+native cube size using the `yippy.sinc` admission and 1024-output estimates, one-query
 chunks and 256-pixel tiles. It excludes compiler workspace and caller-owned
 arrays; larger batches need an explicit budget. Cube caches preserve per-query
 status and backend selections in an integrity-checked sidecar. Every opt-in

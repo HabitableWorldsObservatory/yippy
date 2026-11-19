@@ -16,14 +16,15 @@ import astropy.units as u
 import jax
 import jax.numpy as jnp
 import numpy as np
-import sinchole as sc
 from astropy.io import fits
 from hwoutils.constants import m2nm, rad2arcsec
 from lod_unit import lod
 from optixstuff.grids import Frame, Measure, PixelGrid
 
-from .header import HeaderData
-from .sampling import sample_units
+import yippy.sinc as sc
+
+from ..header import HeaderData
+from ..sampling import sample_units
 
 _PREMISES = (
     "entrance_tilt_model",
@@ -210,7 +211,7 @@ def load_delivery(root, manifest, options, *, package=None):
         package: Open native package providing its measured arrays and header cards.
 
     Returns:
-        A Delivery ready for sinchole construction, with no legacy transforms.
+        A Delivery ready for yippy.sinc construction, with no legacy transforms.
     """
     root = Path(root)
     for key in (
@@ -458,7 +459,7 @@ def load_delivery(root, manifest, options, *, package=None):
 
 
 def admit_delivery(delivery, options):
-    """Map validated delivery declarations to the installed sinchole API."""
+    """Map validated delivery declarations to the installed yippy.sinc API."""
     d, p = delivery.manifest, delivery.plane
     f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
     premises = [d.get("premises", {}).get(key, {}) for key in _PREMISES]

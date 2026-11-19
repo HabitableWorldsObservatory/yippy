@@ -5,12 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "yippy"
 authors = [{ name = "Corey Spohn", email = "corey.a.spohn@nasa.gov" }]
-description = "A Python and JAX wrapper to create a coronagraph object from a yield input package"
+description = "A Python and JAX wrapper to create a coronagraph object from a yield input package, with sampling-admitted windowed-sinc reads"
 dependencies = [
   "astropy>=6.1",
-  "numpy>=2.0",
+  "numpy>=2.1.2",
   "scipy>=1.13",
-  "sinchole>=0.1.0",
   "hwoutils[jax]>=1.10.0",
   "optixstuff>=3.0.0",
   "lod_unit>=1.8.0",
@@ -32,7 +31,7 @@ classifiers = [
 ]
 
 [project.scripts]
-yippy-sinc = "yippy.sinc_tools:main"
+yippy-sinc = "yippy.sinc.tools:main"
 
 [project.urls]
 Homepage = "https://github.com/HabitableWorldsObservatory/yippy"
@@ -51,22 +50,29 @@ content-type = "text/markdown"
 path = "README.md"
 
 [project.optional-dependencies]
-viz = ["eyepiece>=0.17.0"]
+viz = ["eyepiece>=0.17.0", "matplotlib>=3.11.0"]
 docs = [
   "eyepiece>=0.17.0",
+  "hwostyle>=1.7.0",
   "sphinx>=7.2.6",
   "myst-nb>=1.0.0",
   "sphinx-book-theme>=1.1.0",
   "sphinx-autoapi>=3.0.0",
+  "sphinxcontrib-mermaid>=0.9",
+  "sphinx-design>=0.6.0",
+  "ipykernel>=6.29.0",
   "ipython>=8.18.1",
+  "imageio-ffmpeg>=0.6.0",
+  "matplotlib>=3.11.0",
 ]
 test = [
   "eyepiece>=0.17.0",
+  "matplotlib>=3.11.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",
   # The budget plugin needs psutil where process-list commands are unavailable.
   "psutil>=5.9.4",
-  "pytest-xdist>=2.5",
+  "pytest-xdist>=3.8.0",
   "pytest-testmon>=2.0.7",
   "pytest-markdown-docs>=0.5.0",
   "pytest-timeout>=1.3.1",
@@ -104,6 +110,9 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 # _version.py is generated during installation and absent in the hygiene job.
 known-first-party = ["yippy"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/sinc/**" = ["D"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
@@ -114,7 +123,8 @@ markers = [
     "medium: tests with a 30-second default time budget",
     "slow: tests with a 300-second default time budget, run nightly",
 ]
-addopts = "-m 'not network'"
+# The sinc docs scripts write committed evidence by hand; they are not doc examples.
+addopts = "-m 'not network' --ignore=docs/sinc/scripts"
 
 [tool.testbudget]
 library = "yippy"

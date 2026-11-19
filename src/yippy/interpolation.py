@@ -6,21 +6,22 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from sinchole import BoundKind, Domain, MemoryBudget, ReadPolicy, Reason, Status
+
+from .sinc import BoundKind, Domain, MemoryBudget, ReadPolicy, Reason, Status
 
 
 @dataclass(frozen=True)
 class SincOptions:
-    """Select a fixed product and optional sinchole construction controls.
+    """Select a fixed product and optional sinc construction controls.
 
     Args:
-        taps: Optional prefilter tap count (5..10); None lets sinchole select.
+        taps: Optional prefilter tap count (5..10); None lets the sinc package select.
         product_id: Exact manifest plane ID, required for multiple planes.
         domain: Optional permission restriction in reference lambda/D.
-        memory: Explicit sinchole MemoryBudget. None uses array-size estimates
+        memory: Explicit MemoryBudget. None uses array-size estimates
             for admission, one query chunk, 256-pixel tiles and 1024 outputs.
             Compiler workspace and caller-owned arrays are outside this budget.
-        policy: Optional sinchole ReadPolicy. Its error budget is expressed in
+        policy: Optional ReadPolicy. Its error budget is expressed in
             incident photon fractions per pixel. None selects sampling mode.
     """
 
@@ -40,7 +41,7 @@ class InterpolationInfo:
     reasons: tuple[str, ...] = ()
     manifest_sha256: str = ""
     product_id: str = ""
-    sinchole_version: str = ""
+    yippy_version: str = ""
     kernel_profile: str = ""
     receipt_id: str = ""
     receipt: Any = None
@@ -64,7 +65,7 @@ class ReadLedger(eqx.Module):
 class InterpolationRead(eqx.Module):
     """Scalar or batch image read in incident photon fractions per pixel.
 
-    Status, reason bits and bound kinds follow sinchole's version-one enums.
+    Status, reason bits and bound kinds follow the version-one sinc enums.
     selected_backend is 0 for blend and 1 for sinc. Unknown errors stay infinite.
     """
 
@@ -92,7 +93,7 @@ def blend_read(
 ):
     """Attach unknown-error diagnostics."""
     valid = finite & jnp.all(jnp.isfinite(image))
-    # Version-one sinchole reason bits: NONFINITE_QUERY and FALLBACK_USED.
+    # Version-one sinc reason bits: NONFINITE_QUERY and FALLBACK_USED.
     bits = jnp.asarray(reasons, jnp.uint32)
     bits = bits | jnp.where(
         valid & fallback, jnp.uint32(Reason.FALLBACK_USED), jnp.uint32(0)

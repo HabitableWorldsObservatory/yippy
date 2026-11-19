@@ -22,7 +22,6 @@ from optixstuff.grids import Image, Measure, PixelGrid
 from optixstuff.performance import PerformanceCurves, SampledProfile, leakage_weights
 from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band
-from sinchole import PrefilteredReader, SceneRenderer
 
 from ._precision import float_dtype
 from ._yip import _YIPData
@@ -31,6 +30,7 @@ from .header import HeaderData
 from .interpolation import SincOptions
 from .sampling import fraction_image
 from .scene import DenseSceneOperator
+from .sinc import PrefilteredReader, SceneRenderer
 
 
 def _jax_record(record):

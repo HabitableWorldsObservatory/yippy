@@ -1,6 +1,6 @@
 """Designer tools for sinc-delivery-0.1 directories: check a delivery, plan positions.
 
-``validate`` runs every yippy integrity check and then sinchole admission with
+``validate`` runs every yippy integrity check and then yippy.sinc admission with
 JAX binary64 enabled, and reports pass or fail with the numbers behind it.
 ``plan`` writes the training, check and mirror-check coordinate lists a designer
 propagates. Both are exposed as functions and as the ``yippy-sinc`` command.
@@ -19,9 +19,10 @@ from pathlib import Path
 
 import jax
 import numpy as np
-import sinchole as sc
 from hwoutils.constants import m2nm
-from sinchole import (
+
+import yippy.sinc as sc
+from yippy.sinc import (
     MIRROR_TOLERANCE,
     KernelProfile,
     plan_cell_checks,
@@ -30,8 +31,8 @@ from sinchole import (
     plan_sampling,
 )
 
-from .interpolation import SincOptions
-from .sinc_delivery import (
+from ..interpolation import SincOptions
+from .delivery import (
     admit_delivery,
     campaign_sampling_failed,
     delivery_ratios,
@@ -66,8 +67,8 @@ class ValidationReport:
         failures: One sentence per failed requirement, empty on a pass.
         notes: Advisory remarks that do not change the verdict.
         integrity_error: Message of the first yippy integrity failure, or None.
-        reasons: sinchole reason names that refused or flagged admission.
-        admitted: Whether sinchole admitted the grid.
+        reasons: yippy.sinc reason names that refused or flagged admission.
+        admitted: Whether yippy.sinc admitted the grid.
         receipt_id: Identity of the admission receipt, or None if none exists.
         rho: Kernel occupancy per axis, x then y, or None if not computable.
         interior_residuals: Per interior check, max abs difference over local peak.
@@ -179,7 +180,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
     """Check a sinc delivery directory the way yippy will read it.
 
     Runs every yippy integrity check (hashes, FITS and CSV agreement,
-    declarations), then sinchole admission with JAX binary64 on, and gathers the
+    declarations), then yippy.sinc admission with JAX binary64 on, and gathers the
     interior, mirror and axis residuals from the admission receipt.
 
     Args:
@@ -229,7 +230,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
                 receipt = refusal.receipt
                 reasons = sc.reason_names(refusal.reason_bits)
     if not admitted and not failures:
-        failures.append("sinchole refused admission: " + (", ".join(reasons) or "?"))
+        failures.append("yippy.sinc refused admission: " + (", ".join(reasons) or "?"))
 
     interior = tuple(
         float(v) for v in (receipt.empirical_local_peak if receipt else ())

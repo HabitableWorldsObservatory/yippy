@@ -18,7 +18,7 @@ from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from .datasets import fetch_yip, yip_exists
 from .header import HeaderData
 from .schema import PRODUCT_FILES, WRITE_LOCK
-from .sinc_delivery import delivery_header, detect_delivery, select_plane
+from .sinc.delivery import delivery_header, detect_delivery, select_plane
 
 
 @dataclass(frozen=True)

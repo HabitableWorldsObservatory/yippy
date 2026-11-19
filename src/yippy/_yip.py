@@ -15,7 +15,6 @@ from optixstuff.performance import (
     SampledProfile,
     performance_curves,
 )
-from sinchole import Reason
 from tqdm import tqdm
 
 from ._precision import dtype_tag, float_dtype
@@ -25,6 +24,7 @@ from .logger import logger
 from .offjax import OffJAX
 from .performance import _iter_xaxis_positions
 from .sampling import fraction_image
+from .sinc import Reason
 from .sky_trans import sky_transmission_image
 from .stellar_intens import StellarIntens
 from .util import (
@@ -96,7 +96,7 @@ class _YIPData:
         sinc_options: SincOptions | None = None,
     ):
         """Prepare interpolation backends and aperture records from native samples."""
-        from .sinc_routing import route_interpolation
+        from .sinc.routing import route_interpolation
 
         self.package = package
         yip_path = package.source.path
@@ -368,7 +368,7 @@ class _YIPData:
         """Cache midpoint-grid reads with integrity-bound status selections."""
         import json
 
-        from .sinc_delivery import file_sha256
+        from .sinc.delivery import file_sha256
 
         path = self._datacube_cache_path
         status_path = path.with_suffix(".status.npz")
@@ -536,7 +536,7 @@ class _YIPData:
         }
         info = getattr(self, "interpolation_info", None)
         if info is not None and (info.manifest_sha256 or info.requested != "blend"):
-            from .sinc_routing import cache_interpolation_identity
+            from .sinc.routing import cache_interpolation_identity
 
             identity["interpolation"] = cache_interpolation_identity(info, self.offax)
         return identity

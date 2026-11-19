@@ -4,11 +4,13 @@ import json
 from dataclasses import asdict
 
 import jax
-import sinchole as sc
 
-from .delivery_backend import _FALLBACK_MASK, DeliveryBackend
-from .interpolation import InterpolationInfo, SincOptions
-from .sinc_delivery import (
+import yippy.sinc as sc
+from yippy._version import __version__
+
+from ..delivery_backend import _FALLBACK_MASK, DeliveryBackend
+from ..interpolation import InterpolationInfo, SincOptions
+from .delivery import (
     admit_delivery,
     campaign_sampling_failed,
     delivery_memory,
@@ -76,7 +78,7 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
     )
     if not is_blend:
         base.update(
-            sinchole_version=sc.__version__,
+            yippy_version=__version__,
             kernel_profile=delivery_profile(delivery, options).identity,
         )
 

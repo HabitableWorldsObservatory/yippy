@@ -58,7 +58,7 @@ jobs:
         run: |
           # Keep JAX compilations bounded by using a fresh process for each file.
           result=0
-          for test_file in tests/test_*.py; do
+          for test_file in tests/test_*.py tests/sinc/test_*.py; do
             file_result=0
             pytest "$test_file" -m "not slow and not network" -q -p no:cacheprovider \
               --timeout=300 --tb=short || file_result=$?
@@ -96,7 +96,7 @@ jobs:
         run: |
           # Keep JAX compilations bounded by using a fresh process for each file.
           result=0
-          for test_file in tests/test_*.py; do
+          for test_file in tests/test_*.py tests/sinc/test_*.py; do
             file_result=0
             pytest "$test_file" -m "not slow and not network" -q -p no:cacheprovider \
               --timeout=300 --tb=short || file_result=$?
