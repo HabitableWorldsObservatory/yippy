@@ -131,13 +131,13 @@ class Coronagraph(AbstractTableCoronagraph):
         spectral_header = host.offaxis_header
         self.bandpass = None
         if spectral_header.minlam is not None and spectral_header.maxlam is not None:
-            lo_nm, hi_nm = (
+            low_nm, high_nm = (
                 spectral_header.minlam.to_value("nm"),
                 spectral_header.maxlam.to_value("nm"),
             )
             # A single recorded wavelength has no finite-width spectral band.
-            if lo_nm != hi_nm:
-                self.bandpass = Band(lo_nm, hi_nm)
+            if low_nm != high_nm:
+                self.bandpass = Band(low_nm, high_nm)
         self._offaxis_backend = host.offax
         self._stellar_ln_interp = interpax.CubicSpline(
             jnp.asarray(host.stellar_intens.ln_interp.x, dtype=float_dtype()),
