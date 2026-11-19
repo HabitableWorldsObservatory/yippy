@@ -1,0 +1,27 @@
+{
+  "mirror_bases_both_indices_nonzero": 6,
+  "mirror_checks_at_those_bases": 18,
+  "mirror_bases_on_an_axis": 2,
+  "mirror_checks_at_axis_bases": 2,
+  "axis_base_indices": [
+    [
+      0,
+      14
+    ],
+    [
+      10,
+      0
+    ]
+  ],
+  "admitted": true,
+  "training_nodes": 837,
+  "independent_checks": 16,
+  "mirror_checks": 20,
+  "admission_seconds": 6.6,
+  "seconds_per_read": 0.052,
+  "worst_check_error_local_peak": 1.4415988510926117e-06,
+  "worst_check_error_pixel_brightest": 6.07212859523546e-06,
+  "mirror_residual_max": 0.0,
+  "axis_residual_max": 0.0,
+  "blend_worst_error_local_peak": 0.19027529712695865
+}

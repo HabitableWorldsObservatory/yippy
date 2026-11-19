@@ -2,10 +2,10 @@
 
 A sinc delivery is a directory of sampled off-axis planet PSFs that a coronagraph
 designer propagates at positions chosen by the reader, plus a manifest that declares
-what the samples mean. The reader is selected by the file-free `sinchole` engine, which is
+what the samples mean. The reader is selected by the file-free `yippy.sinc` engine, which is
 loaded through yippy with `open_yip(path).prepare(interpolation="sinc")`. This page is the
 complete contract for schema `sinc-delivery-0.1`. The parser in
-`yippy.sinc_delivery` is the source of truth, and the notes below say which fields the
+`yippy.sinc.delivery` is the source of truth, and the notes below say which fields the
 parser reads and which it only carries along.
 
 Two commands help a designer meet the contract.
@@ -26,7 +26,7 @@ samples, 16 interior checks and 20 mirror checks, about 57 MB in total.
 import jax
 
 from yippy.datasets import fetch_sinc_starter
-from yippy.sinc_routing import route_interpolation
+from yippy.sinc.routing import route_interpolation
 
 jax.config.update("jax_enable_x64", True)
 
@@ -84,7 +84,7 @@ than `sinc-delivery.json` are free, and the names above are the convention.
 
 ## Manifest keys
 
-The manifest is one JSON object. "Required" means the parser raises or sinchole refuses
+The manifest is one JSON object. "Required" means the parser raises or yippy.sinc refuses
 admission without it. Keys marked "carried" are stored in the receipt and hashed with
 the manifest, but nothing reads their value.
 
@@ -522,8 +522,8 @@ parses exactly this block.
 ## Checking a delivery
 
 `yippy-sinc validate <dir> [--product ID]` runs every integrity check above, then
-the `sinchole` admission step with JAX binary64 on, and prints a pass or fail summary. The same
-report is returned by `yippy.sinc_tools.validate`. It exits with 0 on a pass.
+the `yippy.sinc` admission step with JAX binary64 on, and prints a pass or fail summary. The same
+report is returned by `yippy.sinc.tools.validate`. It exits with 0 on a pass.
 
 The summary shows the admission reason names and receipt id, $\rho$ on each axis, the
 worst and median interior check residual against the acceptance level, and the mirror
@@ -547,7 +547,7 @@ yippy-sinc validate path/to/delivery --product mono-000 --level 1e-5 --json
 ```
 
 ```python notest
-from yippy.sinc_tools import validate
+from yippy.sinc.tools import validate
 
 report = validate("path/to/delivery")
 print(report.summary())
@@ -559,7 +559,7 @@ physical accuracy, the correctness of the optical state, or an error bound betwe
 checks.
 
 The manifest kernel describes the raw sample admission convention. At load time,
-`sinchole` selects its default prefiltered reader when the sampling ratio is at
+`yippy.sinc` selects its default prefiltered reader when the sampling ratio is at
 most 0.64, otherwise its raw reader (limit 0.76). `SincOptions(taps=5..10)`
 requests a prefilter tap count explicitly. Both readers report an unknown
 image-error bound; sampled tone-error design figures are not certified bounds.

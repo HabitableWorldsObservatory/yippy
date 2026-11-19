@@ -35,6 +35,12 @@ examples/06_Noise_Floor_Conventions.ipynb
 
 ```{toctree}
 :maxdepth: 2
+:caption: Sinc reads
+sinc/index.md
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Reference
 viz.md
 contrast_floor.md

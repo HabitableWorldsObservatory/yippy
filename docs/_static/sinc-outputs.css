@@ -1,0 +1,78 @@
+/* Figures draw their own dark ground, so drop the light panel the theme puts
+   behind cell outputs in dark mode. Tables keep the theme's styling. */
+html[data-theme="dark"] .bd-content div.cell_output .text_html:not(:has(table.dataframe)),
+html[data-theme="dark"] .bd-content div.cell_output img {
+  background-color: transparent;
+  padding: 0;
+}
+
+/* Animation player: the frame, then one quiet row of controls. */
+/* Frames are saved at a modest dpi to keep pages small; stretch them to the
+   column width so they line up with the stills, which the theme scales the
+   same way. */
+.bd-content .animation {
+  display: block;
+  width: 100%;
+}
+
+.bd-content .animation > img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.bd-content .anim-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.bd-content .anim-buttons {
+  order: -1;
+  display: flex;
+  gap: 0.15rem;
+  margin: 0;
+}
+
+.bd-content .anim-buttons button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: var(--pst-color-text-muted);
+  cursor: pointer;
+}
+
+.bd-content .anim-buttons button:hover,
+.bd-content .anim-buttons button:focus-visible {
+  color: var(--pst-color-primary);
+  background: var(--pst-color-surface);
+}
+
+/* Keep previous frame, pause, play and next frame; hide speed, first and last
+   frame, reverse play and the repetition form (playback loops). */
+.bd-content .anim-buttons button:nth-child(1),
+.bd-content .anim-buttons button:nth-child(2),
+.bd-content .anim-buttons button:nth-child(4),
+.bd-content .anim-buttons button:nth-child(8),
+.bd-content .anim-buttons button:nth-child(9),
+.bd-content .anim-state {
+  display: none;
+}
+
+.bd-content input[type="range"].anim-slider {
+  flex: 1;
+  width: auto;
+  margin: 0;
+  accent-color: var(--pst-color-primary);
+}
+
+/* Animations embedded as mp4: full column width, like the stills. */
+.bd-content div.cell_output video {
+  display: block;
+  width: 100%;
+  height: auto;
+}

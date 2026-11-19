@@ -1,6 +1,16 @@
 """Sphinx configuration file."""
 
+import os
+from pathlib import Path
+
 import yippy
+
+# Executed sinc pages import the toy coronagraph helper that lives under docs/sinc;
+# notebook kernels inherit the environment of the build process.
+_SINC_DOCS = str(Path(__file__).resolve().parent / "sinc")
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    p for p in (_SINC_DOCS, os.environ.get("PYTHONPATH", "")) if p
+)
 
 project = "yippy"
 copyright = "2024, Corey Spohn"
@@ -19,6 +29,8 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.mathjax",
     "IPython.sphinxext.ipython_console_highlighting",
+    "sphinxcontrib.mermaid",
+    "sphinx_design",
 ]
 
 intersphinx_mapping = {
@@ -32,7 +44,7 @@ intersphinx_mapping = {
 }
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", ".build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", ".build", "Thumbs.db", ".DS_Store", "sinc/scripts"]
 
 language = "en"
 
@@ -41,12 +53,17 @@ autodoc_typehints = "description"
 # AutoAPI already indexes fields; Napoleon should render their descriptions only.
 napoleon_use_ivar = True
 
-myst_enable_extensions = ["amsmath", "dollarmath"]
+myst_enable_extensions = ["amsmath", "dollarmath", "colon_fence", "deflist"]
+myst_fence_as_directive = ["mermaid"]
+# The sinc pages carry generated values, so notebooks without outputs execute.
+nb_output_stderr = "remove"
+nb_merge_streams = True
 
 # -- Options for HTML output -------------------------------------------------
 
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
+html_css_files = ["sinc-outputs.css"]
 master_doc = "index"
 html_favicon = "_static/favicon.ico"
 html_title = "Yield Input Package Python Wrapper"
@@ -65,7 +82,7 @@ source_suffix = {
     ".rst": "restructuredtext",
     ".md": "myst-nb",
 }
-nb_execution_mode = "off"
+nb_execution_mode = "auto"
 nb_execution_timeout = 300
 # These tutorials require user-supplied YIP directories under input/.
 nb_execution_excludepatterns = [

@@ -1,0 +1,93 @@
+{
+  "machine": {
+    "platform": "macOS-26.7.2-arm64-arm-64bit",
+    "python": "3.12.12",
+    "jax": "0.12.0.1",
+    "backend": "cpu",
+    "devices": [
+      "cpu:0"
+    ],
+    "load_average_at_start": [
+      6.11669921875,
+      7.48681640625,
+      8.9052734375
+    ],
+    "chip": "Apple M2 Pro",
+    "total_number_of_cores": "12 (8 Performance and 4 Efficiency)",
+    "memory": "32 GB"
+  },
+  "after_load_rss_mib": 341.34375,
+  "admission_first_call_seconds": 5.365082542004529,
+  "admission_later_calls_median_seconds": 2.4092182079912163,
+  "admission_later_calls_min_seconds": 2.2836412500182632,
+  "admission_peak_rss_mib": 744.75,
+  "float32": {
+    "storage": "float32",
+    "resident_mib": 52.3125,
+    "single_first_call_seconds": 0.22872020801878534,
+    "batch_small_first_call_seconds": 8.139389541000128,
+    "single_steady_median_seconds": 0.043924937504925765,
+    "single_steady_min_seconds": 0.03421495799557306,
+    "single_steady_max_seconds": 0.06932220800081268,
+    "batch_small": {
+      "positions": 200,
+      "rounds": 3,
+      "seconds_per_read_median": 0.03950993562495569,
+      "seconds_per_read_min": 0.03900036833496415
+    },
+    "batch_10000": {
+      "positions": 10000,
+      "seconds": 523.5890956250078,
+      "seconds_per_read": 0.05235890956250078,
+      "output_gib": 1.220703125,
+      "load_average_after": [
+        9.76513671875,
+        10.244140625,
+        9.6494140625
+      ],
+      "peak_rss_mib_after": 2026.859375
+    }
+  },
+  "float64": {
+    "storage": "float64",
+    "resident_mib": 104.625,
+    "single_first_call_seconds": 0.22080245800316334,
+    "batch_small_first_call_seconds": 5.697313208976993,
+    "single_steady_median_seconds": 0.0220679580088472,
+    "single_steady_min_seconds": 0.0199652919836808,
+    "single_steady_max_seconds": 0.034328625013586134,
+    "batch_small": {
+      "positions": 200,
+      "rounds": 3,
+      "seconds_per_read_median": 0.022675089164986274,
+      "seconds_per_read_min": 0.021516368750017136
+    },
+    "batch_10000": {
+      "positions": 10000,
+      "seconds": 323.78427649999503,
+      "seconds_per_read": 0.0323784276499995,
+      "output_gib": 1.220703125,
+      "load_average_after": [
+        12.69921875,
+        10.86474609375,
+        10.05029296875
+      ],
+      "peak_rss_mib_after": 2026.859375
+    }
+  },
+  "load_average_after_reads": [
+    12.69921875,
+    10.86474609375,
+    10.05029296875
+  ],
+  "yippy_blend": {
+    "single_steady_median_seconds": 0.0022925215016584843,
+    "batch": {
+      "positions": 10000,
+      "chunk": 100,
+      "seconds": 37.82655695898575,
+      "seconds_per_read": 0.0037826556958985747
+    },
+    "peak_rss_mib_after": 2385.0
+  }
+}
