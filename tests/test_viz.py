@@ -104,9 +104,9 @@ def test_viz_records_arrays_and_axes(curves):
     import matplotlib as mpl
     import matplotlib.pyplot as plt
 
-    before = mpl.rcParams.copy()
+    before = dict(mpl.rcParams)  # reading resolves the auto backend first
     importlib.reload(viz)
-    assert dict(mpl.rcParams) == dict(before)
+    assert dict(mpl.rcParams) == before
     with hwostyle.light():
         fig, axes = plt.subplots(1, 2, layout="constrained")
         for metric in (
