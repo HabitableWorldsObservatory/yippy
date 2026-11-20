@@ -200,7 +200,7 @@ page.
 import jax
 
 from yippy.datasets import fetch_sinc_starter
-from yippy.sinc.routing import route_interpolation
+from yippy.delivery.routing import route_interpolation
 
 jax.config.update("jax_enable_x64", True)
 
@@ -326,7 +326,7 @@ commands that a designer needs.
 `yippy-sinc validate <dir>`
 : Runs the yippy integrity checks and then yippy.sinc admission with 64-bit
   arithmetic, and exits 0 on a pass, 1 on a failure and 2 on a usage error.
-  The Python form is `yippy.sinc.tools.validate()`.
+  The Python form is `yippy.delivery.tools.validate()`.
 
 ## What did this page establish?
 

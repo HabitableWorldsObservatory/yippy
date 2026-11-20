@@ -10,10 +10,11 @@ import numpy as np
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
 
-from .interpolation import InterpolationRead, ReadLedger, blend_read
-from .jax_funcs import synthesize_psf_idw
-from .sampling import fraction_image
-from .sinc import Reason, check_memory, require_read
+from ..interpolation import InterpolationRead, ReadLedger, blend_read
+from ..jax_funcs import synthesize_psf_idw
+from ..sampling import fraction_image
+from ..sinc.evidence import Reason
+from ..sinc.reader import check_memory, require_read
 
 # Construction/query fallbacks allowed for declared complete full rectangles.
 _FALLBACK_MASK = int(

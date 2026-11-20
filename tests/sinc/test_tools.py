@@ -14,9 +14,8 @@ import pytest
 from astropy.io import fits
 
 from yippy import datasets
-from yippy.interpolation import SincOptions
-from yippy.sinc.delivery import detect_delivery, load_delivery
-from yippy.sinc.tools import (
+from yippy.delivery.format import detect_delivery, load_delivery
+from yippy.delivery.tools import (
     ACCEPTANCE_LEVEL,
     SincToolsError,
     main,
@@ -24,6 +23,7 @@ from yippy.sinc.tools import (
     validate,
     write_plan,
 )
+from yippy.interpolation import SincOptions
 
 DOCS = Path(__file__).parents[2] / "docs" / "sinc-delivery.md"
 DATA = Path(__file__).parents[1] / "data"

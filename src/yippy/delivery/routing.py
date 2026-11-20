@@ -5,12 +5,21 @@ from dataclasses import asdict
 
 import jax
 
-import yippy.sinc as sc
 from yippy._version import __version__
+from yippy.sinc.evidence import (
+    Admission,
+    AdmissionRefused,
+    MemoryLimit,
+    PrecisionUnavailable,
+    Reason,
+    Receipt,
+    reason_names,
+)
+from yippy.sinc.reader import ReadPolicy, make_reader
 
-from ..delivery_backend import _FALLBACK_MASK, DeliveryBackend
 from ..interpolation import InterpolationInfo, SincOptions
-from .delivery import (
+from .backend import _FALLBACK_MASK, DeliveryBackend
+from .format import (
     admit_delivery,
     campaign_sampling_failed,
     delivery_memory,
@@ -101,35 +110,33 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
             or manifest["layout"] == "quadrant_rectangle"
             or (options.policy is not None and options.policy.mode != "sampling")
         ):
-            raise sc.AdmissionRefused(
-                sc.Admission(None, sc.Receipt(), int(sc.Reason.METADATA_MISSING))
+            raise AdmissionRefused(
+                Admission(None, Receipt(), int(Reason.METADATA_MISSING))
             )
-        return blend_result(("METADATA_MISSING",), int(sc.Reason.METADATA_MISSING))
+        return blend_result(("METADATA_MISSING",), int(Reason.METADATA_MISSING))
     try:
         delivery_memory(
             delivery,
             options.memory,
             profile=delivery_profile(delivery, options),
         )
-    except sc.MemoryLimit:
+    except MemoryLimit:
         if (
             requested != "auto"
             or manifest["layout"] == "quadrant_rectangle"
             or (options.policy is not None and options.policy.mode != "sampling")
         ):
             raise
-        return blend_result(("MEMORY_LIMIT",), int(sc.Reason.MEMORY_LIMIT))
+        return blend_result(("MEMORY_LIMIT",), int(Reason.MEMORY_LIMIT))
     if not jax.config.x64_enabled:
         if (
             requested != "auto"
             or manifest["layout"] == "quadrant_rectangle"
             or (options.policy is not None and options.policy.mode != "sampling")
         ):
-            raise sc.PrecisionUnavailable(
-                "Enable jax_enable_x64 before sinc construction"
-            )
+            raise PrecisionUnavailable("Enable jax_enable_x64 before sinc construction")
         return blend_result(
-            ("PRECISION_UNAVAILABLE",), int(sc.Reason.PRECISION_UNAVAILABLE)
+            ("PRECISION_UNAVAILABLE",), int(Reason.PRECISION_UNAVAILABLE)
         )
     admission, domain, memory = admit_delivery(delivery, options)
     base.update(receipt_id=admission.receipt.identity, receipt=admission.receipt)
@@ -141,13 +148,11 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
             or admission.reason_bits & ~_FALLBACK_MASK
         ):
             admission.require()
-        return blend_result(
-            sc.reason_names(admission.reason_bits), admission.reason_bits
-        )
-    policy = options.policy or sc.ReadPolicy()
+        return blend_result(reason_names(admission.reason_bits), admission.reason_bits)
+    policy = options.policy or ReadPolicy()
     if policy.mode == "bounded":
-        policy = sc.ReadPolicy("bounded", policy.max_abs_error / delivery.conversion)
-    reader = sc.make_reader(
+        policy = ReadPolicy("bounded", policy.max_abs_error / delivery.conversion)
+    reader = make_reader(
         admission.require(),
         domain,
         profile=delivery_profile(delivery, options),

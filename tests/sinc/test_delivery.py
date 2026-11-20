@@ -22,9 +22,9 @@ from synthetic_yip import write_synthetic_yip
 import yippy.sinc as sc
 from yippy import SincOptions, open_yip
 from yippy._yip import _YIPData
+from yippy.delivery.format import detect_delivery, file_sha256, load_delivery
+from yippy.delivery.routing import route_interpolation
 from yippy.performance import stellar_intensity_curves
-from yippy.sinc.delivery import detect_delivery, file_sha256, load_delivery
-from yippy.sinc.routing import route_interpolation
 from yippy.util import cache_identity_digest
 
 

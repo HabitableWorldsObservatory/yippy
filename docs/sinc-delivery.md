@@ -5,7 +5,7 @@ designer propagates at positions chosen by the reader, plus a manifest that decl
 what the samples mean. The reader is selected by the file-free `yippy.sinc` engine, which is
 loaded through yippy with `open_yip(path).prepare(interpolation="sinc")`. This page is the
 complete contract for schema `sinc-delivery-0.1`. The parser in
-`yippy.sinc.delivery` is the source of truth, and the notes below say which fields the
+`yippy.delivery.format` is the source of truth, and the notes below say which fields the
 parser reads and which it only carries along.
 
 Two commands help a designer meet the contract.
@@ -26,7 +26,7 @@ samples, 16 interior checks and 20 mirror checks, about 57 MB in total.
 import jax
 
 from yippy.datasets import fetch_sinc_starter
-from yippy.sinc.routing import route_interpolation
+from yippy.delivery.routing import route_interpolation
 
 jax.config.update("jax_enable_x64", True)
 
@@ -523,7 +523,7 @@ parses exactly this block.
 
 `yippy-sinc validate <dir> [--product ID]` runs every integrity check above, then
 the `yippy.sinc` admission step with JAX binary64 on, and prints a pass or fail summary. The same
-report is returned by `yippy.sinc.tools.validate`. It exits with 0 on a pass.
+report is returned by `yippy.delivery.tools.validate`. It exits with 0 on a pass.
 
 The summary shows the admission reason names and receipt id, $\rho$ on each axis, the
 worst and median interior check residual against the acceptance level, and the mirror
@@ -547,7 +547,7 @@ yippy-sinc validate path/to/delivery --product mono-000 --level 1e-5 --json
 ```
 
 ```python notest
-from yippy.sinc.tools import validate
+from yippy.delivery.tools import validate
 
 report = validate("path/to/delivery")
 print(report.summary())

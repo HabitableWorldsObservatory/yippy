@@ -57,7 +57,7 @@ The same check is available from Python. This example needs a delivery on
 disk.
 
 ```python notest
-from yippy.sinc.tools import validate
+from yippy.delivery.tools import validate
 
 report = validate("path/to/delivery")
 print(report.summary())

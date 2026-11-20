@@ -21,7 +21,32 @@ from hwoutils.constants import m2nm, rad2arcsec
 from lod_unit import lod
 from optixstuff.grids import Frame, Measure, PixelGrid
 
-import yippy.sinc as sc
+from yippy.sinc.admission import (
+    MIRROR_TOLERANCE,
+    index_reasons,
+    lattice_reasons,
+    offset_evidence,
+    sampling_ratio,
+    sampling_reasons,
+    select_profile,
+    spectral_reasons,
+    valid_intensity,
+    validate_declarations,
+)
+from yippy.sinc.domain import Domain, restrict_domain, validate_check_positions
+from yippy.sinc.evidence import Admission, AdmissionRefused, Reason, Receipt
+from yippy.sinc.geometry import source_grid
+from yippy.sinc.grid import (
+    CheckSet,
+    MirrorCheckSet,
+    Normalization,
+    Premises,
+    Products,
+    Reflection,
+    admit_grid,
+)
+from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile
+from yippy.sinc.reader import memory_budget
 
 from ..header import HeaderData
 from ..sampling import sample_units
@@ -243,9 +268,9 @@ def load_delivery(root, manifest, options, *, package=None):
     kernel = manifest["kernel"]
     if kernel != {
         "family": "kaiser_sinc_raw",
-        "half_width": sc.KernelProfile().taps // 2,
+        "half_width": KernelProfile().taps // 2,
         "beta": 12,
-        "max_occupancy": sc.KernelProfile().margin_limit,
+        "max_occupancy": KernelProfile().margin_limit,
     }:
         raise ValueError("Unsupported sinc kernel profile")
     spectral = manifest["spectral_sampling"]
@@ -261,7 +286,7 @@ def load_delivery(root, manifest, options, *, package=None):
     campaign = spectral.get("campaign_sampling_min_m")
     for p in planes:
         minimum = p.get("sampling_min_wavelength_m")
-        reasons = sc.spectral_reasons(
+        reasons = spectral_reasons(
             p["kind"],
             p["wavelength_m"] * m2nm,
             [v * m2nm for v in p["band_edges_m"]],
@@ -271,12 +296,12 @@ def load_delivery(root, manifest, options, *, package=None):
         if (
             p["kind"] != "monochromatic"
             or p["shortest_contributing_m"] != p["wavelength_m"]
-            or reasons & sc.Reason.METADATA_CONFLICT
+            or reasons & Reason.METADATA_CONFLICT
         ):
             raise ValueError("METADATA_CONFLICT: monochromatic wavelength metadata")
     if spectral.get("band_ready") and campaign is None:
         raise ValueError("Band-ready campaign requires a sampling minimum")
-    sc.validate_declarations(
+    validate_declarations(
         manifest["normalization"],
         manifest["lambda0_m"] * m2nm,
         manifest["diameter_m"],
@@ -337,10 +362,10 @@ def load_delivery(root, manifest, options, *, package=None):
     )[order]
     lower, upper = indices.min(axis=0), indices.max(axis=0)
     size = upper - lower + 1
-    index_reasons = sc.index_reasons(indices - lower, tuple(size[::-1]))
-    if index_reasons & sc.Reason.GRID_DUPLICATE:
+    flags = index_reasons(indices - lower, tuple(size[::-1]))
+    if flags & Reason.GRID_DUPLICATE:
         raise ValueError("Duplicate training nodes")
-    if index_reasons & sc.Reason.GRID_INCOMPLETE:
+    if flags & Reason.GRID_INCOMPLETE:
         raise ValueError("Holes in declared complete rectangle")
     if np.any(size > np.iinfo(np.int32).max):
         raise ValueError("Source rectangle exceeds int32 indices")
@@ -357,7 +382,7 @@ def load_delivery(root, manifest, options, *, package=None):
         np.any(origin != 0) or np.any(lower != 0)
     ):
         raise ValueError("Quadrant lattice must be anchored at zero with both axes")
-    if sc.lattice_reasons(origin, spacing):
+    if lattice_reasons(origin, spacing):
         raise ValueError("Source lattice outside supported numeric range")
     offsets = _native(package.offsets_xy_lod if package else fits.getdata(offsets_path))
     if offsets.dtype not in (np.dtype("float32"), np.dtype("float64")):
@@ -365,11 +390,11 @@ def load_delivery(root, manifest, options, *, package=None):
     if not np.all(np.isfinite(offsets)):
         raise ValueError("Nonfinite source offsets")
     canonical_origin = origin + spacing * lower
-    if sc.lattice_reasons(canonical_origin, spacing):
+    if lattice_reasons(canonical_origin, spacing):
         raise ValueError("Canonical lattice outside supported numeric range")
     for actual in (csv_offsets, offsets):
         for start, index in ((origin, indices), (canonical_origin, indices - lower)):
-            valid, tolerance, residual = sc.offset_evidence(
+            valid, tolerance, residual = offset_evidence(
                 actual, start, spacing, index, offsets.dtype
             )
             if not valid:
@@ -400,7 +425,7 @@ def load_delivery(root, manifest, options, *, package=None):
         raise ValueError("Conflicting storage_dtype")
     for start in range(0, nodes.size, 65536):
         block = nodes.reshape(-1)[start : start + 65536]
-        if not sc.valid_intensity(block):
+        if not valid_intensity(block):
             raise ValueError("Invalid negative or nonfinite intensity data")
     for record in (
         manifest.get("reflection"),
@@ -466,9 +491,9 @@ def admit_delivery(delivery, options):
     norm = d["normalization"]
     if not norm.get("source_independent", False):
         premises[4] = dict(premises[4], value=False)
-    products = sc.Products(
+    products = Products(
         delivery.grid,
-        sc.Normalization(
+        Normalization(
             norm["kind"],
             f64([p["photon_conversion"]]),
             f64(
@@ -493,7 +518,7 @@ def admit_delivery(delivery, options):
         f64([d.get("support_extent_D", [np.nan, np.nan])]),
         jnp.array([1 if d.get("support_evidence") else 0], jnp.int32),
         (d.get("support_evidence", ""),),
-        sc.Premises(
+        Premises(
             jnp.array([r.get("value", False) for r in premises], bool),
             jnp.array([r.get("evidence", 0) for r in premises], jnp.int32),
             tuple(r.get("source_id", "") for r in premises),
@@ -505,7 +530,7 @@ def admit_delivery(delivery, options):
         delivery.manifest_sha256 + ":" + p["id"],
         measure=delivery.measure,
     )
-    lattice = sc.source_grid(
+    lattice = source_grid(
         delivery.origin_lod,
         d["source_spacing_lod"],
         delivery.shape_yx,
@@ -535,14 +560,14 @@ def admit_delivery(delivery, options):
                 "mirror_plus_conjugation",
                 "other_response",
             )
-            or reflection.get("check_tolerance_local_peak") != sc.MIRROR_TOLERANCE
+            or reflection.get("check_tolerance_local_peak") != MIRROR_TOLERANCE
             or reflection.get("check_status") != "pass"
             or reflection.get("optical_state_id") != d["optical_state"].get("state_id")
         ):
-            raise sc.AdmissionRefused(
-                sc.Admission(None, sc.Receipt(), int(sc.Reason.SYMMETRY_UNSUPPORTED))
+            raise AdmissionRefused(
+                Admission(None, Receipt(), int(Reason.SYMMETRY_UNSUPPORTED))
             )
-        reflection = sc.Reflection(
+        reflection = Reflection(
             reflection["kind"],
             jnp.array([True, True]),
             reflection["declaration_id"],
@@ -566,8 +591,8 @@ def admit_delivery(delivery, options):
         )
         records = [r for r in d.get("mirror_checks", []) if r["plane_id"] == p["id"]]
         if not records or not all(r.get("independent_propagation") for r in records):
-            raise sc.AdmissionRefused(
-                sc.Admission(None, sc.Receipt(), int(sc.Reason.SYMMETRY_CHECK_MISSING))
+            raise AdmissionRefused(
+                Admission(None, Receipt(), int(Reason.SYMMETRY_CHECK_MISSING))
             )
         coords = np.array([r["source_lod_xy"] for r in records], np.float64)
         signed_indices = []
@@ -577,7 +602,7 @@ def admit_delivery(delivery, options):
                 raise ValueError("Mirror base_index must identify a training row")
             base = delivery.indices[index].astype(np.int64)
             signed_indices.append(base * np.where(coord < 0, -1, 1))
-        mirror = sc.MirrorCheckSet(
+        mirror = MirrorCheckSet(
             f64(coords),
             jnp.array(signed_indices, jnp.int32),
             jnp.asarray(delivery.read_images(records)),
@@ -587,7 +612,7 @@ def admit_delivery(delivery, options):
     else:
         if reflection is not None:
             raise ValueError("Full rectangle requires reflection=null")
-        reflection = sc.Reflection(
+        reflection = Reflection(
             "none",
             jnp.array([False, False]),
             "",
@@ -621,7 +646,7 @@ def admit_delivery(delivery, options):
                 )
             else:
                 raise ValueError("Unsupported independent check reference_units")
-        checks = sc.CheckSet(
+        checks = CheckSet(
             f64([r["source_lod_xy"] for r in records]),
             jnp.asarray(delivery.read_images(records)),
             jnp.zeros(len(records), jnp.int32),
@@ -632,7 +657,7 @@ def admit_delivery(delivery, options):
         )
     profile = delivery_profile(delivery, options)
     memory = delivery_memory(delivery, options.memory, profile=profile)
-    admission = sc.admit_grid(
+    admission = admit_grid(
         delivery.nodes[None],
         delivery.offsets,
         declared_lattice=lattice,
@@ -687,7 +712,7 @@ def _domain(served, override=None):
         declared = (
             None
             if served is None
-            else sc.Domain(
+            else Domain(
                 served["kind"],
                 served["boundary"],
                 np.asarray(served["bounds_lod"]).T
@@ -696,7 +721,7 @@ def _domain(served, override=None):
                 served["radii_lod"] if served["kind"] == "annulus" else np.zeros(2),
             )
         )
-        return sc.restrict_domain(declared, override)
+        return restrict_domain(declared, override)
 
 
 def _independent_images(root, manifest, indices, shape):
@@ -731,7 +756,7 @@ def _independent_images(root, manifest, indices, shape):
                 if type(index) is not int or not 0 <= index < len(cube):
                     raise ValueError("Independent image_index must identify a cube row")
                 image = _native(cube[index])
-                if not sc.valid_intensity(image):
+                if not valid_intensity(image):
                     raise ValueError("Invalid independent intensity data")
                 images[(name, digest, index)] = image
     for record in manifest.get("checks", []):
@@ -758,8 +783,8 @@ def _validate_check_positions(manifest, origin, spacing, size):
             manifest["diameter_m"],
             manifest.get("diameter_convention") or "circumscribed",
         )
-        lattice = sc.source_grid(origin, spacing, tuple(size[::-1]), frame)
-        sc.validate_check_positions(
+        lattice = source_grid(origin, spacing, tuple(size[::-1]), frame)
+        validate_check_positions(
             [r["source_lod_xy"] for r in manifest.get("checks", [])],
             _domain(manifest.get("served")),
             lattice,
@@ -777,7 +802,7 @@ def delivery_ratios(delivery, *, campaign_only=False):
     if support is None:
         return ()
     return tuple(
-        sc.sampling_ratio(d["lambda0_m"] * m2nm, minimum * m2nm, extent, pitch)
+        sampling_ratio(d["lambda0_m"] * m2nm, minimum * m2nm, extent, pitch)
         for minimum in minima
         if minimum is not None
         for extent, pitch in zip(support, d["source_spacing_lod"], strict=True)
@@ -786,23 +811,23 @@ def delivery_ratios(delivery, *, campaign_only=False):
 
 def campaign_sampling_failed(delivery):
     """Ask the engine whether the explicit campaign claim meets admission."""
-    return bool(sc.sampling_reasons(delivery_ratios(delivery, campaign_only=True)))
+    return bool(sampling_reasons(delivery_ratios(delivery, campaign_only=True)))
 
 
 def delivery_profile(delivery, options):
     """Pass the declared band and requested tap count to engine selection."""
-    return sc.select_profile(delivery_ratios(delivery), taps=options.taps)
+    return select_profile(delivery_ratios(delivery), taps=options.taps)
 
 
 def delivery_memory(delivery, supplied=None, *, profile=None):
     """Pass table sizes and yippy's output tag allocation to the engine."""
-    return sc.memory_budget(
+    return memory_budget(
         delivery.nodes.nbytes,
         delivery.nodes.shape[1:],
         profile=profile,
         supplied=supplied,
         extra_output_bytes=1024 * 4,
         extra_resident_bytes=delivery.nodes.nbytes
-        if isinstance(profile, sc.PrefilteredKernelProfile)
+        if isinstance(profile, PrefilteredKernelProfile)
         else 0,
     )

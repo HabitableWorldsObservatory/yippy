@@ -21,10 +21,10 @@ import jax
 import numpy as np
 from hwoutils.constants import m2nm
 
-import yippy.sinc as sc
-from yippy.sinc import (
-    MIRROR_TOLERANCE,
-    KernelProfile,
+from yippy.sinc.admission import MIRROR_TOLERANCE, judge_checks
+from yippy.sinc.evidence import AdmissionRefused, reason_names
+from yippy.sinc.kernel import KernelProfile
+from yippy.sinc.planner import (
     plan_cell_checks,
     plan_mirror_bases,
     plan_radial_checks,
@@ -32,7 +32,7 @@ from yippy.sinc import (
 )
 
 from ..interpolation import SincOptions
-from .delivery import (
+from .format import (
     admit_delivery,
     campaign_sampling_failed,
     delivery_ratios,
@@ -224,11 +224,11 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
             try:
                 admission, _, _ = admit_delivery(delivery, options)
                 receipt = admission.receipt
-                reasons = sc.reason_names(admission.reason_bits)
+                reasons = reason_names(admission.reason_bits)
                 admitted = admission.admitted
-            except sc.AdmissionRefused as refusal:
+            except AdmissionRefused as refusal:
                 receipt = refusal.receipt
-                reasons = sc.reason_names(refusal.reason_bits)
+                reasons = reason_names(refusal.reason_bits)
     if not admitted and not failures:
         failures.append("yippy.sinc refused admission: " + (", ".join(reasons) or "?"))
 
@@ -240,7 +240,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
     exact = tuple(bool(v) for v in (receipt.axis_exact if receipt else ()))
     if admitted:
         failures.extend(
-            sc.judge_checks(
+            judge_checks(
                 interior,
                 mirror,
                 axis,
