@@ -119,9 +119,8 @@ This example needs a configured coronagraph `coro`, an aperture `rule`,
 a separation, and a post-processing factor `ppf`.
 
 ```python notest
-residual_density = coro.leakage_density_lod2(
-    separation, rule=rule, leakage_rule="azimuthal_ring_mean"
-) / ppf
+record = coro.curves(rule, leakage_rule="azimuthal_ring_mean")
+residual_density = record.evaluate("leakage_density_lod2", separation) / ppf
 ```
 
 See also: [Noise Floor Conventions](examples/06_Noise_Floor_Conventions.ipynb)

@@ -9,7 +9,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from optixstuff.apertures import DEFAULT_APERTURE_RULE, RecordRule
+from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
     AbstractTableCoronagraph,
@@ -19,7 +19,7 @@ from optixstuff.coronagraph import (
     _on_grid,
 )
 from optixstuff.grids import Image, Measure, PixelGrid
-from optixstuff.performance import PerformanceCurves, SampledProfile, leakage_weights
+from optixstuff.performance import PerformanceCurves, SampledProfile
 from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band
 
@@ -80,11 +80,9 @@ class Coronagraph(AbstractTableCoronagraph):
     header: HeaderData = eqx.field(static=True)
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
-    outer_working_angle_lod: None
     _offaxis_backend: object
     _stellar_ln_interp: interpax.CubicSpline
     _records: tuple[PerformanceCurves, ...]
-    _leakage_operators: tuple
     uniform_sky_profile: SampledProfile
     _host: _YIPData = eqx.field(static=True)
 
@@ -128,7 +126,6 @@ class Coronagraph(AbstractTableCoronagraph):
         self.grid = host.grid
         self.stellar_grid = host.stellar_intens.grid
         self.interpolation_info = host.interpolation_info
-        self.outer_working_angle_lod = None
         spectral_header = host.offaxis_header
         self.bandpass = None
         if spectral_header.minlam is not None and spectral_header.maxlam is not None:
@@ -146,20 +143,6 @@ class Coronagraph(AbstractTableCoronagraph):
         )
         records = tuple(host._prepare_record(rule) for rule in rules)
         self._records = tuple(_jax_record(record) for record in records)
-        self._leakage_operators = tuple(
-            jax.tree.map(
-                jnp.asarray,
-                leakage_weights(
-                    lambda s: host.create_psf(s, 0.0),
-                    self._native_stellar_map(0.0),
-                    record,
-                    samples=_aperture_samples(
-                        host.offax, record.separation_lod, host.create_psf
-                    ),
-                ),
-            )
-            for record in self._records
-        )
         self.uniform_sky_profile = _jax_record(host.uniform_sky_profile)
         self.sky_trans = host.sky_trans
 
@@ -185,15 +168,17 @@ class Coronagraph(AbstractTableCoronagraph):
             )
         return record
 
-    def prepared(
-        self, rule: RecordRule, *, leakage_rule="aperture_mean"
-    ) -> tuple["Coronagraph", PerformanceCurves]:
-        """Return this model if ready, or prepare the requested record on the host."""
-        record = self._find_record(rule, leakage_rule)
-        if record is not None:
-            return self, record
-        model = self.with_rules((rule,), leakage_rule=leakage_rule)
-        return model, model.curves(rule, leakage_rule=leakage_rule)
+    def uniform_sky_response(self, separation_lod):
+        """Annular mean of the uniform-sky map at separations in lambda/D."""
+        profile = self.uniform_sky_profile
+        frame = self.frame
+        if frame != profile.frame:
+            # A single angular separation spans different native lambda/D counts.
+            ratio = frame.lod_to_arcsec(
+                frame.reference_wavelength_nm
+            ) / profile.frame.lod_to_arcsec(profile.frame.reference_wavelength_nm)
+            separation_lod = jnp.asarray(separation_lod) * ratio
+        return profile.evaluate(separation_lod)
 
     def _find_record(self, rule, leakage_rule):
         return next(
@@ -204,12 +189,6 @@ class Coronagraph(AbstractTableCoronagraph):
             ),
             None,
         )
-
-    def _prepared_leakage_weights(self, rule, leakage_rule):
-        for record, weights in zip(self._records, self._leakage_operators, strict=True):
-            if record.rule == rule and record.leakage_rule == leakage_rule:
-                return weights
-        raise ValueError("No prepared stellar-map weights for this rule")
 
     def at_wavelength(self, wavelength_nm) -> ProductGrids:
         """Return the three recorded native grids for this fixed YIP product."""
@@ -273,23 +252,7 @@ class Coronagraph(AbstractTableCoronagraph):
             leakage_rule = self._records[0].leakage_rule
         host = self._host_for_rule(rules[0], leakage_rule)
         records = tuple(_jax_record(host._prepare_record(rule)) for rule in rules)
-        operators = tuple(
-            jax.tree.map(
-                jnp.asarray,
-                leakage_weights(
-                    lambda s: host.create_psf(s, 0.0),
-                    self._native_stellar_map(0.0),
-                    record,
-                    samples=_aperture_samples(
-                        host.offax, record.separation_lod, host.create_psf
-                    ),
-                ),
-            )
-            for record in records
-        )
-        return eqx.tree_at(
-            lambda c: (c._records, c._leakage_operators), self, (records, operators)
-        )
+        return eqx.tree_at(lambda c: c._records, self, records)
 
     def _host_for_rule(self, rule, leakage_rule):
         """Use the loaded host tables with independent per-request state."""

@@ -68,7 +68,7 @@ photon fractions per pixel. Explicit target grids request pixel integration.
 Source reads include one validity flag per position.
 
 Aperture rules and generic photometry belong to optixstuff:
-`optixstuff.Circular`, `HalfMaximum`, `Matched`, `PerformanceCurves`, and
+`optixstuff.Circular`, `HalfMaximum`, `PerformanceCurves`, and
 `optixstuff.performance.performance_curves`. YIP-specific radial diagnostics
 remain in `yippy.performance`. Names beginning with `_` are implementation
 details.

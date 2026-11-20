@@ -42,13 +42,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import equinox as eqx
-import interpax
-import jax.numpy as jnp
 import numpy as np
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.grids import Frame, PixelGrid
-from optixstuff.performance import leakage_weights, performance_curves
 
 from yippy import open_yip
 from yippy.testing import write_synthetic_yip as write_fixture_arrays
@@ -323,49 +319,3 @@ def synthetic_coronagraph(path, n=24, *, rules=()):
         ),
     )
     return open_yip(path).prepare(rules=rules or (DEFAULT_APERTURE_RULE,))
-
-
-def replace_stellar_tables(coro, grid, diameters_lod, maps):
-    """Prepare consistent native records and stellar operators for changed maps."""
-    coro = eqx.tree_at(
-        lambda c: (c.stellar_grid, c._stellar_ln_interp),
-        coro,
-        (grid, interpax.CubicSpline(diameters_lod, jnp.log(maps))),
-    )
-    backend = coro._offaxis_backend
-    xs, ys = np.asarray(backend.x_offsets), np.asarray(backend.y_offsets)
-    iy = int(np.argmin(np.abs(ys)))
-    native = {
-        float(x): (backend.get_psf_by_offset_idx(ix, iy), (float(x), float(ys[iy])))
-        for ix, x in enumerate(xs)
-    }
-    records, operators = [], []
-    for previous in coro._records:
-        axis = previous.separation_lod
-        samples = [native[float(s)] for s in axis]
-        by_separation = {
-            float(s): image for s, (image, _) in zip(axis, samples, strict=True)
-        }
-        record = performance_curves(
-            by_separation.__getitem__,
-            coro.stellar_map(None, 0.0),
-            previous.rule,
-            separations_lod=axis,
-            source_positions_lod=[position for _, position in samples],
-            leakage_rule=previous.leakage_rule,
-            stellar_diameter=0.0,
-        )
-        records.append(record)
-        operators.append(
-            leakage_weights(
-                by_separation.__getitem__,
-                coro.stellar_map(None, 0.0),
-                record,
-                samples=samples,
-            )
-        )
-    return eqx.tree_at(
-        lambda c: (c._records, c._leakage_operators),
-        coro,
-        (tuple(records), tuple(operators)),
-    )

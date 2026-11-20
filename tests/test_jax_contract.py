@@ -93,8 +93,12 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
 
 def test_a_traced_separation_runs_and_matches_eager(syn_eqx_1d):
     """The performance curves stay correct when the separation is traced."""
-    for name in ("throughput", "raw_contrast", "core_area", "uniform_sky_response"):
-        method = getattr(syn_eqx_1d, name)
+    methods = {
+        name: lambda s, name=name: syn_eqx_1d.curves().evaluate(name, s)
+        for name in ("throughput", "raw_contrast", "core_area_lod2")
+    }
+    methods["uniform_sky_response"] = syn_eqx_1d.uniform_sky_response
+    for name, method in methods.items():
         eager = float(method(3.0))
         traced = float(eqx.filter_jit(lambda s: method(s))(jnp.asarray(3.0)))  # noqa: B023
         assert traced == pytest.approx(eager, rel=1e-6), f"{name} under filter_jit"
@@ -151,7 +155,9 @@ def test_gradients_agree_with_a_central_difference(syn_eqx_1d, name):
     shape of test this suite exists to avoid; the constancy itself is checked
     separately below.
     """
-    method = getattr(syn_eqx_1d, name)
+
+    def method(s):
+        return syn_eqx_1d.curves().evaluate(name, s)
 
     for separation in (2.25, 3.25, 4.25):
         analytic = float(

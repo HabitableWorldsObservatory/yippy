@@ -99,9 +99,9 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
         eqx_coro = coro
         grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
         for field, method in [
-            ("throughput", coro.throughput),
-            ("raw_contrast", coro.raw_contrast),
-            ("core_area_lod2", coro.core_area),
+            ("throughput", lambda x: coro.curves().evaluate("throughput", x)),
+            ("raw_contrast", lambda x: coro.curves().evaluate("raw_contrast", x)),
+            ("core_area_lod2", lambda x: coro.curves().evaluate("core_area_lod2", x)),
         ]:
             expected = PchipInterpolator(
                 coro.curves().separation_lod,
@@ -124,7 +124,9 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
         )(1.37, nu=1)
         np.testing.assert_allclose(derivative, expected_derivative, rtol=1e-12)
         np.testing.assert_allclose(
-            eqx.filter_jit(lambda model, x: model.throughput(x))(eqx_coro, grid),
+            eqx.filter_jit(lambda model, x: model.curves().evaluate("throughput", x))(
+                eqx_coro, grid
+            ),
             coro.curves().evaluate("throughput", grid),
             rtol=1e-12,
             atol=1e-24,

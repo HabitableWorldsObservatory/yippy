@@ -62,52 +62,23 @@ class TestCoronagraph:
 
     def test_throughput_in_range(self, cached_diameter_coro):
         """The synthetic aperture passes a physical flux fraction."""
-        t = cached_diameter_coro.throughput(5.0, 500.0)
+        t = cached_diameter_coro.curves().evaluate("throughput", 5.0)
         assert 0.0 <= float(t) <= 1.0
 
     def test_core_area_positive(self, cached_diameter_coro):
         """The source aperture retains positive angular area."""
-        a = cached_diameter_coro.core_area(5.0, 500.0)
+        a = cached_diameter_coro.curves().evaluate("core_area_lod2", 5.0)
         assert float(a) > 0
 
     def test_leakage_density_lod2_nonnegative(self, cached_diameter_coro):
         """The stellar density remains nonnegative."""
-        cmi = cached_diameter_coro.leakage_density_lod2(5.0, 500.0)
+        cmi = cached_diameter_coro.curves().evaluate("leakage_density_lod2", 5.0)
         assert float(cmi) >= 0
 
     def test_uniform_sky_response_in_range(self, cached_diameter_coro):
         """The native sky map retains dimensionless transmission."""
-        st = cached_diameter_coro.uniform_sky_response(5.0, 500.0)
+        st = cached_diameter_coro.uniform_sky_response(5.0)
         assert 0.0 <= float(st) <= 1.0
-
-    @pytest.mark.parametrize("separation_lod", [6.0, 10.0, 16.0])
-    def test_leakage_density_lod2_is_per_lod_squared(
-        self, cached_diameter_coro, separation_lod
-    ):
-        """Exact delegation to the aperture-density record, without pixel scaling."""
-        coro = cached_diameter_coro
-        record = coro.curves()
-        # The record is an aperture mean, not the old azimuthal per-pixel profile.
-        expected = record.evaluate("leakage_density_lod2", separation_lod)
-        assert coro.leakage_density_lod2(separation_lod) == expected
-
-    @pytest.mark.parametrize("separation_lod", [6.0, 10.0])
-    def test_noise_floor_ayo_matches_leakage_density_lod2(
-        self, cached_diameter_coro, separation_lod
-    ):
-        """The AYO noise floor is the core mean intensity over the ppf.
-
-        Both are per (lambda/D)^2 on the same object, so a caller can multiply
-        either by the core area. A floor left per pixel would come back low by
-        the pixel area in (lambda/D)^2.
-        """
-        coro = cached_diameter_coro
-        ppf = 30.0
-        floor = float(
-            coro.curves().evaluate("leakage_density_lod2", separation_lod) / ppf
-        )
-        cmi = float(coro.leakage_density_lod2(separation_lod, 500.0))
-        assert floor == pytest.approx(cmi / ppf, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

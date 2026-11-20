@@ -53,11 +53,10 @@ rendered = coro.off_axis_psf(None, 5.0, coro.grid)
 transmission = coro.uniform_sky_map(None, grid=coro.grid)
 
 record = coro.curves(circle)
-throughput = coro.throughput(5.0, rule=circle)
-contrast = coro.raw_contrast(5.0, rule=circle)
+throughput = record.evaluate("throughput", 5.0)
+contrast = record.evaluate("raw_contrast", 5.0)
 area = record.evaluate("core_area_lod2", 5.0)
-throughput_map = coro.throughput_map()
-core_area_map = coro.core_area_map()
+sky = coro.uniform_sky_response(5.0)
 ```
 
 `package.prepare(...)` and `yippy.Coronagraph(package, ...)` build the same
@@ -144,8 +143,7 @@ knots: contrast = leakage_density * core_area / throughput.
 source position. `centre="peak"` follows the local PSF peak. `HalfMaximum(f)`
 selects the connected core above fraction `f` of its peak. Both integrate
 planet and stellar intensity over the same region and have identical mean
-and variance moments. For inverse-variance photometry, pass `Matched()` to
-`optixstuff.prepare_aperture` and supply the scene rates at the exposure query.
+and variance moments.
 
 Default records measure the shipped non-negative off-axis samples. For
 standalone aperture measurements on another separation axis, use
@@ -154,10 +152,9 @@ native two-dimensional `Image`; select the source axis from `source_psfs(...).im
 with `dataclasses.replace`, retaining the native grid and reconstruction.
 The prepared `coro.curves(rule)` records require no callback.
 
-Finite-star leakage queries accept `stellar_diam_lod=` and apply prepared
-aperture operators to the interpolated stellar map. Throughput and area accept
-the same keyword and are independent of stellar diameter. `time_d` is days
-from the scene epoch and is unused by these fixed tables.
+Records describe the point-source stellar map. Finite stellar diameters are an
+image capability: `coro.stellar_map(None, diameter_lod, grid=None)` returns the
+interpolated finite-star image.
 
 The separate stellar ring profile remains available from
 `yippy.performance.stellar_intensity_curves(coro, diameter_lod)`. Its
@@ -174,8 +171,9 @@ floor and a post-processing factor explicitly in the consumer:
 import numpy as np
 
 ppf = 30.0
-contrast_noise = np.maximum(np.abs(coro.raw_contrast(5.0)), 4e-10) / ppf
-density_noise = coro.leakage_density_lod2(5.0) / ppf
+record = coro.curves()
+contrast_noise = np.maximum(np.abs(record.evaluate("raw_contrast", 5.0)), 4e-10) / ppf
+density_noise = record.evaluate("leakage_density_lod2", 5.0) / ppf
 coro.to_exosims()
 coro.dump_ayo_csv("output.csv")
 ```
