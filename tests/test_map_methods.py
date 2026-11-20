@@ -13,22 +13,22 @@ pytestmark = requires_available_yip
 
 
 class TestSeparationMap:
-    """Tests for radial separation_map."""
+    """Tests for the radial map of the native grid."""
 
     def test_shape(self, coro):
         """Output shape matches (npix, npix)."""
-        r = coro.separation_map()
+        r = coro.grid.radius()
         assert r.shape == (coro.grid.shape[0], coro.grid.shape[0])
 
     def test_center_is_zero(self, coro):
         """Separation at the grid center is zero."""
-        r = coro.separation_map()
+        r = coro.grid.radius()
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         assert r[cy, cx] == pytest.approx(0, abs=coro.grid.step)
 
     def test_radially_symmetric(self, coro):
         """Values at equal pixel distance from center should be equal."""
-        r = coro.separation_map()
+        r = coro.grid.radius()
         cy, cx = round(coro.grid.center_y), round(coro.grid.center_x)
         d = 10
         assert r[cy, cx + d] == pytest.approx(np.asarray(r[cy + d, cx]), rel=1e-10)
@@ -38,7 +38,7 @@ class TestSeparationMap:
 
     def test_all_nonnegative(self, coro):
         """All separations are non-negative."""
-        r = coro.separation_map()
+        r = coro.grid.radius()
         assert np.all(r >= 0)
 
 
@@ -71,7 +71,7 @@ class TestCoreMeanIntensityMap:
 
     def test_matches_1d(self, coro):
         """Map values should match point-query at the same separation."""
-        r = coro.separation_map()
+        r = coro.grid.radius()
         m = stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
             np.hypot(*coro.stellar_grid.coordinates())
         )

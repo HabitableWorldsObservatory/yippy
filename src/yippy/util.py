@@ -70,8 +70,8 @@ def save_coro_performance_to_fits(
     header["FRAME"] = json.dumps(asdict(record.frame), sort_keys=True)
     header["IWA_LOD"] = record.iwa_lod if np.isfinite(record.iwa_lod) else "undefined"
     header["EXTENT"] = record.data_extent_lod
-    if record.stellar_diameter is not None:
-        header["STARDIAM"] = record.stellar_diameter
+    if record.stellar_diameter_lod is not None:
+        header["STARDIAM"] = record.stellar_diameter_lod
     if identity is not None:
         header["CACHEKEY"] = cache_identity_digest(identity)
         header["CACHEID"] = cache_identity_json(identity)
@@ -136,5 +136,5 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
             leakage_rule=header["LEAKRULE"],
             iwa_lod=np.nan if iwa == "undefined" else float(iwa),
             data_extent_lod=header["EXTENT"],
-            stellar_diameter=header.get("STARDIAM"),
+            stellar_diameter_lod=header.get("STARDIAM"),
         )

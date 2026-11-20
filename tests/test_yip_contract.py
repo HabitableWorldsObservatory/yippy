@@ -229,12 +229,6 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     native_star = coro.stellar_map(None, 0.1, grid=None)
     native_source = coro.off_axis_psf(None, 1.0, None)
     batch_source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0])).image
-    aperture_samples = coro.aperture_samples(None, coro.curves().separation_lod)
-    knot = np.flatnonzero(np.asarray(coro.curves().separation_lod) == 1.0)[0]
-    np.testing.assert_array_equal(
-        aperture_samples[knot][0].data,
-        coro._offaxis_backend.get_psf_by_offset_idx(2, 0).data,
-    )
     batch_star = coro.stellar_map(None, jnp.array([0.0, 0.1]))
     for product in (
         coro,
@@ -256,7 +250,6 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         coro._offaxis_backend(1.0 * lod, 0.0 * lod),
         coro._offaxis_backend.get_psf_by_offset_idx(2, 0),
         batch_source,
-        aperture_samples[knot][0],
         coro._offaxis_backend.create_psfs_parallel(jnp.array([1.0]), jnp.array([0.0])),
         native_star,
         batch_star,

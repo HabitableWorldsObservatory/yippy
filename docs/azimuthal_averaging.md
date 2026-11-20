@@ -56,7 +56,7 @@ from yippy.performance import stellar_intensity_curves
 rule = HalfMaximum(0.3)
 coro = open_yip(yip_path).prepare(rules=(rule,), leakage_rule="azimuthal_ring_mean")
 radial = stellar_intensity_curves(coro)
-r_lod = coro.separation_map()
+r_lod = coro.grid.radius()
 istar_az_avg = radial.evaluate(r_lod)
 ```
 

@@ -102,7 +102,9 @@ def core_separations(coro: Coronagraph, step_lod: float = CORE_STEP_LOD) -> np.n
     return np.union1d(grid, x_offsets[x_offsets <= s_max])
 
 
-def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="keys"):
+def stellar_intensity_curves(
+    backend, stellar_diameter_lod=0.0, *, interpolation="keys"
+):
     """Measure a radial stellar ring mean in flux fraction per stellar pixel.
 
     This measurement is the ring mean of the stellar map, independent of an
@@ -118,7 +120,7 @@ def stellar_intensity_curves(backend, stellar_diam_lod=0.0, *, interpolation="ke
     radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
     nodes = radii * grid.step
     knots = backend._stellar_ln_interp.x
-    diameter = jnp.asarray(stellar_diam_lod)
+    diameter = jnp.asarray(stellar_diameter_lod)
     valid = (diameter >= 0) & (diameter <= knots[-1])
     image = (
         backend.stellar_map(None, jnp.clip(diameter, 0.0, knots[-1]), grid=None)

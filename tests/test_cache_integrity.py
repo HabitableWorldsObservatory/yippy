@@ -93,7 +93,7 @@ def test_circular_centres_have_distinct_complete_cache_records(
             "data_extent_lod",
             "frame",
             "leakage_rule",
-            "stellar_diameter",
+            "stellar_diameter_lod",
         ):
             assert getattr(loaded, name) == getattr(original, name)
     legacy = tmp_path / "legacy.fits"
@@ -698,7 +698,7 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
         iwa_lod=1.23456789012345,
         data_extent_lod=16.0,
         leakage_rule="azimuthal_ring_mean",
-        stellar_diameter=0.123456789012345,
+        stellar_diameter_lod=0.123456789012345,
     )
     save_coro_performance_to_fits(record, "performance.fits", tmp_path)
     loaded = load_coro_performance_from_fits("performance.fits", tmp_path)
@@ -719,7 +719,7 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
         "rule",
         "frame",
         "leakage_rule",
-        "stellar_diameter",
+        "stellar_diameter_lod",
         "iwa_lod",
         "data_extent_lod",
     ):

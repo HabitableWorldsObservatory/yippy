@@ -16,7 +16,7 @@ from optixstuff.coronagraph import (
     ProductGrids,
     SceneRender,
     SourcePSFs,
-    _on_grid,
+    on_grid,
 )
 from optixstuff.grids import Image, Measure, PixelGrid
 from optixstuff.performance import PerformanceCurves, SampledProfile
@@ -46,31 +46,12 @@ def _jax_record(record):
     )
 
 
-def _aperture_samples(offaxis, separations_lod, synthesize):
-    """Select the nearest axis row, synthesizing PSFs at unmeasured separations."""
-    separations_lod = np.asarray(separations_lod)
-    y_offsets = np.asarray(offaxis.y_offsets)
-    iy = int(np.argmin(np.abs(y_offsets)))
-    offsets = np.asarray(
-        offaxis.x_offsets, dtype=np.result_type(separations_lod.dtype, np.float32)
-    )
-    indices = {float(x): ix for ix, x in enumerate(offsets)}
-    samples = []
-    for separation in map(float, separations_lod):
-        ix = indices.get(separation)
-        image = None if ix is None else offaxis.get_psf_by_offset_idx(ix, iy)
-        if image is None:
-            samples.append((synthesize(separation, 0.0), (separation, 0.0)))
-        else:
-            samples.append((image, (separation, float(y_offsets[iy]))))
-    return tuple(samples)
-
-
 class Coronagraph(AbstractTableCoronagraph):
     """A frozen, JAX-compatible coronagraph loaded from a Yield Input Package.
 
-    Coordinates and stellar diameters are floats in lambda/D. Aperture rules
-    and leakage geometry are prepared at construction, before JIT queries.
+    Coordinates and stellar diameters are floats in lambda/D. The
+    characterization record for each aperture rule is prepared at construction,
+    before JIT queries.
     The default photometric rule is a circle of radius 0.7 lambda/D.
     """
 
@@ -194,22 +175,16 @@ class Coronagraph(AbstractTableCoronagraph):
         """Return the three recorded native grids for this fixed YIP product."""
         return ProductGrids(self.grid, self.stellar_grid, self.sky_trans.grid)
 
-    def _native_stellar_map(self, stellar_diam_lod):
-        if hasattr(stellar_diam_lod, "unit"):
-            raise TypeError("stellar_diam_lod must be floats in lambda/D")
-        data = jnp.exp(self._stellar_ln_interp(stellar_diam_lod))
+    def _native_stellar_map(self, stellar_diameter_lod):
+        if hasattr(stellar_diameter_lod, "unit"):
+            raise TypeError("stellar_diameter_lod must be floats in lambda/D")
+        data = jnp.exp(self._stellar_ln_interp(stellar_diameter_lod))
         return fraction_image(
             data,
             self.stellar_grid,
             tuple(f"diameter_{i}" for i in range(data.ndim - 2)),
             self._host.stellar_intens.measure,
             outside="reflect",
-        )
-
-    def aperture_samples(self, wavelength_nm, separations_lod):
-        """Return calibration images paired with their measured source offsets."""
-        return _aperture_samples(
-            self._offaxis_backend, separations_lod, self._offaxis_backend.create_psf
         )
 
     def _native_source_psfs(self, x_lod, y_lod):
@@ -349,9 +324,7 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         """Sum native source-pixel flux through the operator and sample the detector."""
         if scene.measure != Measure.integral() or scene.data.ndim != 2:
             raise ValueError("scene must be a two-dimensional cell-integral Image")
-        flux = (
-            scene.data if scene.grid == self.grid else _on_grid(scene, self.grid).data
-        )
+        flux = scene.data if scene.grid == self.grid else on_grid(scene, self.grid).data
         if isinstance(self.operator, SceneRenderer):
             x, y = self.grid.coordinates()
             read = self.operator.render_raster(
@@ -370,4 +343,4 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         image = fraction_image(
             data, self.grid, (), self._offaxis_backend.measure, quantity=scene.quantity
         )
-        return SceneRender(_on_grid(image, grid), valid)
+        return SceneRender(on_grid(image, grid), valid)

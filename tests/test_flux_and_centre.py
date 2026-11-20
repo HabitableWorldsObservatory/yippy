@@ -137,7 +137,7 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
         rows, columns = np.indices((npix, npix))
         expected = np.hypot(rows - axis, columns - axis) * pixel_lod
 
-        separation_map = np.asarray(syn_coro_1d.separation_map())
+        separation_map = np.asarray(syn_coro_1d.grid.radius())
 
         np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
         middle = npix // 2
@@ -147,7 +147,7 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
     """The map and synthesis share an axis, to the 1e-5 pixel float32 fit floor."""
-    separation_map = np.asarray(syn_coro_1d.separation_map())
+    separation_map = np.asarray(syn_coro_1d.grid.radius())
     nearest = np.argwhere(separation_map == separation_map.min())
     map_center = float(np.mean(nearest[:, 1]))
 

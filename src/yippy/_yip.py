@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from lod_unit import lod
-from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, RecordRule
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule, Circular
 from optixstuff.performance import (
     CORE_OVERSAMPLE,
     SampledProfile,
@@ -585,7 +585,7 @@ class _YIPData:
         return d
 
     def _perf_identity(
-        self, rule, leakage_rule, stellar_diameter, separations_lod=None
+        self, rule, leakage_rule, stellar_diameter_lod, separations_lod=None
     ):
         """Complete identity of a weighted photometry record."""
         from dataclasses import asdict
@@ -599,7 +599,7 @@ class _YIPData:
                 "table_storage": "float64",
                 "rule": {"name": type(rule).__name__, **asdict(rule)},
                 "leakage_rule": leakage_rule,
-                "stellar_diameter": stellar_diameter,
+                "stellar_diameter": stellar_diameter_lod,
                 "oversample": CORE_OVERSAMPLE,
                 "separations_lod": None
                 if separations_lod is None
@@ -625,7 +625,7 @@ class _YIPData:
     def _prepare_record(
         self,
         rule=None,
-        stellar_diameter=None,
+        stellar_diameter_lod=None,
         *,
         separations_lod=None,
         leakage_rule=None,
@@ -642,13 +642,13 @@ class _YIPData:
         overriding their physical definitions.
         """
         rule = self.rule if rule is None else rule
-        if not isinstance(rule, RecordRule):
+        if not isinstance(rule, ApertureRule):
             raise TypeError("Performance records require Circular or HalfMaximum")
         leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
         diameter = (
             float(self.stellar_intens.diams[0].value)
-            if stellar_diameter is None
-            else float(getattr(stellar_diameter, "value", stellar_diameter))
+            if stellar_diameter_lod is None
+            else float(getattr(stellar_diameter_lod, "value", stellar_diameter_lod))
         )
         identity = self._perf_identity(rule, leakage_rule, diameter, separations_lod)
         expected = cache_identity_digest(identity)
@@ -670,7 +670,7 @@ class _YIPData:
                     record.rule != rule
                     or record.leakage_rule != leakage_rule
                     or record.frame != self.grid.frame
-                    or record.stellar_diameter != diameter
+                    or record.stellar_diameter_lod != diameter
                 ):
                     raise ValueError(
                         "performance record rule, leakage_rule, frame "
@@ -718,7 +718,7 @@ class _YIPData:
                 else separations_lod,
                 source_positions_lod=locations if separations_lod is None else None,
                 leakage_rule=leakage_rule,
-                stellar_diameter=diameter,
+                stellar_diameter_lod=diameter,
             )
             if save_to_fits:
                 save_coro_performance_to_fits(

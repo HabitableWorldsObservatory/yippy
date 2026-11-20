@@ -38,7 +38,7 @@ def curves():
         raw_contrast=density * area / throughput,
         iwa_lod=0.75,
         data_extent_lod=4.0,
-        stellar_diameter=0.0,
+        stellar_diameter_lod=0.0,
     )
 
 
