@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 import yippy.sinc as sc
-from yippy.sinc.geometry import spacing_xy
+from yippy.sinc.evidence import Reason
+from yippy.sinc.geometry import source_grid, spacing_xy
 
 
 @pytest.mark.parametrize(
@@ -67,8 +68,8 @@ def test_subnormal_host_rejection(full_delivery):
     grid = full_delivery["declared_lattice"]
     data = dict(
         full_delivery,
-        declared_lattice=sc.source_grid(
+        declared_lattice=source_grid(
             [5e-324, 0.0], spacing_xy(grid), grid.shape, grid.frame
         ),
     )
-    assert sc.admit_grid(**data).reason_bits & sc.Reason.GRID_NONUNIFORM
+    assert sc.admit_grid(**data).reason_bits & Reason.GRID_NONUNIFORM

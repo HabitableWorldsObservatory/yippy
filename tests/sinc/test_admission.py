@@ -10,7 +10,10 @@ import numpy as np
 import pytest
 
 import yippy.sinc as sc
-from yippy.sinc.geometry import origin_xy, spacing_xy
+from yippy.sinc.evidence import Reason
+from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
+from yippy.sinc.grid import CheckSet, Reflection
+from yippy.sinc.reader import Interpolator, read_batch
 
 from .helpers import analytic, delivery, make_reader
 
@@ -22,12 +25,12 @@ def changed(data, key, where, value):
 @pytest.mark.parametrize(
     "case,reason",
     [
-        ("duplicate", sc.Reason.GRID_DUPLICATE),
-        ("missing", sc.Reason.GRID_INCOMPLETE),
-        ("offset", sc.Reason.GRID_NONUNIFORM),
-        ("negative", sc.Reason.DATA_INVALID),
-        ("premise", sc.Reason.METADATA_MISSING),
-        ("support", sc.Reason.UNKNOWN_BANDWIDTH),
+        ("duplicate", Reason.GRID_DUPLICATE),
+        ("missing", Reason.GRID_INCOMPLETE),
+        ("offset", Reason.GRID_NONUNIFORM),
+        ("negative", Reason.DATA_INVALID),
+        ("premise", Reason.METADATA_MISSING),
+        ("support", Reason.UNKNOWN_BANDWIDTH),
     ],
 )
 def test_grid_and_evidence_refusals(full_delivery, case, reason):
@@ -67,12 +70,12 @@ def test_grid_and_evidence_refusals(full_delivery, case, reason):
 @pytest.mark.parametrize(
     "case,reason",
     [
-        ("normalization", sc.Reason.NORMALIZATION_UNSUPPORTED),
-        ("conflict", sc.Reason.METADATA_CONFLICT),
-        ("frame", sc.Reason.FRAME_UNSUPPORTED),
-        ("halo", sc.Reason.INCOMPLETE_STENCIL),
-        ("memory", sc.Reason.MEMORY_LIMIT),
-        ("layout", sc.Reason.LAYOUT_UNSUPPORTED),
+        ("normalization", Reason.NORMALIZATION_UNSUPPORTED),
+        ("conflict", Reason.METADATA_CONFLICT),
+        ("frame", Reason.FRAME_UNSUPPORTED),
+        ("halo", Reason.INCOMPLETE_STENCIL),
+        ("memory", Reason.MEMORY_LIMIT),
+        ("layout", Reason.LAYOUT_UNSUPPORTED),
     ],
 )
 def test_metadata_geometry_resources(full_delivery, case, reason):
@@ -98,7 +101,7 @@ def test_metadata_geometry_resources(full_delivery, case, reason):
         data["memory"] = sc.MemoryBudget(1, 1, 1, 1)
     else:
         r = data["reflection"]
-        data["reflection"] = sc.Reflection(
+        data["reflection"] = Reflection(
             "radial",
             r.axes,
             r.declaration_id,
@@ -115,12 +118,12 @@ def test_metadata_geometry_resources(full_delivery, case, reason):
 @pytest.mark.parametrize(
     "case,reason",
     [
-        ("missing", sc.Reason.SYMMETRY_CHECK_MISSING),
-        ("invalid", sc.Reason.SYMMETRY_REFERENCE_INVALID),
-        ("failed", sc.Reason.SYMMETRY_CHECK_FAILED),
-        ("declaration", sc.Reason.SYMMETRY_UNSUPPORTED),
-        ("center", sc.Reason.FRAME_UNSUPPORTED),
-        ("origin", sc.Reason.GRID_NONUNIFORM),
+        ("missing", Reason.SYMMETRY_CHECK_MISSING),
+        ("invalid", Reason.SYMMETRY_REFERENCE_INVALID),
+        ("failed", Reason.SYMMETRY_CHECK_FAILED),
+        ("declaration", Reason.SYMMETRY_UNSUPPORTED),
+        ("center", Reason.FRAME_UNSUPPORTED),
+        ("origin", Reason.GRID_NONUNIFORM),
     ],
 )
 def test_quadrant_refusals(quadrant_delivery, case, reason):
@@ -152,7 +155,7 @@ def test_quadrant_refusals(quadrant_delivery, case, reason):
         )
     else:
         grid = data["declared_lattice"]
-        data["declared_lattice"] = sc.source_grid(
+        data["declared_lattice"] = source_grid(
             [0.25, 0.0], spacing_xy(grid), grid.shape, grid.frame
         )
     result = sc.admit_grid(**data)
@@ -174,7 +177,7 @@ def test_literal_sampling_threshold(full_delivery, pitch, campaign, margin, nyqu
     grid = full_delivery["declared_lattice"]
     data = dict(
         full_delivery,
-        declared_lattice=sc.source_grid(
+        declared_lattice=source_grid(
             origin_xy(grid), [pitch, pitch], grid.shape, grid.frame
         ),
     )
@@ -190,8 +193,8 @@ def test_literal_sampling_threshold(full_delivery, pitch, campaign, margin, nyqu
         "box", "closed", jnp.stack((midpoint - 0.1, midpoint + 0.1)), jnp.zeros(2)
     )
     result = sc.admit_grid(**data)
-    assert bool(result.reason_bits & sc.Reason.KERNEL_MARGIN_FAIL) == margin
-    assert bool(result.reason_bits & sc.Reason.NYQUIST_FAIL) == nyquist
+    assert bool(result.reason_bits & Reason.KERNEL_MARGIN_FAIL) == margin
+    assert bool(result.reason_bits & Reason.NYQUIST_FAIL) == nyquist
     assert result.admitted == (not margin and not nyquist)
 
 
@@ -217,7 +220,7 @@ def test_checkset_is_empirical(full_delivery):
     positions = jnp.array([[0.13, -0.21], [-0.21, 0.13]])
     truth = jax.vmap(analytic)(positions)
     peaks = jnp.array([3.0, 4.0])
-    checks = sc.CheckSet(
+    checks = CheckSet(
         positions,
         truth,
         jnp.zeros(2, dtype=jnp.int32),
@@ -228,7 +231,7 @@ def test_checkset_is_empirical(full_delivery):
     )
     data = {**full_delivery, "checks": checks}
     admission = sc.admit_grid(**data)
-    reader = sc.Interpolator(
+    reader = Interpolator(
         admission.require(),
         data["domain"],
         sc.KernelProfile(),
@@ -236,7 +239,7 @@ def test_checkset_is_empirical(full_delivery):
         sc.Tiling(),
         data["memory"],
     )
-    result = eqx.filter_jit(sc.read_batch)(reader, positions, checks.product_index)
+    result = eqx.filter_jit(read_batch)(reader, positions, checks.product_index)
     residual = jnp.max(jnp.abs(result.intensity - truth), axis=(1, 2))
     np.testing.assert_allclose(
         admission.receipt.empirical_absolute, residual, atol=3e-15, rtol=0
@@ -247,7 +250,7 @@ def test_checkset_is_empirical(full_delivery):
     np.testing.assert_array_equal(
         result.empirical_max_abs, jnp.full(2, admission.receipt.empirical_max_abs)
     )
-    assert bool(jnp.all((result.reason_bits & sc.Reason.EMPIRICAL_ONLY) != 0))
+    assert bool(jnp.all((result.reason_bits & Reason.EMPIRICAL_ONLY) != 0))
     assert bool(jnp.all(jnp.isinf(result.abs_error_bound)))
 
 
@@ -255,7 +258,7 @@ def test_precision_and_allocation_limits(full_delivery, full_reader):
     """Fails if x64-off silently truncates or batches allocate past byte ceilings."""
     with jax.enable_x64(False):
         admission = sc.admit_grid(**full_delivery)
-        assert admission.reason_bits == sc.Reason.PRECISION_UNAVAILABLE
+        assert admission.reason_bits == Reason.PRECISION_UNAVAILABLE
         with pytest.raises(sc.PrecisionUnavailable):
             admission.require()
         with pytest.raises(sc.PrecisionUnavailable):
@@ -263,7 +266,7 @@ def test_precision_and_allocation_limits(full_delivery, full_reader):
     memory = sc.MemoryBudget(100_000_000, 1000, 10_000_000, 400_000_000)
     reader = eqx.tree_at(lambda r: r.memory, full_reader, memory)
     with pytest.raises(sc.MemoryLimit):
-        sc.read_batch(reader, jnp.zeros((10, 2)), jnp.zeros(10, dtype=jnp.int32))
+        read_batch(reader, jnp.zeros((10, 2)), jnp.zeros(10, dtype=jnp.int32))
     tiny = {**full_delivery, "memory": sc.MemoryBudget(1, 1, 1, 1)}
     with pytest.raises(sc.MemoryLimit):
         sc.admit_grid(**tiny).require()
@@ -275,6 +278,6 @@ def test_axis_invariance_and_odd_detector(quadrant_delivery):
     # The independent mirrors use (1,1); alter a different axis node only.
     data["intensity_nodes"] = data["intensity_nodes"].at[0, 0, 0, 0].add(0.01)
     result = sc.admit_grid(**data)
-    assert result.reason_bits & sc.Reason.SYMMETRY_CHECK_FAILED
+    assert result.reason_bits & Reason.SYMMETRY_CHECK_FAILED
     odd = delivery(quadrant=True, shape=(7, 5))
     assert make_reader(odd).grid.reflection.check_passed[0]

@@ -38,6 +38,7 @@ import numpy as np  # noqa: E402
 
 import yippy.sinc as sc  # noqa: E402
 from yippy.sinc import kernel as sk  # noqa: E402
+from yippy.sinc.reader import Interpolator, read_batch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import propagate as pr  # noqa: E402
@@ -62,7 +63,7 @@ def brightest_map(nodes):
 
 def make_reader(grid, arguments):
     """An Interpolator over ``grid`` with the delivery's domain and memory budget."""
-    return sc.Interpolator(
+    return Interpolator(
         grid,
         arguments["domain"],
         sc.KernelProfile(),
@@ -83,7 +84,7 @@ def with_nodes(grid, nodes, indices):
 
 def read_all(reader, xy):
     """Read every position [Q, 2] and return the float64 images [Q, ny, nx]."""
-    batch = eqx.filter_jit(sc.read_batch)
+    batch = eqx.filter_jit(read_batch)
     product = jnp.zeros(len(xy), dtype=jnp.int32)
     return np.asarray(batch(reader, jnp.asarray(xy), product).intensity)
 

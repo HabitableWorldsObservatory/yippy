@@ -35,6 +35,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import yippy.sinc as sc
+from yippy.sinc.geometry import source_grid
 from yippy.sinc import viz
 from yippy.sinc.kernel import KernelProfile
 import toy_coronagraph as tc
@@ -101,7 +102,7 @@ against the region: a read is served only if the rectangle lies inside it.
 
 ```{code-cell} python
 from optixstuff.grids import Frame
-lattice = sc.source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 31), Frame(500.0, 6.0, "circumscribed"))
+lattice = source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 31), Frame(500.0, 6.0, "circumscribed"))
 domain = sc.Domain("box", "closed", jnp.array([[-5.0, -5.0], [5.0, 5.0]]), jnp.zeros(2))
 fig, ax = plt.subplots(figsize=(5, 5), constrained_layout=True)
 result = viz.plot_coverage(lattice, domain=domain, quadrant=True, query=(1.0, 2.0), ax=ax)

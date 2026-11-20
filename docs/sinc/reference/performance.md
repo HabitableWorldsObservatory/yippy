@@ -176,6 +176,8 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 import yippy.sinc as sc
+from yippy.sinc.kernel import PrefilteredKernelProfile
+from yippy.sinc.reader import Interpolator, PrefilteredReader, read_batch
 
 import toy_coronagraph as tc
 
@@ -183,7 +185,7 @@ delivery = tc.quadrant_delivery(spacing=0.32, nodes=41, domain_half=5.0)
 positions = jnp.asarray(np.random.default_rng(5).uniform(-5.0, 5.0, (64, 2)))
 product = jnp.zeros(64, dtype=jnp.int32)
 tiling = sc.Tiling(query_chunk=8, pixel_tile=96 * 96)
-batch = eqx.filter_jit(lambda reader, q, p: sc.read_batch(reader, q, p).intensity)
+batch = eqx.filter_jit(lambda reader, q, p: read_batch(reader, q, p).intensity)
 
 
 def steady(function, *arguments, rounds=5):
@@ -206,12 +208,12 @@ def build(profile, kind):
     return reader, time.perf_counter() - start
 
 
-raw, raw_load = build(sc.KernelProfile(), sc.Interpolator)
+raw, raw_load = build(sc.KernelProfile(), Interpolator)
 rows = [("Raw, 32 taps", raw_load, steady(batch, raw, positions, product) / 64)]
 readers = {}
 for taps in (7, 8):
-    profile = sc.PrefilteredKernelProfile(taps=taps)
-    readers[taps], load = build(profile, sc.PrefilteredReader)
+    profile = PrefilteredKernelProfile(taps=taps)
+    readers[taps], load = build(profile, PrefilteredReader)
     rows.append((f"Prefiltered, {taps} taps", load,
                  steady(batch, readers[taps], positions, product) / 64))
 

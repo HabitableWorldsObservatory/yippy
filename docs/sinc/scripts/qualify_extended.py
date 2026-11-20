@@ -85,6 +85,7 @@ def metrics(reads, truth, xy, brightest):
 def blend_reads(root, xy, chunk=40):
     """Blend reads (yippy interpolation) of every position [Q, 2], in chunks."""
     from lod_unit import lod
+
     from yippy.offjax import OffJAX
 
     off = OffJAX(

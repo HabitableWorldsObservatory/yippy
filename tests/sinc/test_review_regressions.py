@@ -13,9 +13,10 @@ from hypothesis import strategies as st
 from optixstuff.grids import Frame
 
 import yippy.sinc as sc
-from yippy.sinc.geometry import origin_xy, spacing_xy
+from yippy.sinc.evidence import Reason
+from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
 from yippy.sinc.kernel import exact_quotient_floor_v1
-from yippy.sinc.reader import estimate_memory
+from yippy.sinc.reader import Interpolator, estimate_memory, read_batch
 
 from .helpers import delivery, make_reader
 
@@ -36,7 +37,7 @@ def test_relaxed_symmetry_tolerance_refused(quadrant_delivery, target):
     )
     result = sc.admit_grid(**data)
     assert not result.admitted
-    assert result.reason_bits & sc.Reason.SYMMETRY_UNSUPPORTED
+    assert result.reason_bits & Reason.SYMMETRY_UNSUPPORTED
     assert result.receipt.mirror_local_peak == ()
     assert result.receipt.axis_relative == ()
 
@@ -85,19 +86,19 @@ def test_source_count_memory_accounting(half):
 def test_supported_metadata_range(full_delivery, field, value):
     """Fails if unsupported lattice or domain scales can issue a reader."""
     data = dict(full_delivery)
-    reason = sc.Reason.METADATA_CONFLICT
+    reason = Reason.METADATA_CONFLICT
     if field in ("pitch", "origin"):
         lattice = data["declared_lattice"]
         origin = origin_xy(lattice) if field == "pitch" else [value, value]
         spacing = [value, value] if field == "pitch" else spacing_xy(lattice)
         if field == "pitch" and value < 1e-150:
             with pytest.raises(ValueError, match="nonsingular"):
-                sc.source_grid(origin, spacing, lattice.shape, lattice.frame)
+                source_grid(origin, spacing, lattice.shape, lattice.frame)
             return
-        data["declared_lattice"] = sc.source_grid(
+        data["declared_lattice"] = source_grid(
             origin, spacing, lattice.shape, lattice.frame
         )
-        reason = sc.Reason.LAYOUT_UNSUPPORTED
+        reason = Reason.LAYOUT_UNSUPPORTED
     elif field == "annulus":
         data["domain"] = sc.Domain(
             "annulus", "closed", jnp.zeros((2, 2)), jnp.array([value, 2 * value])
@@ -117,7 +118,7 @@ def test_annulus_inclusive_coverage_corner(full_delivery):
     iy, ix = np.indices((32, 32), dtype=np.int32)
     indices = np.stack((ix.ravel(), iy.ravel()), axis=1)
     data.update(
-        declared_lattice=sc.source_grid(
+        declared_lattice=source_grid(
             jnp.zeros(2),
             jnp.full(2, 0.25),
             (32, 32),
@@ -148,7 +149,7 @@ def test_negative_subnormal_samples(full_delivery, dtype):
     nodes = np.array(full_delivery["intensity_nodes"], dtype=dtype)
     nodes[0, 0, 0, 0] = -np.nextafter(dtype(0), dtype(1))
     result = sc.admit_grid(**{**full_delivery, "intensity_nodes": nodes})
-    assert not result.admitted and result.reason_bits & sc.Reason.DATA_INVALID
+    assert not result.admitted and result.reason_bits & Reason.DATA_INVALID
     nodes[0, 0, 0, 0] = -0.0
     nodes[0, 0, 0, 1] = 0.0
     assert sc.admit_grid(**{**full_delivery, "intensity_nodes": nodes}).admitted
@@ -162,7 +163,7 @@ def test_original_offset_precision_after_conversion(full_delivery):
     )
     data = {**full_delivery, "offsets_xy_lod": original.astype(float) / arcsec_per_lod}
     refused = sc.admit_grid(**data)
-    assert not refused.admitted and refused.reason_bits & sc.Reason.GRID_NONUNIFORM
+    assert not refused.admitted and refused.reason_bits & Reason.GRID_NONUNIFORM
     admitted = sc.admit_grid(**data, offset_original_dtype=jnp.float32)
     assert admitted.admitted and admitted.receipt.offset_dtype == "float32"
     scale = np.max(np.abs(data["offsets_xy_lod"]), axis=0).astype(np.float32)
@@ -197,7 +198,7 @@ def test_axis_exact_separate_from_relative(quadrant_delivery):
     far = 20 * 21
     nodes = quadrant_delivery["intensity_nodes"].at[0, far, 0, 0].add(0.01)
     bad = sc.admit_grid(**{**quadrant_delivery, "intensity_nodes": nodes})
-    assert not bad.admitted and bad.reason_bits & sc.Reason.SYMMETRY_CHECK_FAILED
+    assert not bad.admitted and bad.reason_bits & Reason.SYMMETRY_CHECK_FAILED
     assert any(
         not e and r > 1e-6
         for e, r in zip(bad.receipt.axis_exact, bad.receipt.axis_relative, strict=True)
@@ -294,7 +295,7 @@ def test_independent_reference_random_and_edges(quadrant, dtype):
         for direction in [-np.inf, np.inf]
     ]
     q = jnp.asarray(queries)
-    result = eqx.filter_jit(sc.read_batch)(reader, q, jnp.zeros(len(q), jnp.int32))
+    result = eqx.filter_jit(read_batch)(reader, q, jnp.zeros(len(q), jnp.int32))
     assert np.all(result.accepted)
     for i, query in enumerate(queries):
         expected, scale = reference_read(data, query)
@@ -328,7 +329,7 @@ def test_axis_exact_preserves_subnormal_discrepancy(quadrant_delivery, dtype):
     nodes[0, 20 * 21, 0, 0] = np.nextafter(dtype(0), dtype(1))
     result = sc.admit_grid(**{**quadrant_delivery, "intensity_nodes": nodes})
     assert not result.admitted
-    assert result.reason_bits & sc.Reason.SYMMETRY_CHECK_FAILED
+    assert result.reason_bits & Reason.SYMMETRY_CHECK_FAILED
     assert not result.receipt.axis_exact[20]
     assert math.isnan(result.receipt.axis_relative[20])
 
@@ -340,7 +341,7 @@ def test_reflection_tolerance_range_on_full_grid(full_delivery):
     )
     result = sc.admit_grid(**{**full_delivery, "reflection": reflection})
     assert not result.admitted
-    assert result.reason_bits & sc.Reason.SYMMETRY_UNSUPPORTED
+    assert result.reason_bits & Reason.SYMMETRY_UNSUPPORTED
 
 
 # Built under binary64 because collection runs outside the sinc fixtures.
@@ -366,7 +367,7 @@ with jax.enable_x64(True):
 def test_reader_constructor_enforces_domain_range(full_reader, domain):
     reader = full_reader
     with pytest.raises(ValueError, match="supported numeric range"):
-        sc.Interpolator(
+        Interpolator(
             reader.grid,
             domain,
             reader.profile,

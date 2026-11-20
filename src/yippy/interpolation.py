@@ -7,7 +7,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .sinc import BoundKind, Domain, MemoryBudget, ReadPolicy, Reason, Status
+from .sinc import Domain, MemoryBudget, ReadPolicy
+from .sinc.evidence import BoundKind, Reason, Status
 
 
 @dataclass(frozen=True)

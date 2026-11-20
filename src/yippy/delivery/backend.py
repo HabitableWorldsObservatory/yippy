@@ -14,7 +14,7 @@ from ..interpolation import InterpolationRead, ReadLedger, blend_read
 from ..jax_funcs import synthesize_psf_idw
 from ..sampling import fraction_image
 from ..sinc.evidence import Reason
-from ..sinc.reader import check_memory, require_read
+from ..sinc.reader import require_read
 
 # Construction/query fallbacks allowed for declared complete full rectangles.
 _FALLBACK_MASK = int(
@@ -264,7 +264,7 @@ class DeliveryBackend(eqx.Module):
                     estimates[key] += self.training_nodes.nbytes
             estimates["output"] += x.size * 4
             estimates["total"] += x.size * 4
-            check_memory(self.reader.memory, estimates)
+            self.reader.memory.check(estimates)
         if not x.size:
             shape = eqx.filter_eval_shape(self.create_psf_with_info, 0.0, 0.0)
             return jax.tree.map(lambda a: jnp.empty((0, *a.shape), a.dtype), shape)

@@ -46,7 +46,7 @@ from yippy.sinc.grid import (
     admit_grid,
 )
 from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile
-from yippy.sinc.reader import memory_budget
+from yippy.sinc.reader import MemoryBudget
 
 from ..header import HeaderData
 from ..sampling import sample_units
@@ -821,7 +821,7 @@ def delivery_profile(delivery, options):
 
 def delivery_memory(delivery, supplied=None, *, profile=None):
     """Pass table sizes and yippy's output tag allocation to the engine."""
-    return memory_budget(
+    return MemoryBudget.for_table(
         delivery.nodes.nbytes,
         delivery.nodes.shape[1:],
         profile=profile,

@@ -37,6 +37,7 @@ from myst_nb import glue
 from validation_tables import load
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import reason_names
 import toy_coronagraph as tc
 
 jax.config.update("jax_enable_x64", True)
@@ -146,7 +147,7 @@ moved = replace(good["products"], pixels=replace(
     pixels, center_x=pixels.center_x + 0.5, center_y=pixels.center_y + 0.5
 ))
 admission = sc.admit_grid(**dict(good, products=moved))
-print("center moved by half a pixel:", sc.reason_names(admission.reason_bits))
+print("center moved by half a pixel:", reason_names(admission.reason_bits))
 ```
 
 The refusal is `FRAME_UNSUPPORTED`. It catches a declared center that is off, but

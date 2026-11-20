@@ -93,6 +93,10 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import reason_names
+from yippy.sinc.kernel import PrefilteredKernelProfile
+from yippy.sinc.planner import plan_prefilter
+from yippy.sinc.reader import PrefilteredReader, read_batch
 import toy_coronagraph as tc
 
 toy = tc.ToyCoronagraph()
@@ -101,7 +105,7 @@ metadata = {
     name: delivery[name]
     for name in ("declared_lattice", "products", "reflection", "domain")
 }
-plan = sc.plan_prefilter(**metadata, max_tone_error=5e-5)
+plan = plan_prefilter(**metadata, max_tone_error=5e-5)
 print("planned:", plan.planned, " taps:", plan.profile.taps)
 for taps, error in plan.candidates:
     print(f"  {taps} taps: tone error {error:.1e}")
@@ -112,13 +116,13 @@ the first count that met $5\times10^{-5}$. A request that 10 taps cannot meet
 is refused with a reason and with the list of what was tried:
 
 ```{code-cell} python
-strict = sc.plan_prefilter(**metadata, max_tone_error=1e-8)
-print("planned:", strict.planned, sc.reason_names(strict.reason_bits))
+strict = plan_prefilter(**metadata, max_tone_error=1e-8)
+print("planned:", strict.planned, reason_names(strict.reason_bits))
 print("best tried:", f"{strict.candidates[-1][0]} taps, {strict.candidates[-1][1]:.1e}")
 ```
 
 `plan.require()` returns the profile, or raises `PlanRefused` carrying the
-plan. A profile can also be built directly, `sc.PrefilteredKernelProfile(taps=7)`,
+plan. A profile can also be built directly, `PrefilteredKernelProfile(taps=7)`,
 which is the default.
 
 ## Does admission accept the grid for this profile?
@@ -141,7 +145,7 @@ grid and checks everything the raw profile checks, with three differences.
 ```{code-cell} python
 profile = plan.require()
 admission = sc.admit_grid(**delivery, profile=profile)
-print("admitted:", admission.admitted, sc.reason_names(admission.reason_bits))
+print("admitted:", admission.admitted, reason_names(admission.reason_bits))
 for name, value in admission.receipt.kernel_design:
     print(f"  {name}: {value:.4g}")
 ```
@@ -165,7 +169,7 @@ A `PrefilteredReader` takes the same arguments as an `Interpolator`. It builds
 the coefficient images when it is constructed.
 
 ```{code-cell} python
-reader = sc.PrefilteredReader(
+reader = PrefilteredReader(
     admission.require(),
     delivery["domain"],
     profile,
@@ -177,7 +181,7 @@ query = jnp.array([4.0, 0.3])
 result = reader.read(query, jnp.int32(0))
 print("accepted:", bool(result.accepted), " shape:", result.intensity.shape)
 print("error bound:", float(result.abs_error_bound))
-print("reasons:", sc.reason_names(int(result.reason_bits)))
+print("reasons:", reason_names(int(result.reason_bits)))
 ```
 
 The result has the meaning it has for the raw read. The image is returned
@@ -206,7 +210,7 @@ def local_peak_error(image, source):
 
 rng = np.random.default_rng(3)
 positions = jnp.asarray(rng.uniform(-5.0, 5.0, (40, 2)))
-batch = sc.read_batch(reader, positions, jnp.zeros(40, dtype=jnp.int32))
+batch = read_batch(reader, positions, jnp.zeros(40, dtype=jnp.int32))
 errors = [
     local_peak_error(image, np.asarray(position))
     for image, position in zip(batch.intensity, positions)
@@ -243,7 +247,7 @@ $9\le t<N-10$. On a quadrant the lower limit is the mirror of the upper one.
 ```{code-cell} python
 outside = reader.read(jnp.array([7.5, 0.0]), jnp.int32(0))
 print("accepted:", bool(outside.accepted))
-print("reasons:", sc.reason_names(int(outside.reason_bits)))
+print("reasons:", reason_names(int(outside.reason_bits)))
 ```
 
 This position is beyond both the served stencils and the permission box, and

@@ -45,6 +45,8 @@ from myst_nb import glue
 
 import eyepiece as ep
 import yippy.sinc as sc
+from yippy.sinc.geometry import source_grid
+from yippy.sinc.reader import read_batch
 from yippy.sinc import viz
 from yippy.sinc.kernel import KernelProfile
 import toy_coronagraph as tc
@@ -212,7 +214,7 @@ stored nodes throughout. The right panel is the image the reader returns.
 sx = np.concatenate([np.full(10, 1.5), np.linspace(1.5, -1.5, 31), np.full(5, -1.5)])
 fold = np.concatenate([np.zeros(3), np.linspace(0, 1, 8)[1:], np.ones(36)])
 path = np.stack([sx, np.full_like(sx, 3.0)], axis=1)
-reads = sc.read_batch(reader, jnp.asarray(path), jnp.zeros(len(sx), dtype=jnp.int32))
+reads = read_batch(reader, jnp.asarray(path), jnp.zeros(len(sx), dtype=jnp.int32))
 images = np.asarray(reads.intensity)
 
 fig, (left, right) = plt.subplots(1, 2, figsize=(9, 4), constrained_layout=True)
@@ -279,7 +281,7 @@ sweep_x = np.linspace(-3, 3, 121)
 sweep = np.stack([sweep_x, np.full_like(sweep_x, 3.0)], axis=1)
 truth_imgs = np.asarray(toy.psf(sweep))
 read_imgs = np.asarray(
-    sc.read_batch(reader, jnp.asarray(sweep), jnp.zeros(len(sweep), dtype=jnp.int32)).intensity
+    read_batch(reader, jnp.asarray(sweep), jnp.zeros(len(sweep), dtype=jnp.int32)).intensity
 )
 err = np.abs(read_imgs - truth_imgs).max(axis=(1, 2)) / truth_imgs.max(axis=(1, 2))
 pc = int(np.argmin(np.abs(pix - 1.5)))
@@ -493,7 +495,7 @@ whose spacing is $h=0.38$ and whose served edge along $x$ is 4.18.
 ```{code-cell} python
 :tags: [hide-input]
 from optixstuff.grids import Frame
-starter = sc.source_grid(jnp.zeros(2), jnp.full(2, H), (31, 27), Frame(500.0, 6.0, "circumscribed"))
+starter = source_grid(jnp.zeros(2), jnp.full(2, H), (31, 27), Frame(500.0, 6.0, "circumscribed"))
 ny, nx = starter.shape
 served_x = (nx - 16) * H
 served_y = (ny - 16) * H

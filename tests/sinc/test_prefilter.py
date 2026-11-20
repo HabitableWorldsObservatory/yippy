@@ -13,14 +13,17 @@ from optixstuff.grids import Frame
 import yippy.sinc as sc
 from yippy.sinc import prefilter
 from yippy.sinc.domain import coverage
-from yippy.sinc.geometry import origin_xy
-from yippy.sinc.kernel import bump_stencil
+from yippy.sinc.evidence import BoundKind, Reason, Status
+from yippy.sinc.geometry import origin_xy, source_grid
+from yippy.sinc.grid import CheckSet
+from yippy.sinc.kernel import PrefilteredKernelProfile, bump_stencil
 from yippy.sinc.prefilter import (
     build_coefficients,
     bump_transform,
     design_axis,
     design_grid,
 )
+from yippy.sinc.reader import Interpolator, PrefilteredReader, read_batch, require_read
 
 from .helpers import delivery, make_prefiltered, tone_truth
 from .reference_reader import (
@@ -51,7 +54,7 @@ def oracle(data, reader, query):
 
 def admitted_samples(data):
     """The canonical samples a prefiltered reader of ``data`` was built from."""
-    admission = sc.admit_grid(**data, profile=sc.PrefilteredKernelProfile())
+    admission = sc.admit_grid(**data, profile=PrefilteredKernelProfile())
     return admission.require().intensity
 
 
@@ -175,13 +178,13 @@ def test_covered_interval_endpoints(taps, reflected):
     lower limit to minus the upper one, included.
     """
     size, spacing = 40, 0.25
-    lattice = sc.source_grid(
+    lattice = source_grid(
         jnp.zeros(2),
         jnp.full(2, spacing),
         (size, size),
         Frame(500.0, 6.0, "circumscribed"),
     )
-    profile = sc.PrefilteredKernelProfile(taps=taps)
+    profile = PrefilteredKernelProfile(taps=taps)
     below = (taps - 1) / 2 + 5.5 if taps % 2 else taps / 2 + 5.0
     above = size - below - 1.0
     low = -above * spacing if reflected else below * spacing
@@ -204,7 +207,7 @@ def test_stencil_modes_agree_at_switch_points(full, taps):
     the bump is cut at 1 / I0(beta): the tap-weight sum just below a switch
     exceeds the sum at it by exactly the edge weight.
     """
-    profile = sc.PrefilteredKernelProfile(taps=taps)
+    profile = PrefilteredKernelProfile(taps=taps)
     origin, spacing = jnp.array([0.0, -1.5]), jnp.array([0.25, 0.375])
     beta, scale = jnp.array([15.1, 17.2]), jnp.array([2.2, 2.4])
     values = []
@@ -293,10 +296,10 @@ def test_reads_track_band_limited_truth(full, quadrant):
         np.testing.assert_allclose(
             folded.intensity, whole.intensity, rtol=0, atol=1e-11 * full["norm"]
         )
-        assert whole.status == sc.Status.SAMPLING_ADMITTED
-        assert whole.reason_bits == sc.Reason.BOUND_UNKNOWN
+        assert whole.status == Status.SAMPLING_ADMITTED
+        assert whole.reason_bits == Reason.BOUND_UNKNOWN
         assert not whole.bound_available and math.isinf(float(whole.abs_error_bound))
-        assert int(whole.bound_kind) == sc.BoundKind.UNKNOWN
+        assert int(whole.bound_kind) == BoundKind.UNKNOWN
         assert not np.any(np.asarray(whole.ledger.evidence))
         assert bool(folded.ledger.applicable[-1])
     # The kernel is approximate: errors sit near the design figure, not at zero.
@@ -314,7 +317,7 @@ def test_receipt_records_the_kernel_design(full):
     np.testing.assert_allclose(record["tone_error_two_axis"], ex + ey + ex * ey)
     assert 1e-6 < ey < ex < 1.2e-5
     assert 1.9 < record["sample_gain_x"] < 2.4
-    profile = sc.PrefilteredKernelProfile()
+    profile = PrefilteredKernelProfile()
     assert full["receipt"].profile_id == profile.identity
     assert full["reader"].grid.profile_id == profile.identity
     assert profile.identity == (
@@ -330,21 +333,19 @@ def test_profiles_do_not_mix(full):
     data, grid = full["data"], full["reader"].grid
     arguments = (sc.ReadPolicy(), sc.Tiling(), data["memory"])
     with pytest.raises(ValueError, match="different kernel profile"):
-        sc.Interpolator(grid, data["domain"], sc.KernelProfile(), *arguments)
+        Interpolator(grid, data["domain"], sc.KernelProfile(), *arguments)
     with pytest.raises(ValueError, match="different kernel profile"):
-        sc.PrefilteredReader(
-            grid, data["domain"], sc.PrefilteredKernelProfile(taps=8), *arguments
+        PrefilteredReader(
+            grid, data["domain"], PrefilteredKernelProfile(taps=8), *arguments
         )
     raw = sc.admit_grid(**data).require()
     with pytest.raises(ValueError, match="different kernel profile"):
-        sc.PrefilteredReader(
-            raw, data["domain"], sc.PrefilteredKernelProfile(), *arguments
-        )
+        PrefilteredReader(raw, data["domain"], PrefilteredKernelProfile(), *arguments)
     with pytest.raises(TypeError):
-        sc.Interpolator(raw, data["domain"], sc.PrefilteredKernelProfile(), *arguments)
+        Interpolator(raw, data["domain"], PrefilteredKernelProfile(), *arguments)
     for taps in (4, 11, 7.0):
         with pytest.raises(ValueError, match="5 to 10 taps"):
-            sc.PrefilteredKernelProfile(taps=taps)
+            PrefilteredKernelProfile(taps=taps)
 
 
 @pytest.mark.medium(reason="admits and builds a table per case, 4 s")
@@ -380,7 +381,7 @@ def test_table_edge_reads_and_halo_refusal(quadrant_table):
     for value in outside:
         result = reader.read(jnp.array([0.11, value]), jnp.int32(0))
         assert not bool(result.accepted) and not bool(result.sampling_ok)
-        assert int(result.reason_bits) & sc.Reason.INCOMPLETE_STENCIL
+        assert int(result.reason_bits) & Reason.INCOMPLETE_STENCIL
         assert bool(jnp.all(jnp.isnan(result.intensity)))
 
 
@@ -399,10 +400,10 @@ def test_minimum_table_size(half, quadrant_table, admitted):
         quadrant_table, half=half, shape=(4, 4), spacing=0.3, truth=truth, limit=0.2
     )
     data["memory"] = BUDGET
-    admission = sc.admit_grid(**data, profile=sc.PrefilteredKernelProfile())
+    admission = sc.admit_grid(**data, profile=PrefilteredKernelProfile())
     assert admission.admitted is admitted
     if not admitted:
-        assert admission.reason_bits == sc.Reason.INCOMPLETE_STENCIL
+        assert admission.reason_bits == Reason.INCOMPLETE_STENCIL
 
 
 def test_margin_memory_policy_and_precision(full):
@@ -410,14 +411,14 @@ def test_margin_memory_policy_and_precision(full):
     truth, _ = tone_truth((4, 4))
     coarse = delivery(half=20, shape=(4, 4), spacing=0.33, truth=truth)
     coarse["memory"] = BUDGET
-    refused = sc.admit_grid(**coarse, profile=sc.PrefilteredKernelProfile())
-    assert refused.reason_bits == sc.Reason.KERNEL_MARGIN_FAIL
+    refused = sc.admit_grid(**coarse, profile=PrefilteredKernelProfile())
+    assert refused.reason_bits == Reason.KERNEL_MARGIN_FAIL
     assert sc.admit_grid(**coarse).admitted
     data = full["data"]
     small = {**data, "memory": sc.MemoryBudget(100_000_000, 10_000_000, 10**6, 10**9)}
     assert (
-        sc.admit_grid(**small, profile=sc.PrefilteredKernelProfile()).reason_bits
-        == sc.Reason.MEMORY_LIMIT
+        sc.admit_grid(**small, profile=PrefilteredKernelProfile()).reason_bits
+        == Reason.MEMORY_LIMIT
     )
     estimate = full["reader"].memory_estimate(1)
     # The coefficients replace the samples: one resident table.
@@ -428,7 +429,7 @@ def test_margin_memory_policy_and_precision(full):
     )
     result = bounded.read(jnp.array([0.1, 0.2]), jnp.int32(0))
     assert not bool(result.accepted) and bool(result.sampling_ok)
-    assert int(result.status) == sc.Status.REFUSED
+    assert int(result.status) == Status.REFUSED
     # The design is cached by its arguments; the precision check is not.
     cached = (7, 12, 0.29, 31, False, (12, 14))
     design_axis(*cached)
@@ -449,7 +450,7 @@ def test_batch_checks_and_node_reads(full):
     design = figures(reader.design)
     allowance = 1.5 * design["tone_error_two_axis"] * full["norm"]
     queries = jnp.array([[0.137, -0.219], [0.3, 0.56], [9.0, 0.0]])
-    batch = sc.read_batch(reader, queries, jnp.zeros(3, dtype=jnp.int32))
+    batch = read_batch(reader, queries, jnp.zeros(3, dtype=jnp.int32))
     assert batch.accepted.tolist() == [True, True, False]
     for index in range(2):
         single = reader.read(queries[index], jnp.int32(0))
@@ -457,8 +458,8 @@ def test_batch_checks_and_node_reads(full):
             batch.intensity[index], single.intensity, rtol=1e-13, atol=0
         )
     with pytest.raises(sc.ReadRefused):
-        sc.require_read(batch)
-    empty = sc.read_batch(reader, jnp.zeros((0, 2)), jnp.zeros(0, dtype=jnp.int32))
+        require_read(batch)
+    empty = read_batch(reader, jnp.zeros((0, 2)), jnp.zeros(0, dtype=jnp.int32))
     assert empty.intensity.shape == (0, *data["products"].pixels.shape)
     node = jnp.array([0.3, 0.56])
     stored = truth(node)
@@ -466,7 +467,7 @@ def test_batch_checks_and_node_reads(full):
     assert 0.0 < deviation <= allowance
     positions = jnp.array([[0.41, -0.77], [-1.2, 0.3]])
     images = jax.vmap(truth)(positions)
-    checks = sc.CheckSet(
+    checks = CheckSet(
         positions,
         images,
         jnp.zeros(2, dtype=jnp.int32),
@@ -475,10 +476,10 @@ def test_batch_checks_and_node_reads(full):
         "closed_form",
         "synthetic",
     )
-    profile = sc.PrefilteredKernelProfile()
+    profile = PrefilteredKernelProfile()
     admission = sc.admit_grid(**data, profile=profile, checks=checks)
     assert 0.0 < admission.receipt.empirical_max_abs <= allowance
-    checked = sc.PrefilteredReader(
+    checked = PrefilteredReader(
         admission.require(),
         data["domain"],
         profile,
@@ -487,9 +488,7 @@ def test_batch_checks_and_node_reads(full):
         data["memory"],
     )
     result = checked.read(positions[0], jnp.int32(0))
-    assert int(result.reason_bits) == (
-        sc.Reason.BOUND_UNKNOWN | sc.Reason.EMPIRICAL_ONLY
-    )
+    assert int(result.reason_bits) == (Reason.BOUND_UNKNOWN | Reason.EMPIRICAL_ONLY)
     np.testing.assert_allclose(
         result.empirical_max_abs, admission.receipt.empirical_max_abs
     )
@@ -567,14 +566,14 @@ def test_coefficient_grid_is_not_read_as_samples(full):
     """
     grid, data = full["reader"].grid, full["data"]
     assert grid.stored == "prefiltered_coefficients"
-    profile = sc.PrefilteredKernelProfile()
+    profile = PrefilteredKernelProfile()
     with pytest.raises(ValueError, match="samples"):
-        sc.PrefilteredReader(
+        PrefilteredReader(
             grid, data["domain"], profile, sc.ReadPolicy(), sc.Tiling(), data["memory"]
         )
     raw = dataclasses.replace(grid, profile_id="")
     with pytest.raises(ValueError, match="samples"):
-        sc.Interpolator(
+        Interpolator(
             raw,
             data["domain"],
             sc.KernelProfile(),

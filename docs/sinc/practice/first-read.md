@@ -66,6 +66,8 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import Status, reason_names
+from yippy.sinc.reader import Interpolator, read_batch, require_read
 import toy_coronagraph as tc
 
 toy = tc.ToyCoronagraph()
@@ -158,7 +160,7 @@ usable grid or explains why not.
 ```{code-cell} python
 admission = sc.admit_grid(**delivery)
 print("admitted:", admission.admitted)
-print("reasons:", sc.reason_names(admission.reason_bits))
+print("reasons:", reason_names(admission.reason_bits))
 print("receipt:", admission.receipt.identity[:16], "...")
 ```
 
@@ -176,7 +178,7 @@ time, which sets its scratch memory) and a memory budget (the byte ceilings
 that reads and admission may not exceed).
 
 ```{code-cell} python
-reader = sc.Interpolator(
+reader = Interpolator(
     admission.require(),
     delivery["domain"],
     sc.KernelProfile(),
@@ -187,7 +189,7 @@ reader = sc.Interpolator(
 result = reader.read(jnp.array([4.0, 0.3]), jnp.int32(0))
 print("accepted:", bool(result.accepted), " shape:", result.intensity.shape)
 print("error bound:", float(result.abs_error_bound))
-print("reasons:", sc.reason_names(int(result.reason_bits)))
+print("reasons:", reason_names(int(result.reason_bits)))
 ```
 
 The call `reader.read(position, product)` takes a source position and a
@@ -264,7 +266,7 @@ rng = np.random.default_rng(1)
 radius = rng.uniform(0.5, 4.8, 60)
 angle = rng.uniform(0, 2 * np.pi, 60)
 positions = jnp.asarray(np.stack([radius * np.cos(angle), radius * np.sin(angle)], 1))
-batch = eqx.filter_jit(sc.read_batch)(reader, positions, jnp.zeros(60, dtype=jnp.int32))
+batch = eqx.filter_jit(read_batch)(reader, positions, jnp.zeros(60, dtype=jnp.int32))
 print("all accepted:", bool(batch.accepted.all()), " images:", batch.intensity.shape)
 ```
 
@@ -356,11 +358,11 @@ positions on the $x$ axis, one between the permission box (half-width
 for x in (5.3, 6.5):
     outside = reader.read(jnp.array([x, 0.0]), jnp.int32(0))
     print(f"x = {x}: accepted:", bool(outside.accepted),
-          " status:", sc.Status(int(outside.status)).name,
+          " status:", Status(int(outside.status)).name,
           " image is NaN:", bool(np.isnan(np.asarray(outside.intensity)).all()))
-    print("  reasons:", sc.reason_names(int(outside.reason_bits)))
+    print("  reasons:", reason_names(int(outside.reason_bits)))
 try:
-    sc.require_read(outside)
+    require_read(outside)
 except sc.ReadRefused as err:
     print("ReadRefused:", type(err).__name__)
 ```

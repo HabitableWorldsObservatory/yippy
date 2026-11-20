@@ -5,7 +5,10 @@ import jax.numpy as jnp
 from optixstuff.grids import Frame, PixelGrid
 
 import yippy.sinc as sc
-from yippy.sinc.geometry import origin_xy, spacing_xy
+from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
+from yippy.sinc.grid import MirrorCheckSet, Normalization, Reflection
+from yippy.sinc.kernel import PrefilteredKernelProfile
+from yippy.sinc.reader import Interpolator, PrefilteredReader
 
 
 def analytic(source, asymmetric=False, shape=(8, 6)):
@@ -40,7 +43,7 @@ def delivery(
     spacing = jnp.broadcast_to(jnp.asarray(spacing, dtype=jnp.float64), (2,))
     count = tuple(int(n) + 1 if quadrant else 2 * int(n) + 1 for n in half)
     origin = jnp.zeros(2) if quadrant else -half * spacing
-    lattice = sc.source_grid(
+    lattice = source_grid(
         origin, spacing, (count[1], count[0]), Frame(500.0, 6.0, "circumscribed")
     )
     iy, ix = jnp.indices(lattice.shape, dtype=jnp.int32)
@@ -57,7 +60,7 @@ def delivery(
     )
     products = sc.Products(
         pixels,
-        sc.Normalization(
+        Normalization(
             "incident_photon", jnp.array([1.0]), jnp.array([jnp.nan]), (), "units"
         ),
         "monochromatic",
@@ -75,7 +78,7 @@ def delivery(
         "mono",
         "synthetic",
     )
-    reflection = sc.Reflection(
+    reflection = Reflection(
         "two_axis_pixel_flip_v1" if quadrant else "none",
         jnp.full(2, quadrant),
         "declaration",
@@ -91,7 +94,7 @@ def delivery(
     if quadrant:
         signed = jnp.array([[-1, 1], [1, -1], [-1, -1]], dtype=jnp.int32)
         positions = signed * spacing
-        mirrors = sc.MirrorCheckSet(
+        mirrors = MirrorCheckSet(
             positions,
             signed,
             jax.vmap(truth)(positions),
@@ -160,9 +163,9 @@ def tone_delivery(
 
 
 def make_prefiltered(data, taps=7, tiling=None):
-    profile = sc.PrefilteredKernelProfile(taps=taps)
+    profile = PrefilteredKernelProfile(taps=taps)
     admission = sc.admit_grid(**data, profile=profile)
-    reader = sc.PrefilteredReader(
+    reader = PrefilteredReader(
         admission.require(),
         data["domain"],
         profile,
@@ -176,7 +179,7 @@ def make_prefiltered(data, taps=7, tiling=None):
 def make_reader(data):
     admission = sc.admit_grid(**data)
     grid = admission.require()
-    return sc.Interpolator(
+    return Interpolator(
         grid,
         data["domain"],
         sc.KernelProfile(),

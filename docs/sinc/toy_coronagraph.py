@@ -15,6 +15,9 @@ import jax.numpy as jnp
 from optixstuff.grids import Frame, Measure, PixelGrid
 
 import yippy.sinc as sc
+from yippy.sinc.geometry import source_grid
+from yippy.sinc.grid import MirrorCheckSet, Normalization, Reflection
+from yippy.sinc.reader import Interpolator
 
 jax.config.update("jax_enable_x64", True)
 
@@ -122,7 +125,7 @@ def products_for(toy, *, identity="toy-lyot"):
     )
     return sc.Products(
         pixels=pixels,
-        normalization=sc.Normalization(
+        normalization=Normalization(
             "incident_photon",
             jnp.array([1.0]),
             jnp.array([jnp.nan]),
@@ -162,7 +165,7 @@ def quadrant_delivery(toy=None, *, spacing=0.38, nodes=31, domain_half=5.0):
         A dict ready for ``yippy.sinc.admit_grid(**delivery)``.
     """
     toy = ToyCoronagraph() if toy is None else toy
-    lattice = sc.source_grid(
+    lattice = source_grid(
         jnp.zeros(2),
         jnp.full(2, spacing),
         (nodes, nodes),
@@ -172,7 +175,7 @@ def quadrant_delivery(toy=None, *, spacing=0.38, nodes=31, domain_half=5.0):
     indices = jnp.stack((ix.ravel(), iy.ravel()), axis=1)
     offsets = indices * spacing
     signed = jnp.array([[-3, 2], [3, -2], [-3, -2]], dtype=jnp.int32)
-    mirrors = sc.MirrorCheckSet(
+    mirrors = MirrorCheckSet(
         signed * spacing,
         signed,
         toy.psf(signed * spacing),
@@ -185,7 +188,7 @@ def quadrant_delivery(toy=None, *, spacing=0.38, nodes=31, domain_half=5.0):
         declared_lattice=lattice,
         indices_xy=indices,
         products=products_for(toy),
-        reflection=sc.Reflection(
+        reflection=Reflection(
             "two_axis_pixel_flip_v1",
             jnp.array([True, True]),
             "toy-symmetry-declaration",
@@ -208,7 +211,7 @@ def quadrant_delivery(toy=None, *, spacing=0.38, nodes=31, domain_half=5.0):
 def reader_for(delivery):
     """Admit a delivery and return an ``Interpolator`` over its domain."""
     grid = sc.admit_grid(**delivery).require()
-    return sc.Interpolator(
+    return Interpolator(
         grid,
         delivery["domain"],
         sc.KernelProfile(),

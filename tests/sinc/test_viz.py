@@ -19,7 +19,9 @@ import numpy as np
 
 import yippy.sinc as sc
 from yippy.sinc import viz
-from yippy.sinc.kernel import KernelProfile, stencil
+from yippy.sinc.evidence import Receipt
+from yippy.sinc.geometry import source_grid
+from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile, stencil
 
 # tol_colors builds its palettes with Matplotlib's pending-deprecated set_bad;
 # eyepiece's suite uses the same narrow upstream compatibility filter.
@@ -182,7 +184,7 @@ def test_stencil_callable_samples():
     ],
 )
 def test_coverage_geometry_and_update(quadrant, origin, expected):
-    lattice = sc.source_grid(
+    lattice = source_grid(
         jnp.array(origin),
         jnp.array([0.25, 0.5]),
         (40, 48),
@@ -351,7 +353,7 @@ def test_read_display_limits_and_colorbar_switch():
 
 
 def test_receipt_zeros_and_nan_counts():
-    receipt = sc.Receipt(
+    receipt = Receipt(
         empirical_local_peak=(0.0, 0.0, np.nan, 2e-5),
         mirror_local_peak=(0.0, 1e-8),
         axis_relative=(np.nan, 3e-7, 0.0),
@@ -539,6 +541,6 @@ def test_stencil_viz_source_arguments(tone_full):
     with pytest.raises(ValueError, match="supplies its own"):
         viz.plot_stencil_2d((0.0, 0.0), tone_full["reader"], profile=KernelProfile())
     with pytest.raises(ValueError, match="needs the beta and scale"):
-        viz.plot_stencil_2d((0.0, 0.0), lattice, profile=sc.PrefilteredKernelProfile())
+        viz.plot_stencil_2d((0.0, 0.0), lattice, profile=PrefilteredKernelProfile())
     with pytest.raises(ValueError, match="exactly one"):
         viz.plot_stencil(0.0)

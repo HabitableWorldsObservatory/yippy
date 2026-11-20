@@ -108,6 +108,47 @@ class MemoryBudget(eqx.Module):
         if any(type(n) is not int or n <= 0 for n in values):
             raise ValueError("Memory budgets must be positive integer byte limits")
 
+    def check(self, estimates):
+        """Raise MemoryLimit when any logical allocation exceeds its ceiling."""
+        for key in ("resident", "output", "scratch", "total"):
+            if estimates[key] > getattr(self, f"max_{key}_bytes"):
+                raise MemoryLimit(
+                    f"{key} estimate {estimates[key]} bytes exceeds budget"
+                )
+
+    @classmethod
+    def for_table(
+        cls,
+        resident_bytes,
+        shape_yx,
+        *,
+        profile=None,
+        supplied=None,
+        queries=1024,
+        extra_output_bytes=0,
+        extra_resident_bytes=0,
+    ):
+        """Check admission memory or size a budget for admission and batched reads."""
+        admission = estimate_memory(
+            resident_bytes, shape_yx, Tiling(), 1, admission=True, profile=profile
+        )
+        for key in ("resident", "total"):
+            admission[key] += extra_resident_bytes
+        if supplied is not None:
+            supplied.check(admission)
+            return supplied
+        batch = estimate_memory(
+            resident_bytes, shape_yx, Tiling(), queries, profile=profile
+        )
+        for key in ("resident", "total"):
+            batch[key] += extra_resident_bytes
+        ceilings = {key: max(admission[key], batch[key]) for key in admission}
+        for key in ("output", "total"):
+            ceilings[key] += extra_output_bytes
+        return cls(
+            *(int(ceilings[key]) for key in ("resident", "output", "scratch", "total"))
+        )
+
 
 def estimate_memory(
     resident_bytes, shape_yx, tiling, queries, *, admission=False, profile=None
@@ -165,13 +206,6 @@ def estimate_memory(
         staging=staging,
         total=resident + output + scratch + staging,
     )
-
-
-def check_memory(memory, estimates):
-    """Raise MemoryLimit when any logical allocation exceeds its ceiling."""
-    for key in ("resident", "output", "scratch", "total"):
-        if estimates[key] > getattr(memory, f"max_{key}_bytes"):
-            raise MemoryLimit(f"{key} estimate {estimates[key]} bytes exceeds budget")
 
 
 class ImageRead(eqx.Module):
@@ -288,7 +322,7 @@ class AbstractGridReader(AbstractImageReader):
             jnp.all(self.grid.reflection.check_passed)
         ):
             raise ValueError("Reflection checks have not passed")
-        check_memory(self.memory, self.memory_estimate(1))
+        self.memory.check(self.memory_estimate(1))
 
     def memory_estimate(self, queries):
         """Estimate this reader's allocations for ``queries`` serial reads."""
@@ -338,7 +372,7 @@ class AbstractGridReader(AbstractImageReader):
         query, product = jnp.asarray(source_xy_lod), jnp.asarray(product_index)
         check_array(query, (2,), (jnp.float64,))
         check_array(product, (), (jnp.int32,))
-        check_memory(self.memory, self.memory_estimate(1))
+        self.memory.check(self.memory_estimate(1))
         sanitized, sampling_ok, reason = self._validate(query, product)
         temporary_product = jnp.where(
             (product >= 0) & (product < self.products.wavelength_nm.size), product, 0
@@ -488,7 +522,7 @@ class PrefilteredReader(AbstractGridReader):
         self.grid, self.domain, self.profile = grid, domain, profile
         self.policy, self.tiling, self.memory = policy, tiling, memory
         self._safe_query, self.errors = _bind_evidence(grid, domain, profile)
-        check_memory(memory, self.memory_estimate(1))
+        memory.check(self.memory_estimate(1))
         designs = design_grid(
             profile,
             grid.products,
@@ -565,7 +599,7 @@ def read_batch(
         if gridded
         else estimate_memory(0, reader.products.pixels.shape, tiling, count)
     )
-    check_memory(reader.memory, estimates)
+    reader.memory.check(estimates)
     if count == 0:
         if gridded:
             ledger = reader.errors.evaluate(
@@ -636,36 +670,4 @@ def make_reader(grid, domain, *, profile, policy=None, tiling=None, memory):
         ReadPolicy() if policy is None else policy,
         Tiling() if tiling is None else tiling,
         memory,
-    )
-
-
-def memory_budget(
-    resident_bytes,
-    shape_yx,
-    *,
-    profile=None,
-    supplied=None,
-    queries=1024,
-    extra_output_bytes=0,
-    extra_resident_bytes=0,
-):
-    """Check admission memory or size a budget for admission and batched reads."""
-    admission = estimate_memory(
-        resident_bytes, shape_yx, Tiling(), 1, admission=True, profile=profile
-    )
-    for key in ("resident", "total"):
-        admission[key] += extra_resident_bytes
-    if supplied is not None:
-        check_memory(supplied, admission)
-        return supplied
-    batch = estimate_memory(
-        resident_bytes, shape_yx, Tiling(), queries, profile=profile
-    )
-    for key in ("resident", "total"):
-        batch[key] += extra_resident_bytes
-    ceilings = {key: max(admission[key], batch[key]) for key in admission}
-    for key in ("output", "total"):
-        ceilings[key] += extra_output_bytes
-    return MemoryBudget(
-        *(int(ceilings[key]) for key in ("resident", "output", "scratch", "total"))
     )

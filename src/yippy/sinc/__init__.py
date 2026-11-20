@@ -1,134 +1,37 @@
-"""Sampling-admitted intensity grids and windowed-sinc reads."""
+"""Sampling-admitted intensity grids and windowed-sinc reads.
 
-from yippy.sinc.admission import (
-    MIRROR_TOLERANCE,
-    index_reasons,
-    judge_checks,
-    lattice_reasons,
-    offset_evidence,
-    plan_spacing,
-    sampling_ratio,
-    sampling_reasons,
-    select_profile,
-    spectral_reasons,
-    valid_intensity,
-    validate_declarations,
-)
-from yippy.sinc.domain import (
-    Domain,
-    coverage,
-    restrict_domain,
-    validate_check_positions,
-)
+The package exports what a caller of ``SincOptions`` and a scene caller need.
+Admission rules, planners, evidence types and the reader internals stay
+importable from their own modules (``yippy.sinc.admission``, ``.planner``,
+``.evidence``, ``.reader``, ``.kernel``).
+"""
+
+from yippy.sinc.domain import Domain
 from yippy.sinc.evidence import (
-    Admission,
     AdmissionRefused,
-    BoundKind,
-    LedgerEvidence,
     MemoryLimit,
-    PlanRefused,
     PrecisionUnavailable,
     ReadRefused,
-    Reason,
-    Receipt,
-    Status,
-    reason_names,
 )
-from yippy.sinc.geometry import source_grid
-from yippy.sinc.grid import (
-    CheckSet,
-    MirrorCheckSet,
-    Normalization,
-    Premises,
-    Products,
-    Reflection,
-    SampledGrid,
-    admit_grid,
-)
-from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile
-from yippy.sinc.planner import (
-    PrefilterPlan,
-    plan_cell_checks,
-    plan_mirror_bases,
-    plan_prefilter,
-    plan_radial_checks,
-    plan_sampling,
-)
-from yippy.sinc.reader import (
-    AbstractImageReader,
-    ImageRead,
-    Interpolator,
-    MemoryBudget,
-    PrefilteredReader,
-    ReadPolicy,
-    Tiling,
-    check_memory,
-    estimate_memory,
-    make_reader,
-    memory_budget,
-    read_batch,
-    require_read,
-)
+from yippy.sinc.grid import Premises, Products, SampledGrid, admit_grid
+from yippy.sinc.kernel import KernelProfile
+from yippy.sinc.reader import MemoryBudget, ReadPolicy, Tiling, make_reader
 from yippy.sinc.scene import SceneRenderer
 
 __all__ = [
-    "MIRROR_TOLERANCE",
-    "AbstractImageReader",
-    "Admission",
     "AdmissionRefused",
-    "BoundKind",
-    "CheckSet",
     "Domain",
-    "ImageRead",
-    "Interpolator",
     "KernelProfile",
-    "LedgerEvidence",
     "MemoryBudget",
     "MemoryLimit",
-    "MirrorCheckSet",
-    "Normalization",
-    "PlanRefused",
     "PrecisionUnavailable",
-    "PrefilterPlan",
-    "PrefilteredKernelProfile",
-    "PrefilteredReader",
     "Premises",
     "Products",
     "ReadPolicy",
     "ReadRefused",
-    "Reason",
-    "Receipt",
-    "Reflection",
     "SampledGrid",
     "SceneRenderer",
-    "Status",
     "Tiling",
     "admit_grid",
-    "check_memory",
-    "coverage",
-    "estimate_memory",
-    "index_reasons",
-    "judge_checks",
-    "lattice_reasons",
     "make_reader",
-    "memory_budget",
-    "offset_evidence",
-    "plan_cell_checks",
-    "plan_mirror_bases",
-    "plan_prefilter",
-    "plan_radial_checks",
-    "plan_sampling",
-    "plan_spacing",
-    "read_batch",
-    "reason_names",
-    "require_read",
-    "restrict_domain",
-    "sampling_ratio",
-    "sampling_reasons",
-    "select_profile",
-    "source_grid",
-    "spectral_reasons",
-    "valid_intensity",
-    "validate_check_positions",
-    "validate_declarations",
 ]

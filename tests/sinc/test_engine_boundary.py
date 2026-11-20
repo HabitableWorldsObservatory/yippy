@@ -40,3 +40,14 @@ def test_engine_does_not_import_astropy():
         if module.split(".")[0] == "astropy"
     ]
     assert not offenders
+
+
+def test_engine_surface_is_small():
+    assert len(yippy.sinc.__all__) <= 15
+
+
+def test_kernel_weights_and_stencil_stay_importable():
+    from yippy.sinc.kernel import stencil, weights
+
+    assert callable(weights)
+    assert callable(stencil)

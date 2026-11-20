@@ -30,7 +30,8 @@ from .header import HeaderData
 from .interpolation import SincOptions
 from .sampling import fraction_image
 from .scene import DenseSceneOperator
-from .sinc import PrefilteredReader, SceneRenderer
+from .sinc import SceneRenderer
+from .sinc.reader import PrefilteredReader
 
 
 def _jax_record(record):

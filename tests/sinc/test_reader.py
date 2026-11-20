@@ -9,13 +9,15 @@ import numpy as np
 import pytest
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import BoundKind, Reason, Status
 from yippy.sinc.geometry import origin_xy, spacing_xy
 from yippy.sinc.kernel import stencil
+from yippy.sinc.reader import read_batch, require_read
 
 from .helpers import analytic, delivery, make_reader
 
 compiled_read = eqx.filter_jit(lambda reader, q, p: reader.read(q, p))
-compiled_batch = eqx.filter_jit(sc.read_batch)
+compiled_batch = eqx.filter_jit(read_batch)
 
 
 def test_off_node_analytic_and_scale(full_reader):
@@ -29,9 +31,9 @@ def test_off_node_analytic_and_scale(full_reader):
     image = compiled_read(full_reader, q, jnp.int32(0))
     expected = analytic(q)
     np.testing.assert_allclose(image.intensity, expected, atol=3e-7, rtol=0)
-    assert image.accepted and image.status == sc.Status.SAMPLING_ADMITTED
-    assert image.reason_bits == sc.Reason.BOUND_UNKNOWN
-    assert not image.bound_available and image.bound_kind == sc.BoundKind.UNKNOWN
+    assert image.accepted and image.status == Status.SAMPLING_ADMITTED
+    assert image.reason_bits == Reason.BOUND_UNKNOWN
+    assert not image.bound_available and image.bound_kind == BoundKind.UNKNOWN
     assert math.isinf(float(image.abs_error_bound))
     assert not bool(image.ledger.applicable[-1])
     scaled = eqx.tree_at(
@@ -149,7 +151,7 @@ def test_asymmetric_full_and_quadrant_refusal():
     )
     refused = sc.admit_grid(**delivery(quadrant=True, asymmetric=True))
     assert not refused.admitted
-    assert refused.reason_bits & sc.Reason.SYMMETRY_CHECK_FAILED
+    assert refused.reason_bits & Reason.SYMMETRY_CHECK_FAILED
 
 
 def test_mixed_batch_and_empty(full_reader):
@@ -162,21 +164,21 @@ def test_mixed_batch_and_empty(full_reader):
     np.testing.assert_array_equal(result.accepted, [True, False, False, False, False])
     assert bool(jnp.all(jnp.isnan(result.intensity[1:])))
     for index, reason in (
-        (1, sc.Reason.NONFINITE_QUERY),
-        (2, sc.Reason.OUTSIDE_DOMAIN),
-        (3, sc.Reason.PRODUCT_UNAVAILABLE),
-        (4, sc.Reason.INCOMPLETE_STENCIL),
+        (1, Reason.NONFINITE_QUERY),
+        (2, Reason.OUTSIDE_DOMAIN),
+        (3, Reason.PRODUCT_UNAVAILABLE),
+        (4, Reason.INCOMPLETE_STENCIL),
     ):
         assert int(result.reason_bits[index]) & reason
     with pytest.raises(sc.ReadRefused) as caught:
-        sc.require_read(result)
+        require_read(result)
     assert caught.value.indices == (1, 2, 3, 4)
     empty = compiled_batch(
         full_reader, jnp.empty((0, 2)), jnp.empty(0, dtype=jnp.int32)
     )
     assert all(leaf.shape[0] == 0 for leaf in jax.tree_util.tree_leaves(empty))
     assert empty.ledger.term_ids == result.ledger.term_ids
-    sc.require_read(empty)
+    require_read(empty)
 
 
 def test_bounded_refuses_sampling_remains_ok(full_reader):
@@ -186,8 +188,8 @@ def test_bounded_refuses_sampling_remains_ok(full_reader):
     )
     result = compiled_read(bounded, jnp.array([0.1, 0.2]), jnp.int32(0))
     assert result.sampling_ok and not result.accepted
-    assert result.status == sc.Status.REFUSED
-    assert result.reason_bits == sc.Reason.BOUND_UNKNOWN
+    assert result.status == Status.REFUSED
+    assert result.reason_bits == Reason.BOUND_UNKNOWN
     assert bool(jnp.all(jnp.isnan(result.intensity)))
 
 

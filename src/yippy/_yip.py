@@ -24,7 +24,7 @@ from .logger import logger
 from .offjax import OffJAX
 from .performance import _iter_xaxis_positions
 from .sampling import fraction_image
-from .sinc import Reason
+from .sinc.evidence import Reason
 from .sky_trans import sky_transmission_image
 from .stellar_intens import StellarIntens
 from .util import (

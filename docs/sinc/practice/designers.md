@@ -40,6 +40,8 @@ from myst_nb import glue
 from validation_tables import load
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import reason_names
+from yippy.sinc.geometry import source_grid
 from yippy.sinc import viz
 import toy_coronagraph as tc
 
@@ -81,7 +83,7 @@ to right. Each of the five panels adds one quantity to the previous one:
 from optixstuff.grids import Frame
 fig, ax = plt.subplots(figsize=(10, 2.6), constrained_layout=True)
 viz.plot_spacing_rule(
-    lattice=sc.source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 27), Frame(500.0, 6.0, "circumscribed")),
+    lattice=source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 27), Frame(500.0, 6.0, "circumscribed")),
     support_width=1.0,
     ax=ax,
 )
@@ -169,7 +171,7 @@ which case reads outside the small cell would be supported but unqualified.
 ```{code-cell} python
 :tags: [hide-input]
 from optixstuff.grids import Frame
-starter = sc.source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 27), Frame(500.0, 6.0, "circumscribed"))
+starter = source_grid(jnp.zeros(2), jnp.full(2, 0.38), (31, 27), Frame(500.0, 6.0, "circumscribed"))
 cell = sc.Domain("box", "lower_closed_upper_open",
                  jnp.array([[3.8, 5.32], [4.18, 5.70]]), jnp.zeros(2))
 fig, ax = plt.subplots(figsize=(6, 6), constrained_layout=True)
@@ -233,7 +235,7 @@ for name, shift in cases.items():
     admission = sc.admit_grid(**delivery)
     receipts[name] = admission.receipt
     print(f"{name}: admitted={admission.admitted}, "
-          f"reasons={sc.reason_names(admission.reason_bits)}")
+          f"reasons={reason_names(admission.reason_bits)}")
     print("   mirror residuals (x-neg, y-neg, both-neg):",
           ", ".join(f"{v:.1e}" for v in admission.receipt.mirror_local_peak))
 diagonal = receipts["pupil shifted diagonally"].mirror_local_peak

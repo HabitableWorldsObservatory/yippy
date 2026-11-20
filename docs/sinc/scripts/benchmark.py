@@ -37,6 +37,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import yippy.sinc as sc  # noqa: E402
+from yippy.sinc.reader import Interpolator, read_batch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validation_figures as vf  # noqa: E402
@@ -99,7 +100,7 @@ def positions(count, seed):
 def make_reader(grid, arguments):
     """An Interpolator with room for a 1e4-position batch of output."""
     memory = sc.MemoryBudget(2 * GIB, 2 * GIB, GIB, 8 * GIB)
-    return sc.Interpolator(
+    return Interpolator(
         grid,
         arguments["domain"],
         sc.KernelProfile(),
@@ -124,7 +125,7 @@ def bench_readers(grids, arguments, rounds=3, small=200):
     out, jitted = {}, {}
     for label, reader in readers.items():
         one = eqx.filter_jit(reader.read)
-        batch = eqx.filter_jit(sc.read_batch)
+        batch = eqx.filter_jit(read_batch)
         start = time.perf_counter()
         sync(one(q1, product))
         first = time.perf_counter() - start
@@ -162,7 +163,7 @@ def bench_readers(grids, arguments, rounds=3, small=200):
         count = 10000
         q = jnp.asarray(positions(count, 3))
         p = jnp.zeros(count, dtype=jnp.int32)
-        batch = eqx.filter_jit(sc.read_batch)
+        batch = eqx.filter_jit(read_batch)
         start = time.perf_counter()
         sync(batch(reader, q, p))
         total = time.perf_counter() - start
@@ -180,6 +181,7 @@ def bench_readers(grids, arguments, rounds=3, small=200):
 def bench_blend(root, count_batch=10000, chunk=100):
     """Time yippy's blend interpolation on the same kind of positions."""
     from lod_unit import lod
+
     from yippy.offjax import OffJAX
 
     off = OffJAX(

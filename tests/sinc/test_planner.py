@@ -2,14 +2,16 @@
 
 import pytest
 
-import yippy.sinc as sc
+from yippy.sinc.evidence import PlanRefused, Reason
+from yippy.sinc.kernel import PrefilteredKernelProfile
+from yippy.sinc.planner import plan_prefilter
 from yippy.sinc.prefilter import _design_axis
 
 from .helpers import delivery, tone_truth
 
 
 def plan(data, max_tone_error):
-    return sc.plan_prefilter(
+    return plan_prefilter(
         declared_lattice=data["declared_lattice"],
         products=data["products"],
         reflection=data["reflection"],
@@ -28,7 +30,7 @@ def test_plan_picks_fewest_taps_and_admission_reuses_it(tone_full):
     data = tone_full["data"]
     seven = plan(data, 3e-5)
     assert seven.planned and seven.reason_bits == 0
-    assert seven.require() == sc.PrefilteredKernelProfile(taps=7)
+    assert seven.require() == PrefilteredKernelProfile(taps=7)
     assert [taps for taps, _ in seven.candidates] == [5, 6, 7]
     errors = [error for _, error in seven.candidates]
     assert errors[0] > errors[1] > 3e-5 >= errors[2] == seven.tone_error_two_axis
@@ -52,21 +54,21 @@ def test_plan_refusals():
     small = delivery(half=18, shape=(4, 4), spacing=0.3, truth=truth)
     refused = plan(small, 1e-12)
     assert not refused.planned and refused.profile is None
-    assert refused.reason_bits == sc.Reason.TOLERANCE_EXCEEDED
+    assert refused.reason_bits == Reason.TOLERANCE_EXCEEDED
     assert [taps for taps, _ in refused.candidates] == [5, 6, 7, 8, 9, 10]
-    with pytest.raises(sc.PlanRefused, match="TOLERANCE_EXCEEDED") as caught:
+    with pytest.raises(PlanRefused, match="TOLERANCE_EXCEEDED") as caught:
         refused.require()
     assert caught.value.plan is refused
-    assert caught.value.reason_bits == sc.Reason.TOLERANCE_EXCEEDED
+    assert caught.value.reason_bits == Reason.TOLERANCE_EXCEEDED
     coarse = delivery(half=18, shape=(4, 4), spacing=0.33, truth=truth)
-    assert plan(coarse, 1e-3).reason_bits == sc.Reason.KERNEL_MARGIN_FAIL
+    assert plan(coarse, 1e-3).reason_bits == Reason.KERNEL_MARGIN_FAIL
     aliased = delivery(half=18, shape=(4, 4), spacing=0.55, truth=truth)
     assert plan(aliased, 1e-3).reason_bits == (
-        sc.Reason.NYQUIST_FAIL | sc.Reason.KERNEL_MARGIN_FAIL
+        Reason.NYQUIST_FAIL | Reason.KERNEL_MARGIN_FAIL
     )
     tiny = delivery(half=6, shape=(4, 4), spacing=0.3, truth=truth)
     unserved = plan(tiny, 1e-3)
-    assert unserved.reason_bits == sc.Reason.INCOMPLETE_STENCIL
+    assert unserved.reason_bits == Reason.INCOMPLETE_STENCIL
     assert unserved.candidates == ()
     with pytest.raises(ValueError, match="positive"):
         plan(small, 0.0)

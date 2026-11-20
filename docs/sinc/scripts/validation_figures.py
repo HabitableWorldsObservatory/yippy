@@ -36,6 +36,14 @@ from hwoutils.constants import m2nm  # noqa: E402
 
 import yippy.sinc as sc  # noqa: E402
 from yippy.sinc import viz  # noqa: E402
+from yippy.sinc.geometry import source_grid  # noqa: E402
+from yippy.sinc.grid import (  # noqa: E402
+    CheckSet,
+    MirrorCheckSet,
+    Normalization,
+    Reflection,
+)
+from yippy.sinc.reader import Interpolator, read_batch  # noqa: E402
 
 PREMISES = (
     "entrance_tilt_model",
@@ -97,7 +105,7 @@ def load(root):
                 manifest["coordinate_model"],
             ),
         ),
-        normalization=sc.Normalization(
+        normalization=Normalization(
             "incident_photon",
             jnp.array([plane["photon_conversion"]]),
             jnp.array([np.nan]),
@@ -121,7 +129,7 @@ def load(root):
         spectral_weight_id="monochromatic",
         identity=f"{manifest['delivery_id']}:{plane['id']}",
     )
-    lattice = sc.source_grid(
+    lattice = source_grid(
         jnp.array(manifest["source_origin_lod"], dtype=jnp.float64),
         jnp.array(manifest["source_spacing_lod"], dtype=jnp.float64),
         (int(indices[:, 1].max()) + 1, int(indices[:, 0].max()) + 1),
@@ -133,7 +141,7 @@ def load(root):
         + reflection_meta["response_argument"]
         + manifest["optical_state"]["state_id"]
     )
-    reflection = sc.Reflection(
+    reflection = Reflection(
         reflection_meta["kind"],
         jnp.array([True, True]),
         reflection_meta["declaration_id"],
@@ -151,7 +159,7 @@ def load(root):
     )
     mirror_rows = _rows(root / "starter_mirror_checks.csv")
     mirror_images = fits.getdata(root / manifest["mirror_checks"][0]["psf_path"])
-    mirror = sc.MirrorCheckSet(
+    mirror = MirrorCheckSet(
         jnp.array([[float(r["x_lod"]), float(r["y_lod"])] for r in mirror_rows]),
         jnp.array(
             [[int(r["source_ix"]), int(r["source_iy"])] for r in mirror_rows],
@@ -166,7 +174,7 @@ def load(root):
     check_rows = _rows(root / "starter_checks.csv")
     check_images = fits.getdata(root / "checks/mono-000-float64.fits").astype(float)
     check_xy = np.array([[float(r["x_lod"]), float(r["y_lod"])] for r in check_rows])
-    checks = sc.CheckSet(
+    checks = CheckSet(
         jnp.asarray(check_xy),
         jnp.asarray(check_images),
         jnp.zeros(len(check_rows), dtype=jnp.int32),
@@ -197,7 +205,7 @@ def main(root, out_dir):
     start = time.perf_counter()
     admission = sc.admit_grid(**arguments)
     admit_seconds = time.perf_counter() - start
-    reader = sc.Interpolator(
+    reader = Interpolator(
         admission.require(),
         arguments["domain"],
         sc.KernelProfile(),
@@ -205,7 +213,7 @@ def main(root, out_dir):
         sc.Tiling(pixel_tile=2048),
         arguments["memory"],
     )
-    batch = eqx.filter_jit(sc.read_batch)
+    batch = eqx.filter_jit(read_batch)
     product = jnp.zeros(len(check_xy), dtype=jnp.int32)
     reads = batch(reader, jnp.asarray(check_xy), product)
     jax.block_until_ready(reads.intensity)

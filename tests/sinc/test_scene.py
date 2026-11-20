@@ -9,6 +9,8 @@ from jax.test_util import check_grads
 
 import yippy.sinc as sc
 from yippy.sinc import scene as scene_module
+from yippy.sinc.evidence import Reason, Status
+from yippy.sinc.reader import Interpolator, read_batch
 
 from .helpers import make_prefiltered
 
@@ -19,7 +21,7 @@ render_raster = eqx.filter_jit(
 
 
 def brute(reader, points, flux):
-    reads = sc.read_batch(reader, points, jnp.zeros(points.shape[0], dtype=jnp.int32))
+    reads = read_batch(reader, points, jnp.zeros(points.shape[0], dtype=jnp.int32))
     assert bool(jnp.all(reads.accepted))
     return jnp.einsum("q,qrc->rc", flux, reads.intensity)
 
@@ -53,8 +55,8 @@ def test_points_equal_summed_reads(case):
     scale = case["norm"] * float(jnp.sum(flux))
     np.testing.assert_allclose(result.intensity, expected, rtol=0, atol=1e-12 * scale)
     assert bool(result.accepted) and bool(result.sampling_ok)
-    assert int(result.status) == sc.Status.SAMPLING_ADMITTED
-    assert int(result.reason_bits) == sc.Reason.BOUND_UNKNOWN
+    assert int(result.status) == Status.SAMPLING_ADMITTED
+    assert int(result.reason_bits) == Reason.BOUND_UNKNOWN
     assert not bool(result.bound_available)
     assert np.isinf(float(result.abs_error_bound))
     assert np.isnan(float(result.empirical_max_abs))
@@ -110,12 +112,10 @@ def test_refusals_padding_and_margin(tone_quadrant):
     # (3.0, y) is covered by the table but outside the 2.0 box: one reason only.
     outside = renderer.render_points(points.at[3, 0].set(3.0), flux)
     assert not bool(outside.accepted) and bool(jnp.all(jnp.isnan(outside.intensity)))
-    assert int(outside.reason_bits) == (
-        sc.Reason.OUTSIDE_DOMAIN | sc.Reason.BOUND_UNKNOWN
-    )
-    assert int(outside.status) == sc.Status.REFUSED
+    assert int(outside.reason_bits) == (Reason.OUTSIDE_DOMAIN | Reason.BOUND_UNKNOWN)
+    assert int(outside.status) == Status.REFUSED
     broken = renderer.render_points(points.at[3, 1].set(jnp.nan), flux)
-    assert int(broken.reason_bits) & sc.Reason.NONFINITE_QUERY
+    assert int(broken.reason_bits) & Reason.NONFINITE_QUERY
     for bad in (5.0, jnp.nan):
         padded = renderer.render_points(points.at[3, 0].set(bad), flux.at[3].set(0.0))
         without = renderer.render_points(points, flux.at[3].set(0.0))
@@ -133,7 +133,7 @@ def test_refusals_padding_and_margin(tone_quadrant):
     )
     far = tight.render_points(points * 0.8 + 3 * shift, flux)
     assert not bool(far.accepted)
-    assert int(far.reason_bits) & sc.Reason.INCOMPLETE_STENCIL
+    assert int(far.reason_bits) & Reason.INCOMPLETE_STENCIL
     # A raster moved by four node spacings stays inside the domain and the
     # table's coverage but leaves the node set that was gathered for it.
     x, y = jnp.linspace(-0.5, 0.5, 3), jnp.linspace(-0.5, 0.5, 3)
@@ -145,7 +145,7 @@ def test_refusals_padding_and_margin(tone_quadrant):
     moved_raster = patch.render_raster(scene, x + 1.2, y)
     assert not bool(moved_raster.accepted)
     assert int(moved_raster.reason_bits) == (
-        sc.Reason.INCOMPLETE_STENCIL | sc.Reason.BOUND_UNKNOWN
+        Reason.INCOMPLETE_STENCIL | Reason.BOUND_UNKNOWN
     )
     dark = patch.render_raster(jnp.zeros((3, 3)), x + 1.2, y)
     assert bool(dark.accepted)
@@ -212,7 +212,7 @@ def test_construction_refusals(tone_full):
         sc.SceneRenderer(reader, 1, points)
     with pytest.raises(ValueError, match="margin_nodes"):
         sc.SceneRenderer(reader, 0, points, margin_nodes=-1)
-    raw = sc.Interpolator(
+    raw = Interpolator(
         sc.admit_grid(**data).require(),
         data["domain"],
         sc.KernelProfile(),

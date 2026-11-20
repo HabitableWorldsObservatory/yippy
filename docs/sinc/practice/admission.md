@@ -45,6 +45,7 @@ hwostyle.use("dark")
 pal = hwostyle.palette
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import Reason, reason_names
 import toy_coronagraph as tc
 
 _clips = iter(range(100))
@@ -154,7 +155,7 @@ verdicts = []
 for h in spacings:
     delivery_h = tc.quadrant_delivery(spacing=float(h), nodes=17, domain_half=1.0)
     outcome = sc.admit_grid(**delivery_h)
-    verdicts.append(sc.reason_names(outcome.reason_bits) if not outcome.admitted else ())
+    verdicts.append(reason_names(outcome.reason_bits) if not outcome.admitted else ())
 hold = lambda a, n: np.concatenate([np.full(n, a[0]), a, np.full(n + 3, a[-1])])
 order = hold(np.arange(len(rho_frames)), 3)
 
@@ -219,10 +220,10 @@ that names the fix.
 ## Which refusals can a delivery expect, and what fixes each?
 
 Every reason bit yippy.sinc defines is listed below, generated from the
-`sc.Reason` enumeration so that no bit can be missing. The **When** column
+`Reason` enumeration so that no bit can be missing. The **When** column
 says where the bit can appear: at admission, at read time, at both, or
 reserved (defined, but never set by yippy.sinc itself). A refusal can carry
-several reasons at once, and `sc.reason_names(bits)` lists them.
+several reasons at once, and `reason_names(bits)` lists them.
 
 ```{code-cell} python
 :tags: [remove-input]
@@ -255,9 +256,9 @@ R = {
     "SYMMETRY_CHECK_MISSING": ("admission", "A quadrant grid lacks mirror checks, or one of the three negative counterparts", "Propagate the missing mirror checks"),
     "SYMMETRY_REFERENCE_INVALID": ("admission", "A mirror check image is unusable: non-finite or negative values, offsets off the lattice, a missing identifier, or no positive local peak", "Repair the mirror check set"),
 }
-assert {r.name for r in sc.Reason} == set(R), "the table and sc.Reason disagree"
+assert {r.name for r in Reason} == set(R), "the table and Reason disagree"
 rows = ["| Bit | Reason | When | What it means | What to do |", "|---|---|---|---|---|"]
-for reason in sc.Reason:
+for reason in Reason:
     when, meaning, fix = R[reason.name]
     rows.append(f"| {reason.value.bit_length() - 1} | `{reason.name}` | {when} | {meaning} | {fix} |")
 Markdown("\n".join(rows))
@@ -278,7 +279,7 @@ coarse = tc.quadrant_delivery(spacing=0.45, nodes=nodes_needed)
 refused = sc.admit_grid(**coarse)
 print("nodes per axis:", nodes_needed)
 print("admitted:", refused.admitted)
-print("reasons:", sc.reason_names(refused.reason_bits))
+print("reasons:", reason_names(refused.reason_bits))
 try:
     refused.require()
 except sc.AdmissionRefused as err:
@@ -402,7 +403,7 @@ give and in what order, and what it leaves unsaid. The answers, filled in:
 - **From spacing to refusal:** admission computes $\rho=2Bh$ from the declared
   support width and refuses above 0.76, because the kernel's worst-tone error
   rises by a factor near {glue}`a_growth_n` between $h=0.38$ and $h=0.45$.
-- **Reasons:** every bit of `sc.Reason` is in the table, and a refusal lists all
+- **Reasons:** every bit of `Reason` is in the table, and a refusal lists all
   that apply.
 - **Order:** precision and memory end the run alone, then semantic checks,
   then symmetry, then interior checks, as in the flowchart.

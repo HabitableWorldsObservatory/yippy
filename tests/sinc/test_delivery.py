@@ -25,6 +25,7 @@ from yippy._yip import _YIPData
 from yippy.delivery.format import detect_delivery, file_sha256, load_delivery
 from yippy.delivery.routing import route_interpolation
 from yippy.performance import stellar_intensity_curves
+from yippy.sinc.evidence import Reason, Status
 from yippy.util import cache_identity_digest
 
 
@@ -215,7 +216,7 @@ def test_reads_units_refusals(admitted):
         admitted._offaxis_backend.create_psfs_with_info([np.nan], [0.0]),
     )
     assert not refused.accepted
-    assert int(refused.reason_bits) & int(sc.Reason.NONFINITE_QUERY)
+    assert int(refused.reason_bits) & int(Reason.NONFINITE_QUERY)
     assert not admitted.source_psfs(None, np.nan, 0.0).valid[0]
     assert np.isnan(
         eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).image.data
@@ -342,9 +343,9 @@ def test_quadrant_precedence(tmp_path, defect):
         m["detector_center_xy"] = [2.0, 2.0]
     save_manifest(tmp_path, m)
     expected = {
-        "missing": sc.Reason.SYMMETRY_CHECK_MISSING,
-        "failed": sc.Reason.SYMMETRY_CHECK_FAILED,
-        "declaration": sc.Reason.SYMMETRY_UNSUPPORTED,
+        "missing": Reason.SYMMETRY_CHECK_MISSING,
+        "failed": Reason.SYMMETRY_CHECK_FAILED,
+        "declaration": Reason.SYMMETRY_UNSUPPORTED,
     }
     if defect == "center":
         with pytest.raises(ValueError, match=r"Conflicting|midpoint") as caught:
@@ -355,7 +356,7 @@ def test_quadrant_precedence(tmp_path, defect):
             route_interpolation(tmp_path, "auto", None, None)
         assert caught.value.reason_bits & int(expected[defect])
         assert not caught.value.reason_bits & int(
-            sc.Reason.PRECISION_UNAVAILABLE | sc.Reason.FALLBACK_USED
+            Reason.PRECISION_UNAVAILABLE | Reason.FALLBACK_USED
         )
     with pytest.raises(ValueError, match="midpoint-aware"):
         route_interpolation(tmp_path, "blend", None, None)
@@ -386,7 +387,7 @@ def test_auto_fallback_and_bounded(tmp_path):
     result = backend.create_psfs_with_info(jnp.array([0.07, 0.2, np.nan]), jnp.zeros(3))
     np.testing.assert_array_equal(result.selected_backend, [1, 0, 1])
     np.testing.assert_array_equal(result.accepted, [True, True, False])
-    assert int(result.reason_bits[1]) & int(sc.Reason.OUTSIDE_DOMAIN)
+    assert int(result.reason_bits[1]) & int(Reason.OUTSIDE_DOMAIN)
     small_memory = SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1))
     _, _, memory_info = route_interpolation(tmp_path, "auto", small_memory, None)
     assert memory_info.reasons == ("MEMORY_LIMIT",)
@@ -397,7 +398,7 @@ def test_auto_fallback_and_bounded(tmp_path):
     _, fallback, info = route_interpolation(tmp_path, "auto", None, None)
     assert info.effective == "blend"
     assert "NYQUIST_FAIL" in info.reasons
-    assert fallback.create_psf_with_info(0.0, 0.0).status == sc.Status.FALLBACK
+    assert fallback.create_psf_with_info(0.0, 0.0).status == Status.FALLBACK
     with pytest.raises(sc.AdmissionRefused):
         route_interpolation(tmp_path, "sinc", None, None)
     m["support_extent_D"] = [1.0, 1.0]
@@ -789,7 +790,7 @@ def test_missing_admission_metadata(tmp_path, field):
         assert backend.create_psf_with_info(0.0, 0.0).accepted
         with pytest.raises(sc.AdmissionRefused) as caught:
             route_interpolation(tmp_path, "sinc", None, None)
-        assert caught.value.reason_bits == int(sc.Reason.METADATA_MISSING)
+        assert caught.value.reason_bits == int(Reason.METADATA_MISSING)
 
 
 def test_campaign_claim_refuses(tmp_path):

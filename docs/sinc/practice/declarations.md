@@ -31,6 +31,7 @@ import numpy as np
 from myst_nb import glue
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import reason_names
 import toy_coronagraph as tc
 
 jax.config.update("jax_enable_x64", True)
@@ -305,7 +306,7 @@ def refusal(products):
     """Admit the toy delivery with replaced declarations and name the reasons."""
     changed = dict(delivery, products=products)
     admission = sc.admit_grid(**changed)
-    return sc.reason_names(admission.reason_bits)
+    return reason_names(admission.reason_bits)
 
 for index in range(6):
     false = eqx.tree_at(lambda p: p.premises.values, products,

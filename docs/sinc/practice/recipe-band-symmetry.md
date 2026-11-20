@@ -34,6 +34,7 @@ from myst_nb import glue
 from validation_tables import load
 
 import yippy.sinc as sc
+from yippy.sinc.evidence import reason_names
 from yippy.sinc import viz
 import toy_coronagraph as tc
 
@@ -235,7 +236,7 @@ receipts, reasons = {}, {}
 for name, case in cases.items():
     admission = sc.admit_grid(**tc.quadrant_delivery(case))
     receipts[name] = admission.receipt
-    reasons[name] = sc.reason_names(admission.reason_bits)
+    reasons[name] = reason_names(admission.reason_bits)
     print(f"{name}: admitted={admission.admitted}, reasons={reasons[name]}")
     print("   mirror residuals (x-neg, y-neg, both-neg):",
           ", ".join(f"{v:.1e}" for v in admission.receipt.mirror_local_peak))
