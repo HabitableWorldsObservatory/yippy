@@ -72,7 +72,6 @@ def plot_read(
     Example::
 
         import numpy as np
-    from optixstuff.grids import PixelGrid
         from yippy.sinc.viz import plot_read
         result = plot_read(np.ones((8, 10)), pixscale_lod=0.25)
         result.update(np.full((8, 10), 2.0))
@@ -154,7 +153,6 @@ def plot_residual(
     Example::
 
         import numpy as np
-    from optixstuff.grids import PixelGrid
         from yippy.sinc.viz import plot_residual
         truth = np.ones((8, 10))
         result = plot_residual(truth + 1e-6, truth, pixscale_lod=0.25)

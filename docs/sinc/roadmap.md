@@ -94,8 +94,8 @@ unqualified.
 Every stage above adds modules, readers and receipt fields. The version 0.1
 names and signatures (`admit_grid`, `Interpolator`,
 `read_batch`, `require_read`, the reason bits and statuses, all in
-{doc}`autoapi/index`) keep their meaning, existing
+{doc}`/autoapi/index`) keep their meaning, existing
 reads keep their numerical profile, and a missing input still refuses rather
 than being filled in.
 
-Next: {doc}`autoapi/index`.
+Next: {doc}`/autoapi/index`.
