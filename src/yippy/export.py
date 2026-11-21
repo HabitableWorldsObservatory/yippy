@@ -128,19 +128,20 @@ def export_exosims(
 def export_ayo_csv(
     coro: Coronagraph,
     output_path,
-    sep_min: float = 0.125,
-    sep_max: float = 32.0,
-    sep_step: float = 0.25,
-    contrast_floor: float | None = None,
-    ppf: float = 30.0,
+    ppf: float,
     *,
+    separation_min_lod: float = 0.125,
+    separation_max_lod: float = 32.0,
+    separation_step_lod: float = 0.25,
+    contrast_floor: float | None = None,
     separations_lod=None,
 ) -> Path:
     """Write AYO columns using the selected record's interpolation policy.
 
     Point-source contrast is the selected mean leakage density times the
     mean collecting area divided by throughput. The noise-floor column is
-    this contrast divided by ppf, including any requested contrast floor.
+    this contrast divided by ``ppf``, the post-processing factor the caller
+    assumes, including any requested contrast floor.
     Skytrans is the radial sky transmission.
 
     Separations are in lambda/D. A contrast floor applies only when explicitly
@@ -149,7 +150,11 @@ def export_ayo_csv(
     """
     output_path = Path(output_path)
     separations = np.asarray(
-        np.arange(sep_min, sep_max + sep_step / 2, sep_step)
+        np.arange(
+            separation_min_lod,
+            separation_max_lod + separation_step_lod / 2,
+            separation_step_lod,
+        )
         if separations_lod is None
         else separations_lod,
         dtype=float,

@@ -25,7 +25,6 @@ from optixstuff.spectral import Band
 
 from ._precision import float_dtype
 from ._yip import _YIPData
-from .export import export_ayo_csv, export_exosims
 from .header import HeaderData
 from .interpolation import SincOptions
 from .sampling import fraction_image
@@ -271,35 +270,6 @@ class Coronagraph(AbstractTableCoronagraph):
             )
             operator = DenseSceneOperator(cube, valid)
         return SceneCoronagraph(self, operator)
-
-    def to_exosims(self, units="LAMBDA/D", *, separations_lod=None, output_dir=None):
-        """Export the first prepared record to EXOSIMS FITS tables."""
-        return export_exosims(
-            self, units=units, separations_lod=separations_lod, output_dir=output_dir
-        )
-
-    def dump_ayo_csv(
-        self,
-        output_path,
-        sep_min=0.125,
-        sep_max=32.0,
-        sep_step=0.25,
-        contrast_floor=None,
-        ppf=30.0,
-        *,
-        separations_lod=None,
-    ):
-        """Write AYO point-source photometry and sky transmission."""
-        return export_ayo_csv(
-            self,
-            output_path,
-            sep_min=sep_min,
-            sep_max=sep_max,
-            sep_step=sep_step,
-            contrast_floor=contrast_floor,
-            ppf=ppf,
-            separations_lod=separations_lod,
-        )
 
     def __repr__(self):
         """Summarize the native grid and prepared rules."""

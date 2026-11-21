@@ -21,12 +21,13 @@ from synthetic_yip import write_synthetic_yip
 
 import yippy.sinc as sc
 from yippy import SincOptions, open_yip
+from yippy._util import cache_identity_digest
 from yippy._yip import _YIPData
 from yippy.delivery.format import detect_delivery, file_sha256, load_delivery
 from yippy.delivery.routing import route_interpolation
+from yippy.export import export_exosims
 from yippy.performance import stellar_intensity_curves
 from yippy.sinc.evidence import Reason, Status
-from yippy.util import cache_identity_digest
 
 
 @pytest.fixture(scope="module")
@@ -280,8 +281,8 @@ def test_stellar_frame_and_eqx(admitted, tmp_path):
     assert view.grid.step == 0.25
     assert view.header.pixscale.value == 0.4
     separations = np.array([0.2, 0.3])
-    exported = view.to_exosims(
-        "arcsec", separations_lod=separations, output_dir=tmp_path
+    exported = export_exosims(
+        view, "arcsec", separations_lod=separations, output_dir=tmp_path
     )
     assert exported["starlightSuppressionSystems"][0]["lam"] == 500.0
     sky = fits.getdata(tmp_path / "occ_trans.fits")

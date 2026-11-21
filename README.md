@@ -169,13 +169,14 @@ floor and a post-processing factor explicitly in the consumer:
 
 ```python notest
 import numpy as np
+from yippy.export import export_ayo_csv, export_exosims
 
 ppf = 30.0
 record = coro.curves()
 contrast_noise = np.maximum(np.abs(record.evaluate("raw_contrast", 5.0)), 4e-10) / ppf
 density_noise = record.evaluate("leakage_density_lod2", 5.0) / ppf
-coro.to_exosims()
-coro.dump_ayo_csv("output.csv")
+export_exosims(coro)
+export_ayo_csv(coro, "output.csv", ppf)
 ```
 
 `optixstuff.PostProcessing.speckle_residual_fraction` owns the residual fraction

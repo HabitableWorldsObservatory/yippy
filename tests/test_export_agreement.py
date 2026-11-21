@@ -25,7 +25,9 @@ def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
     specs = export_exosims(
         coro, separations_lod=separations, output_dir=tmp_path / "exosims"
     )
-    csv_path = export_ayo_csv(coro, tmp_path / "ayo.csv", separations_lod=separations)
+    csv_path = export_ayo_csv(
+        coro, tmp_path / "ayo.csv", 30.0, separations_lod=separations
+    )
     csv_data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
     tolerance = 4 * np.finfo(np.float64).eps
 
@@ -175,9 +177,15 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
             record.evaluate(quantity, separations), [midpoint], rtol=tolerance, atol=0
         )
 
-    plain = export_ayo_csv(coro, tmp_path / "plain.csv", separations_lod=separations)
+    plain = export_ayo_csv(
+        coro, tmp_path / "plain.csv", 30.0, separations_lod=separations
+    )
     floored = export_ayo_csv(
-        coro, tmp_path / "floor.csv", contrast_floor=1e-10, separations_lod=separations
+        coro,
+        tmp_path / "floor.csv",
+        30.0,
+        contrast_floor=1e-10,
+        separations_lod=separations,
     )
     plain_data = np.loadtxt(plain, delimiter=",", skiprows=1, ndmin=2)
     floor_data = np.loadtxt(floored, delimiter=",", skiprows=1, ndmin=2)
