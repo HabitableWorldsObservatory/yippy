@@ -32,5 +32,5 @@ requires it, accounting for the two products' Frames when they differ.
 
 See {doc}`/examples/06_Noise_Floor_Conventions` for a per-pixel comparison.
 
-The residual fraction belongs to `jaxedith.PostProcessing.speckle_residual_fraction`
+The residual fraction belongs to `optixstuff.PostProcessing.speckle_residual_fraction`
 (`1 / ppf` for this convention), rather than to the coronagraph.

@@ -178,7 +178,7 @@ coro.to_exosims()
 coro.dump_ayo_csv("output.csv")
 ```
 
-`jaxedith.PostProcessing.speckle_residual_fraction` owns the residual fraction
+`optixstuff.PostProcessing.speckle_residual_fraction` owns the residual fraction
 `1 / ppf`. Exports use the first prepared record and only apply a floor when
 explicitly requested. The noise-floor column gives the
 exported contrast divided by `ppf`. Sky transmission is independent of the aperture.

@@ -126,4 +126,4 @@ residual_density = record.evaluate("leakage_density_lod2", separation) / ppf
 See also: [Noise Floor Conventions](examples/06_Noise_Floor_Conventions.ipynb)
 
 The residual fraction is `1 / ppf` in this convention and belongs to
-`jaxedith.PostProcessing.speckle_residual_fraction`.
+`optixstuff.PostProcessing.speckle_residual_fraction`.
