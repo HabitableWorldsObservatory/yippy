@@ -288,7 +288,9 @@ except sc.AdmissionRefused as err:
 
 The only reason is `KERNEL_MARGIN_FAIL`: $\rho=0.9$ is below the Nyquist limit
 but above the margin. The exception carries the reasons in its message and
-the receipt of what was checked.
+the receipt of what was checked. A reader raises the narrower `MemoryLimit` or
+`PrecisionUnavailable` (both are `AdmissionRefused`) when its budget or the
+64-bit setting is what fails at construction.
 
 ## What does admission check, and in what order?
 

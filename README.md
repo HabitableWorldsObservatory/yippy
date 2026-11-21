@@ -60,8 +60,8 @@ sky = coro.uniform_sky_response(5.0)
 ```
 
 `package.prepare(...)` and `yippy.Coronagraph(package, ...)` build the same
-model. `open_yip` reads the FITS headers and hashes the source files. It decodes the
-image arrays on first access. The read-only arrays preserve sample order,
+model. `open_yip` returns a `YIPPackage`. It reads the FITS headers and hashes
+the source files, and decodes the image arrays on first access. The read-only arrays preserve sample order,
 precision and zeros. `package.header.offaxis_psfs.pixel_grid()`,
 `package.header.stellar_intensity.pixel_grid()` and
 `package.header.sky_transmission.pixel_grid()` describe their individual grids.
@@ -99,6 +99,9 @@ The shipped source positions and images are available on the package. An explici
 `PixelGrid` integrates the declared reconstruction onto its pixels. Native
 coordinates remain in each product's lambda/D frame; convert a grid to sky
 coordinates with `grid.to_arcsec(wavelength_nm)` when needed.
+`yippy.lod_inscribed_to_circumscribed(separation_lod, frame, diameter_inscribed_m)`
+converts offsets measured in inscribed-diameter lambda/D to the circumscribed
+frame of a model.
 
 This example needs a configured `coro`.
 
@@ -125,6 +128,9 @@ to false.
 coro = coro.with_scene_operator()
 image, valid = coro.render_scene(scene_image, None, grid=detector_grid)
 ```
+
+`with_scene_operator()` returns a `SceneCoronagraph`, which carries a
+`DenseSceneOperator` (or a sinc `SceneRenderer`) beside the unchanged model.
 
 ## Performance records
 

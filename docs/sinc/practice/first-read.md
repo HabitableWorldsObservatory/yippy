@@ -167,7 +167,8 @@ print("receipt:", admission.receipt.identity[:16], "...")
 The grid is admitted and no reason bits are set. The receipt is the small
 record of what admission checked and decided: its identity is a hash of the
 data, the declarations and their provenance, so readmitting changed data
-gives a new identity.
+gives a new identity. Calling `admission.require()` returns the admitted
+`SampledGrid`, the object a reader takes, and raises when admission refused.
 
 ## What does one read return?
 
@@ -176,6 +177,11 @@ profile, a `ReadPolicy` (which says whether a read must carry a certified
 error bound), a `Tiling` (how many detector pixels one read handles at a
 time, which sets its scratch memory) and a memory budget (the byte ceilings
 that reads and admission may not exceed).
+
+The cell below constructs the raw-profile reader by name. Application code
+usually calls `sc.make_reader(grid, domain, profile=..., policy=..., tiling=...,
+memory=...)`, which picks `Interpolator` or `PrefilteredReader` from the profile
+the grid was admitted with.
 
 ```{code-cell} python
 reader = Interpolator(

@@ -31,7 +31,7 @@ this set, manage your own YIP paths and pass them to
 
 The table below lists the releases available through `list_yips()`. Each
 archive has a pinned digest. Call `yip_info(name)` to inspect its release,
-download URL and cache location.
+download URL and cache location; it returns an `Archive` record.
 
 ```{include} _generated/yip_catalog.md
 ```
@@ -127,7 +127,7 @@ There are two override mechanisms, in priority order:
    echo 'export YIPPY_CACHE_DIR=~/Documents/YIPs' >> ~/.zshrc
    ```
 
-   If you're on bash instead of zsh, swap `.zshrc` for `.bashrc` (Linux)
+   If you use bash instead of zsh, swap `.zshrc` for `.bashrc` (Linux)
    or `.bash_profile` (older macOS). You can check which shell you're
    running with `echo $SHELL`.
 
@@ -157,7 +157,7 @@ There are two override mechanisms, in priority order:
 
    To confirm the variable is set, run `echo $YIPPY_CACHE_DIR` in your
    terminal -- it should print the path you set. If it prints a blank
-   line, the variable isn't set in that shell session.
+   line, the variable is not set in that shell session.
 
 If neither is set, yippy uses the platform default.
 
