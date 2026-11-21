@@ -167,7 +167,7 @@ class TestCreateShiftMask:
         """Positive x-shift should mask the left columns."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import create_shift_mask
+        from yippy._jax_funcs import create_shift_mask
 
         psf = jnp.ones((10, 10))
         y_grid, x_grid = jnp.mgrid[0:10, 0:10]
@@ -183,7 +183,7 @@ class TestCreateShiftMask:
         """Negative y-shift should mask the bottom rows."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import create_shift_mask
+        from yippy._jax_funcs import create_shift_mask
 
         psf = jnp.ones((10, 10))
         y_grid, x_grid = jnp.mgrid[0:10, 0:10]
@@ -199,7 +199,7 @@ class TestCreateShiftMask:
         """Fill value should be used for valid pixels."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import create_shift_mask
+        from yippy._jax_funcs import create_shift_mask
 
         psf = jnp.ones((10, 10))
         y_grid, x_grid = jnp.mgrid[0:10, 0:10]
@@ -211,7 +211,7 @@ class TestCreateShiftMask:
         """Positive x and negative y shifts mask correct edges."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import create_shift_mask
+        from yippy._jax_funcs import create_shift_mask
 
         psf = jnp.ones((10, 10))
         y_grid, x_grid = jnp.mgrid[0:10, 0:10]
@@ -238,7 +238,7 @@ class TestNearestNeighborLookup:
         """Query between two grid points returns correct bounding indices."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import get_near_inds_offsets_1D
+        from yippy._jax_funcs import get_near_inds_offsets_1D
 
         x_offsets = jnp.array([0.0, 1.0, 2.0, 3.0])
         y_offsets = jnp.array([0.0])
@@ -255,7 +255,7 @@ class TestNearestNeighborLookup:
         """Query at the left edge should clamp to index 0."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import get_near_inds_offsets_1D
+        from yippy._jax_funcs import get_near_inds_offsets_1D
 
         x_offsets = jnp.array([1.0, 2.0, 3.0])
         y_offsets = jnp.array([0.0])
@@ -270,7 +270,7 @@ class TestNearestNeighborLookup:
         """Query in the interior of a 2D grid returns 4 bounding corners."""
         import jax.numpy as jnp
 
-        from yippy.jax_funcs import get_near_inds_offsets_2D
+        from yippy._jax_funcs import get_near_inds_offsets_2D
 
         x_offs = jnp.array([0.0, 1.0, 2.0])
         y_offs = jnp.array([0.0, 1.0, 2.0])

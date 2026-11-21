@@ -86,11 +86,9 @@ nb_execution_timeout = 300
 # These tutorials require user-supplied YIP directories under input/.
 nb_execution_excludepatterns = [
     "examples/Basics.ipynb",
-    "examples/FourierInterpolation.ipynb",
     "examples/QuarterSymmetric.ipynb",
     "examples/RadiallySymmetric.ipynb",
     "examples/SkyTrans.ipynb",
-    "examples/StellarIntens.ipynb",
 ]
 
 

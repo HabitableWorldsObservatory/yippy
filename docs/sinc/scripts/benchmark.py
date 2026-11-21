@@ -182,7 +182,7 @@ def bench_blend(root, count_batch=10000, chunk=100):
     """Time yippy's blend interpolation on the same kind of positions."""
     from lod_unit import lod
 
-    from yippy.offjax import OffJAX
+    from yippy._offjax import OffJAX
 
     off = OffJAX(
         root / "mono-000",

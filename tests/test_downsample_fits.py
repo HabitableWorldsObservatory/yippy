@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from optixstuff.grids import Frame, PixelGrid
 
+from yippy._offax import OffAx
 from yippy.header import HeaderData
-from yippy.offax import OffAx
 
 
 @pytest.fixture(autouse=True)

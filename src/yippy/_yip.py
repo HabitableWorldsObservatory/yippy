@@ -17,23 +17,23 @@ from optixstuff.performance import (
 )
 from tqdm import tqdm
 
+from ._offjax import OffJAX
 from ._precision import dtype_tag, float_dtype
-from ._version import __version__
-from .interpolation import SincOptions, blend_read
-from .logger import logger
-from .offjax import OffJAX
-from .performance import _iter_xaxis_positions
-from .sampling import fraction_image
-from .sinc.evidence import Reason
-from .sky_trans import sky_transmission_image
-from .stellar_intens import StellarIntens
-from .util import (
+from ._sky_trans import sky_transmission_image
+from ._stellar_intens import StellarIntens
+from ._util import (
     PERFORMANCE_VERSION,
     cache_identity_digest,
     load_coro_performance_from_fits,
     read_performance_cache_key,
     save_coro_performance_to_fits,
 )
+from ._version import __version__
+from .interpolation import SincOptions, blend_read
+from .logger import logger
+from .performance import _iter_xaxis_positions
+from .sampling import fraction_image
+from .sinc.evidence import Reason
 
 # Sampling changes invalidate both cached performance and detector responses.
 _SAMPLING_CACHE_VERSION = 3

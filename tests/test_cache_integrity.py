@@ -31,12 +31,12 @@ from test_band_limited_apertures import reference_circle_weights
 
 import yippy._yip as yip_module
 from yippy import open_yip
-from yippy._yip import _YIPData
-from yippy.util import (
+from yippy._util import (
     load_coro_performance_from_fits,
     read_performance_cache_key,
     save_coro_performance_to_fits,
 )
+from yippy._yip import _YIPData
 
 RTOL = 1e-6
 SEPS = np.array([1.5, 3.0, 4.25])

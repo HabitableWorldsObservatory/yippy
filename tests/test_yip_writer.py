@@ -52,7 +52,7 @@ def test_invalid_or_interrupted_write_retains_prior_generation(tmp_path, monkeyp
 
 def test_point_samples_and_cds_default(tmp_path):
     """Fails if a point sample loses its cell area or its FITS sampling convention."""
-    from yippy.offax import OffAx
+    from yippy._offax import OffAx
     from yippy.schema import PRODUCT_FILES
 
     grid = PixelGrid.focal(4, 0.25, Frame(500.0, 6.0, "circumscribed"))

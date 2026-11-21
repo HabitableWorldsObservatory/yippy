@@ -6,7 +6,7 @@ import astropy.io.fits as fits
 import numpy as np
 from optixstuff.grids import Frame, PixelGrid
 
-from yippy.offax import OffAx
+from yippy._offax import OffAx
 
 
 def test_rebinning_transforms_optical_center(tmp_path):

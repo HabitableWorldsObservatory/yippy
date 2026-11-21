@@ -16,9 +16,7 @@ datasets.md
 :caption: YIP Internals
 examples/RadiallySymmetric.ipynb
 examples/QuarterSymmetric.ipynb
-examples/StellarIntens.ipynb
 examples/SkyTrans.ipynb
-examples/FourierInterpolation.ipynb
 ```
 
 ```{toctree}

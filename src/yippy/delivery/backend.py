@@ -10,8 +10,8 @@ import numpy as np
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
 
+from .._jax_funcs import synthesize_psf_idw
 from ..interpolation import InterpolationRead, ReadLedger, blend_read
-from ..jax_funcs import synthesize_psf_idw
 from ..sampling import fraction_image
 from ..sinc.evidence import Reason
 from ..sinc.reader import require_read

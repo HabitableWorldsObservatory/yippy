@@ -215,7 +215,7 @@ def test_public_images_carry_header_grid(syn_coro_1d):
     import jax.numpy as jnp
     from optixstuff.grids import Image
 
-    from yippy.offax import OffAx
+    from yippy._offax import OffAx
 
     coro = syn_coro_1d
     grid = coro.header.pixel_grid()

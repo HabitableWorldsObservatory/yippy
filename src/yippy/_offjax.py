@@ -9,8 +9,8 @@ from jax.sharding import PartitionSpec as P
 from lod_unit import lod
 from optixstuff.grids import Image, PixelGrid
 
-from .jax_funcs import synthesize_psf_idw, synthesize_psf_separable
-from .offax import OffAx
+from ._jax_funcs import synthesize_psf_idw, synthesize_psf_separable
+from ._offax import OffAx
 from .sampling import fraction_image
 
 

@@ -5,7 +5,7 @@ import numpy as np
 from lod_unit import lod
 from optixstuff.grids import Frame, PixelGrid
 
-from yippy.offax import OffAx
+from yippy._offax import OffAx
 
 
 def test_offaxis_coordinate_inputs_use_grid_and_frame():
