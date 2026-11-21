@@ -28,11 +28,11 @@ def test_multiband_forwards_diameter(cached_diameter_coro):
     mb = MultiBandCoronagraph([c, eqx.tree_at(lambda m: m.bandpass, c, Band(800, 900))])
     for wl in (500.0, 850.0):
         np.testing.assert_array_equal(
-            mb.band(wl).stellar_map(wl, 0.1, grid=c.grid).data,
+            mb.coronagraph_at(wl).stellar_map(wl, 0.1, grid=c.grid).data,
             c.stellar_map(wl, 0.1, grid=c.grid).data,
         )
         np.testing.assert_array_equal(
-            mb.band(wl).curves().evaluate("throughput", 2.0),
+            mb.coronagraph_at(wl).curves().evaluate("throughput", 2.0),
             c.curves().evaluate("throughput", 2.0),
         )
 

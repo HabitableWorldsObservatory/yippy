@@ -307,7 +307,7 @@ and wavelength/diameter `Frame`. `source_psfs`, `stellar_map`, and
 `uniform_sky_map` accept explicit target grids and reconcile different
 frames through angular coordinates. `grid=None` retains the native pixel grid
 for the interpolated image. For a multiband instrument, select the imaging
-model with `multi.band(wavelength_nm)`.
+model with `multi.coronagraph_at(wavelength_nm)`.
 
 `SincOptions` accepts `yippy.sinc` domain, memory and policy objects, plus an
 optional prefilter `taps` count (5 to 10). By default `yippy.sinc` selects its
