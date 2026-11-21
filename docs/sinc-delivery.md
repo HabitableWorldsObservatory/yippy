@@ -25,18 +25,17 @@ samples, 16 interior checks and 20 mirror checks, about 57 MB in total.
 ```python notest
 import jax
 
-from yippy.datasets import fetch_sinc_starter
 from yippy.delivery.routing import route_interpolation
 
 jax.config.update("jax_enable_x64", True)
 
-path = fetch_sinc_starter()
+path = "path/to/delivery"  # an unpacked sinc delivery directory
 _, backend, info = route_interpolation(path, "sinc", None, None)
 psf = backend.create_psf(3.9425, 5.415)
 ```
 
-The starter is not published yet, so `fetch_sinc_starter` raises a clear error
-unless the archive is already in the cache directory. It
+The starter is not distributed with yippy, so the example takes the path of an
+unpacked delivery directory. The starter
 holds no stellar or sky products, so `open_yip(path).prepare(interpolation="sinc")` does not
 load it yet and the read goes through the router as shown. A full delivery that
 includes the stellar products can be opened and prepared through `open_yip`. The quickest check

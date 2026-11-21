@@ -192,19 +192,18 @@ products (`stellar_intens.fits` and the others of a YIP package) in
 therefore include them. The public starter holds none, so it is read through
 yippy's router (`route_interpolation`), which returns the sinc backend
 without them, and `yippy-sinc validate` checks its files either way. The
-example below is not executed on this page, because the starter's release
-asset is not published yet, and it follows the quickstart on yippy's schema
+example below is not executed on this page, because the starter is not
+distributed with yippy, and it follows the quickstart on yippy's schema
 page.
 
 ```python notest
 import jax
 
-from yippy.datasets import fetch_sinc_starter
 from yippy.delivery.routing import route_interpolation
 
 jax.config.update("jax_enable_x64", True)
 
-path = fetch_sinc_starter()
+path = "path/to/delivery"  # an unpacked sinc delivery directory
 _, backend, info = route_interpolation(
     path,
     requested="sinc",  # strict: raise instead of falling back to blend
