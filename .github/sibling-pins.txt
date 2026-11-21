@@ -1,3 +1,9 @@
 # Unreleased sibling libraries, applied as uv overrides so each is installed at a pinned main
 # commit whatever version bounds other packages declare (a breaking change waiting for its
 # release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
+# Each pin below is the branch that carries the unreleased major version the floors in
+# pyproject.toml name (floors name the next version release-please will cut, not yet on PyPI).
+# After a sibling is released and on PyPI: delete its line here. When the sibling branch is
+# merged first, replace the branch with the merge commit on main until the release lands.
+# The file is empty (comments only) once PyPI carries every declared floor.
+optixstuff @ git+https://github.com/CoreySpohn/optixstuff@fit-posterior
