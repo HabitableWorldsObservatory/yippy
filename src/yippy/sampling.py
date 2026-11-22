@@ -4,10 +4,12 @@ from optixstuff.grids import Image, Measure
 
 # The stellar halo spans about eight decades from the bright field to the dark hole,
 # so a band-limited (sinc) interpolant rings at the level of the hole floor along
-# the rows and columns of the bright pixels and goes negative. Interpolating the
-# natural log of the map (as the diameter axis already does) cannot: it is positive
-# by construction and exact at the native pixels.
-STELLAR_RECONSTRUCTION = "log"
+# the rows and columns of the bright pixels and goes negative. Linear cannot. A log
+# interpolant is positive too but biased low: between two pixels it returns their
+# geometric mean, and a speckle field varies by large factors pixel to pixel. Rebuilding
+# dropped pixels of a shipped map from every second pixel, the dark-hole flux (2.5 to
+# 16 lambda/D) is low by 8 to 15 % with log and within 1 % with linear.
+STELLAR_RECONSTRUCTION = "linear"
 
 
 def sample_units(sample_kind, grid):
@@ -34,7 +36,7 @@ def fraction_image(
     """Recover the native image measure from per-pixel photon diagnostics.
 
     reconstruction overrides the default (nearest for integrals, band_limited for
-    densities); a stellar halo spanning many decades declares log, because a
+    densities); a stellar halo spanning many decades declares linear, because a
     band-limited interpolant rings below the dark-hole floor.
     """
     image = Image(

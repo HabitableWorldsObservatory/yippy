@@ -248,7 +248,7 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     """Fails if stellar pitch is overwritten or reader tables hide in closures.
 
     The Fourier oracle below checks pitch and frame handling, so the stellar map is
-    resampled band-limited here; the shipped default is log (sampling.py).
+    resampled band-limited here; the shipped default is linear (sampling.py).
     """
     import yippy._stellar_intens as stellar_intens
     import yippy.coronagraph as coronagraph

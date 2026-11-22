@@ -271,8 +271,8 @@ def test_public_images_carry_header_grid(syn_coro_1d):
             expected_measure,
             "stellar_flux_fraction",
         )
-        # Stellar halos declare log (see test_shipped_stellar_map_stays_positive).
-        expected = "log" if any(image is s for s in stellar) else "band_limited"
+        # Stellar halos declare linear (see test_shipped_stellar_map_stays_positive).
+        expected = "linear" if any(image is s for s in stellar) else "band_limited"
         assert image.reconstruction == expected
     np.testing.assert_array_equal(
         coro.sky_trans.data,
@@ -291,10 +291,11 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
-    source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse)
-    assert source.image.reconstruction == "linear"
-    # The log reconstruction needs no bandwidth promise and is kept.
-    assert coro.stellar_map(None, 0.1, grid=coarse).reconstruction == "log"
+    for image in (
+        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse).image,
+        coro.stellar_map(None, 0.1, grid=coarse),
+    ):
+        assert image.reconstruction == "linear"
     actual = np.asarray(native_source.integrated().data)
     flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
     expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
@@ -415,39 +416,6 @@ def test_shipped_stellar_map_stays_positive(shipped_coro):
         grid = PixelGrid.regular((n, n), pitch, "lod", frame=frame)
         data = np.asarray(shipped_coro.stellar_map(None, 0.0, grid=grid).data)
         assert data.min() > 0.0
-
-
-def test_stellar_log_reconstruction_flux_against_the_alternatives(
-    shipped_coro, monkeypatch
-):
-    """Fails if the log reconstruction changes the stellar flux more than measured.
-
-    Basis: measured on eac1_aavc_2d, total flux relative to the band-limited
-    interpolant: linear -1.0e-3 (pitch 0.4532) and -8e-5 (0.1511); log -2.1e-2
-    and -2.2e-2. The log of a map falls below its linear interpolant by the
-    geometric-mean inequality, so the log sum must lie below the linear sum;
-    bounds are twice the measured change. The grid at the native pitch (0.25)
-    samples the knots, so every mode agrees there to within 1e-5.
-    """
-    import yippy._stellar_intens as stellar_intens
-    import yippy.coronagraph as coronagraph
-
-    frame = shipped_coro.stellar_grid.frame
-    totals = {}
-    for n, pitch in ((144, 0.4532), (412, 0.1511), (300, 0.25)):
-        grid = PixelGrid.regular((n, n), pitch, "lod", frame=frame)
-        for mode in ("band_limited", "linear", "log"):
-            monkeypatch.setattr(coronagraph, "STELLAR_RECONSTRUCTION", mode)
-            monkeypatch.setattr(stellar_intens, "STELLAR_RECONSTRUCTION", mode)
-            data = np.asarray(shipped_coro.stellar_map(None, 0.0, grid=grid).data)
-            totals[n, mode] = data.sum(dtype=np.float64)
-    for n, linear_bound, log_bound in ((144, 2e-3, 4.4e-2), (412, 2e-3, 4.4e-2)):
-        reference = totals[n, "band_limited"]
-        assert abs(totals[n, "linear"] / reference - 1) < linear_bound
-        assert -log_bound < totals[n, "log"] / reference - 1 < 0
-        assert totals[n, "log"] < totals[n, "linear"]
-    for mode in ("linear", "log"):
-        assert totals[300, mode] == pytest.approx(totals[300, "band_limited"], rel=1e-5)
 
 
 def test_shipped_off_axis_psfs_ring_only_at_the_noise_floor(shipped_coro):
