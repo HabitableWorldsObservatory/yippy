@@ -244,8 +244,17 @@ def test_reads_units_refusals(admitted):
     )
 
 
-def test_stellar_frame_and_eqx(admitted, tmp_path):
-    """Fails if stellar pitch is overwritten or reader tables hide in closures."""
+def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
+    """Fails if stellar pitch is overwritten or reader tables hide in closures.
+
+    The Fourier oracle below checks pitch and frame handling, so the stellar map is
+    resampled band-limited here; the shipped default is log (sampling.py).
+    """
+    import yippy._stellar_intens as stellar_intens
+    import yippy.coronagraph as coronagraph
+
+    monkeypatch.setattr(coronagraph, "STELLAR_RECONSTRUCTION", "band_limited")
+    monkeypatch.setattr(stellar_intens, "STELLAR_RECONSTRUCTION", "band_limited")
     view = admitted
     host = _YIPData(admitted.package, interpolation="sinc")
     assert np.ptp(view.stellar_map(None, 0.0).data) > 0

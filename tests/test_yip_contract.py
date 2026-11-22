@@ -271,8 +271,8 @@ def test_public_images_carry_header_grid(syn_coro_1d):
             expected_measure,
             "stellar_flux_fraction",
         )
-        # Stellar halos declare linear (see test_shipped_stellar_map_stays_positive).
-        expected = "linear" if any(image is s for s in stellar) else "band_limited"
+        # Stellar halos declare log (see test_shipped_stellar_map_stays_positive).
+        expected = "log" if any(image is s for s in stellar) else "band_limited"
         assert image.reconstruction == expected
     np.testing.assert_array_equal(
         coro.sky_trans.data,
@@ -291,11 +291,10 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
-    for image in (
-        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse).image,
-        coro.stellar_map(None, 0.1, grid=coarse),
-    ):
-        assert image.reconstruction == "linear"
+    source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse)
+    assert source.image.reconstruction == "linear"
+    # The log reconstruction needs no bandwidth promise and is kept.
+    assert coro.stellar_map(None, 0.1, grid=coarse).reconstruction == "log"
     actual = np.asarray(native_source.integrated().data)
     flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
     expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
