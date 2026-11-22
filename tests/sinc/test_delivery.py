@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.memory import MemoryLimit
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, PixelGrid, resample
 from sinc_fixture import save_manifest, write_delivery
@@ -27,6 +28,7 @@ from yippy.delivery.format import detect_delivery, file_sha256, load_delivery
 from yippy.delivery.routing import route_interpolation
 from yippy.export import export_exosims
 from yippy.performance import stellar_intensity_curves
+from yippy.scene import AbstractSceneOperator
 from yippy.sinc.evidence import Reason, Status
 
 
@@ -519,10 +521,9 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
 
     scene_model = admitted.with_scene_operator()
     # The per-source route reports its cube and refuses a budget below it.
-    assert (
-        admitted.scene_operator_bytes()["resident"] == scene_model.operator.psfs.nbytes
-    )
-    with pytest.raises(sc.MemoryLimit, match="max_bytes"):
+    cube = scene_model.operators[0].psfs
+    assert admitted.scene_operator_bytes()["resident"] == cube.nbytes
+    with pytest.raises(MemoryLimit, match="max_bytes"):
         admitted.with_scene_operator(max_bytes=1)
     image = Image(
         jnp.zeros(admitted.grid.shape), admitted.grid, (), Measure.integral(), "flux"
@@ -556,8 +557,13 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
     metadata["checks"] = []
     save_manifest(tmp_path, metadata)
     with jax.enable_x64():
-        model = open_yip(tmp_path).prepare(interpolation="sinc").with_scene_operator()
-        assert isinstance(model.operator, sc.SceneRenderer)
+        prepared = open_yip(tmp_path).prepare(interpolation="sinc")
+        # Every route is admitted by estimate, the prefiltered one included.
+        with pytest.raises(MemoryLimit, match="max_bytes"):
+            prepared.with_scene_operator(max_bytes=1)
+        model = prepared.with_scene_operator()
+        assert isinstance(model.operators[0], sc.SceneRenderer)
+        assert isinstance(model.operators[0], AbstractSceneOperator)
         flux = jnp.zeros(model.grid.shape).at[2, 1].set(2.0)
         scene = Image(flux, model.grid, (), Measure.integral(), "flux")
         result = eqx.filter_jit(model.render_scene)(scene, None, grid=model.grid)
@@ -567,6 +573,12 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
         np.testing.assert_allclose(
             result.image.data, expected, rtol=0, atol=1e-12 * expected.max()
         )
+        x, y = model.grid.coordinates()
+        raster = model.operators[0].render_raster(flux, x[0], y[:, 0])
+        direct = raster.intensity * model._offaxis_backend.conversion
+        data, valid = model.operators[0].render(flux, model.grid)
+        assert valid == raster.accepted
+        np.testing.assert_array_equal(data, direct)
         lit = replace(scene, data=flux.at[0, 0].set(1.0))
         assert not model.render_scene(lit, None, grid=model.grid).valid
 
@@ -580,7 +592,7 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
             )
             .with_scene_operator()
         )
-        assert isinstance(bounded.operator, sc.SceneRenderer)
+        assert isinstance(bounded.operators[0], sc.SceneRenderer)
         dark = replace(scene, data=jnp.zeros_like(flux))
         result = bounded.render_scene(dark, None, grid=bounded.grid)
         assert result.valid

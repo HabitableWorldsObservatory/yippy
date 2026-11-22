@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax.numpy as jnp
+from hwoutils.memory import MemoryLimit as _SizeLimit
 
 from yippy.sinc._types import F64, I32, Boolean, check_array, check_static
 from yippy.sinc.domain import Domain
@@ -165,8 +166,12 @@ class AdmissionRefused(ValueError):
         super().__init__(message)
 
 
-class MemoryLimit(AdmissionRefused):
-    """The requested static allocation plan exceeds the supplied budget."""
+class MemoryLimit(AdmissionRefused, _SizeLimit):
+    """The requested static allocation plan exceeds the supplied budget.
+
+    Also a ``hwoutils.memory.MemoryLimit``, so one ``except`` serves every
+    library's size refusal.
+    """
 
 
 class PrecisionUnavailable(AdmissionRefused):

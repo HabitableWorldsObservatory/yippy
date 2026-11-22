@@ -12,9 +12,10 @@ from scipy.fft import next_fast_len
 from ._jax_funcs import blend_pad, idw_read_plan, separable_read_plan
 from ._precision import float_dtype
 from .logger import logger
+from .sinc.scene import AbstractSceneOperator
 
 
-class _DenseSceneOperator(eqx.Module):
+class _DenseSceneOperator(AbstractSceneOperator):
     """Native full or mirror-quadrant PSFs and their source admission mask.
 
     One PSF per source position: the route for a sinc delivery that falls back to
@@ -238,7 +239,7 @@ def _preshift(psfs, frac_yx, kx, ky, n_pad, n_fft):
     return jnp.fft.rfft2(window, s=(n_fft, n_fft))
 
 
-class BlendSceneOperator(eqx.Module):
+class BlendSceneOperator(AbstractSceneOperator):
     """A blend-interpolated scene render, regrouped by stored PSF node.
 
     A blend read is a weighted sum of the four nearest stored PSFs, each

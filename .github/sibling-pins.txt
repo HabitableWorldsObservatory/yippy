@@ -6,4 +6,5 @@
 # After a sibling is released and on PyPI: delete its line here. When the sibling branch is
 # merged first, replace the branch with the merge commit on main until the release lands.
 # The file is empty (comments only) once PyPI carries every declared floor.
+hwoutils @ git+https://github.com/CoreySpohn/hwoutils@fit-posterior
 optixstuff @ git+https://github.com/CoreySpohn/optixstuff@fit-posterior

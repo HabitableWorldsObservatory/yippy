@@ -1,5 +1,7 @@
 """Extended-scene rendering from a fixed set of prefiltered coefficient images."""
 
+from abc import abstractmethod
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -16,7 +18,30 @@ from yippy.sinc.reader import ImageRead, PrefilteredReader, _require_precision
 CONTRACT_COLUMNS = 1024
 
 
-class SceneRenderer(eqx.Module):
+class AbstractSceneOperator(eqx.Module):
+    """A linear map from native source-pixel flux to a detector image.
+
+    A scene coronagraph holds a tuple of operators over disjoint sets of
+    sources and adds their images, which is exact because rendering is linear in
+    the flux. ``yippy.BlendSceneOperator`` renders from stored PSF nodes and
+    ``SceneRenderer`` from prefiltered coefficient images.
+    """
+
+    @abstractmethod
+    def render(self, flux, grid):
+        """Return the image and whether every lit source this operator covers is valid.
+
+        Args:
+            flux: Source flux [ny, nx] on the native grid, one value per pixel.
+            grid: The native grid of ``flux``.
+
+        Returns:
+            ``(image, valid)``: the native detector array, linear in ``flux``
+            where valid, and a boolean scalar.
+        """
+
+
+class SceneRenderer(AbstractSceneOperator):
     """Render many sources at once as one contraction of coefficient images.
 
     A prefiltered read is linear in the coefficient images, so the image of a
@@ -55,6 +80,7 @@ class SceneRenderer(eqx.Module):
     product_index: int = eqx.field(static=True)
     margin_nodes: int = eqx.field(static=True)
     accumulate: str = eqx.field(static=True)
+    scale: float = eqx.field(static=True)
     _corner_xy: tuple[int, int] = eqx.field(static=True)
 
     def __init__(
@@ -65,6 +91,7 @@ class SceneRenderer(eqx.Module):
         *,
         margin_nodes=1,
         accumulate="float64",
+        scale=1.0,
     ):
         """Gather the coefficient images that reads near the given positions touch.
 
@@ -79,6 +106,8 @@ class SceneRenderer(eqx.Module):
                 a fit, for example) before a render refuses.
             accumulate: ``"float64"`` (binary64 accumulation) or ``"storage"``
                 (accumulation in the table's storage dtype).
+            scale: Constant that ``render`` multiplies into the image, for
+                example a photon-unit conversion.
         """
         _require_precision()
         if not isinstance(reader, PrefilteredReader):
@@ -91,6 +120,7 @@ class SceneRenderer(eqx.Module):
         if accumulate not in ("float64", "storage"):
             raise ValueError("accumulate must be 'float64' or 'storage'")
         self.accumulate = accumulate
+        self.scale = float(scale)
         positions = jnp.asarray(source_xy_lod)
         if positions.ndim != 2 or positions.shape[0] == 0:
             raise ValueError("Scene positions require a nonempty [source, 2] array")
@@ -156,7 +186,7 @@ class SceneRenderer(eqx.Module):
         )
 
     @classmethod
-    def from_raster(cls, reader, product_index, x_lod, y_lod):
+    def from_raster(cls, reader, product_index, x_lod, y_lod, *, scale=1.0):
         """Gather the covered, permitted centers of a fixed raster.
 
         Unsupported centers may stay dark during a render. If no center is
@@ -171,7 +201,7 @@ class SceneRenderer(eqx.Module):
         positions = centers[readable]
         if not positions.shape[0]:
             positions = reader._safe_query[None, :]
-        return cls(reader, product_index, positions, margin_nodes=0)
+        return cls(reader, product_index, positions, margin_nodes=0, scale=scale)
 
     def __check_init__(self):
         """Validate the declared structure before numerical use."""
@@ -367,6 +397,26 @@ class SceneRenderer(eqx.Module):
                 ),
             ),
         )
+
+    def render(self, flux, grid):
+        """Render the flux raster of a native grid, scaled by ``scale``.
+
+        Returns the image and whether every lit source was readable. A bounded
+        policy never reads a PSF for an all-dark raster: that image is exactly
+        zero and valid.
+
+        Args:
+            flux: Source flux [H, W] at the pixel centers of ``grid``.
+            grid: The native grid whose cell centers locate the sources.
+        """
+        x, y = grid.coordinates()
+        flux = jnp.asarray(flux, jnp.float64)
+        read = self.render_raster(flux, x[0], y[:, 0])
+        data, valid = read.intensity * self.scale, read.accepted
+        if self.reader.policy.mode == "bounded":
+            dark = jnp.all(flux == 0)
+            data, valid = jnp.where(dark, 0.0, data), valid | dark
+        return data, valid
 
     def render_raster(self, scene: F64, x_lod: F64, y_lod: F64) -> ImageRead:
         """Render a raster scene [H, W] whose pixel centers are x_lod [W], y_lod [H].

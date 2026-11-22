@@ -9,6 +9,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.memory import DEFAULT_MAX_BYTES, admit
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -30,8 +31,13 @@ from .header import HeaderData
 from .interpolation import SincOptions
 from .logger import logger
 from .sampling import fraction_image
-from .scene import DENSE_BATCH, BlendSceneOperator, _DenseSceneOperator
-from .sinc import MemoryLimit, SceneRenderer
+from .scene import (
+    DENSE_BATCH,
+    AbstractSceneOperator,
+    BlendSceneOperator,
+    _DenseSceneOperator,
+)
+from .sinc import SceneRenderer
 from .sinc.reader import PrefilteredReader
 
 
@@ -294,20 +300,20 @@ class Coronagraph(AbstractTableCoronagraph):
         )
         return host
 
-    def with_scene_operator(self, *, max_bytes=2 * 2**30):
+    def with_scene_operator(self, *, max_bytes=DEFAULT_MAX_BYTES):
         """Prepare a scene renderer for this model on its native source grid.
 
-        Admitted prefiltered products render from their coefficient table. A blend
-        model renders through ``BlendSceneOperator``, one FFT product per stored
-        PSF. A delivery that mixes sinc and blend reads builds one PSF per source.
+        Prefiltered products render from their coefficient table. A blend model
+        renders through ``BlendSceneOperator``, one FFT product per stored PSF. A
+        delivery that mixes sinc and blend reads builds one PSF per source.
 
         Args:
             max_bytes: Refuse, before allocating, an operator whose estimated
-                total (see ``scene_operator_bytes``) exceeds this many bytes.
-                ``None`` disables the check.
+                total (see ``scene_operator_bytes``) exceeds this many bytes, on
+                every route. ``None`` disables the check.
 
         Raises:
-            yippy.sinc.MemoryLimit: The estimate exceeds ``max_bytes``.
+            hwoutils.memory.MemoryLimit: The estimate exceeds ``max_bytes``.
         """
         if max_bytes is not None:
             estimate = self.scene_operator_bytes()
@@ -315,18 +321,13 @@ class Coronagraph(AbstractTableCoronagraph):
                 f"Scene operator estimate: {estimate['resident'] / 1e9:.2f} GB "
                 f"resident, {estimate['scratch'] / 1e9:.2f} GB scratch."
             )
-            if estimate["total"] > max_bytes and not self._prefiltered_scene():
-                raise MemoryLimit(
-                    f"scene operator needs about {estimate['total'] / 1e9:.2f} GB "
-                    f"({estimate['resident'] / 1e9:.2f} GB resident plus "
-                    f"{estimate['scratch'] / 1e9:.2f} GB scratch), above "
-                    f"max_bytes={max_bytes} ({max_bytes / 1e9:.2f} GB); raise "
-                    "max_bytes or pass None to build it anyway"
-                )
+            admit(estimate["total"], max_bytes, "scene operator")
         backend = self._offaxis_backend
         if self._prefiltered_scene():
             x, y = self.grid.coordinates()
-            operator = SceneRenderer.from_raster(backend.reader, 0, x[0], y[:, 0])
+            operator = SceneRenderer.from_raster(
+                backend.reader, 0, x[0], y[:, 0], scale=backend.conversion
+            )
         elif self._dense_delivery():
             host = self._host_for_scene()
             host._create_delivery_datacube(DENSE_BATCH)
@@ -335,7 +336,7 @@ class Coronagraph(AbstractTableCoronagraph):
             operator = _DenseSceneOperator(cube, valid)
         else:
             operator = BlendSceneOperator.from_backend(backend, self.grid)
-        return SceneCoronagraph(self, operator)
+        return SceneCoronagraph(self, (operator,))
 
     def __repr__(self):
         """Summarize the native grid and prepared rules."""
@@ -346,36 +347,28 @@ class Coronagraph(AbstractTableCoronagraph):
 
 
 class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
-    """YIP imaging model with a prepared native scene operator."""
+    """YIP imaging model with prepared native scene operators.
 
-    operator: BlendSceneOperator | SceneRenderer | _DenseSceneOperator
+    The operators cover disjoint sets of sources; the rendered image is the sum
+    of their images and is valid when every operator's render is.
+    """
 
-    def __init__(self, model, operator):
-        """Reuse the prepared imaging tables and bind the chosen operator."""
+    operators: tuple[AbstractSceneOperator, ...]
+
+    def __init__(self, model, operators):
+        """Reuse the prepared imaging tables and bind the scene operators."""
         for field in fields(Coronagraph):
             setattr(self, field.name, getattr(model, field.name))
-        self.operator = operator
+        self.operators = tuple(operators)
 
     def render_scene(self, scene, wavelength_nm, *, grid):
-        """Sum native source-pixel flux through the operator and sample the detector."""
+        """Sum native flux through the operators and sample the detector."""
         if scene.measure != Measure.integral() or scene.data.ndim != 2:
             raise ValueError("scene must be a two-dimensional cell-integral Image")
         flux = scene.data if scene.grid == self.grid else on_grid(scene, self.grid).data
-        if isinstance(self.operator, SceneRenderer):
-            x, y = self.grid.coordinates()
-            read = self.operator.render_raster(
-                jnp.asarray(flux, jnp.float64), x[0], y[:, 0]
-            )
-            data, valid = (
-                read.intensity * self._offaxis_backend.conversion,
-                read.accepted,
-            )
-            if self.operator.reader.policy.mode == "bounded":
-                # A dark raster is exactly zero without making a bounded PSF read.
-                dark = jnp.all(flux == 0)
-                data, valid = jnp.where(dark, 0.0, data), valid | dark
-        else:
-            data, valid = self.operator.render(flux, self.grid)
+        parts = [operator.render(flux, self.grid) for operator in self.operators]
+        data = sum(part[0] for part in parts)
+        valid = jnp.all(jnp.stack([part[1] for part in parts]))
         image = fraction_image(
             data, self.grid, (), self._offaxis_backend.measure, quantity=scene.quantity
         )

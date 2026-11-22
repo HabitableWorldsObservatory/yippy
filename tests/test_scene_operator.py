@@ -2,14 +2,18 @@
 
 import copy
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.memory import MemoryLimit
+from optixstuff.grids import Image, Measure
 from synthetic_yip import write_synthetic_yip
 
-from yippy import BlendSceneOperator, open_yip
-from yippy.sinc import MemoryLimit
+import yippy.sinc
+from yippy import BlendSceneOperator, SceneCoronagraph, open_yip
+from yippy.scene import AbstractSceneOperator
 
 
 def _dense_image(backend, grid, flux):
@@ -26,7 +30,7 @@ def _dense_image(backend, grid, flux):
 
 def _agreement(model, flux):
     """Peak-normalized maximum difference and relative flux difference."""
-    image, valid = model.operator.render(jnp.asarray(flux), model.grid)
+    image, valid = model.operators[0].render(jnp.asarray(flux), model.grid)
     reference = _dense_image(model._offaxis_backend, model.grid, flux)
     assert valid
     peak = reference.max()
@@ -87,7 +91,7 @@ def test_shipped_package_blocks_size_and_estimate(coro):
         assert peak_error < 1e-3
         assert flux_error < 1e-4
     estimate = coro.scene_operator_bytes()
-    assert model.operator.nbytes == estimate["resident"] < 400e6
+    assert model.operators[0].nbytes == estimate["resident"] < 400e6
     assert estimate["total"] == estimate["resident"] + estimate["scratch"]
 
 
@@ -108,7 +112,7 @@ def test_render_is_linear_mirrored_and_differentiable(tmp_path):
             occulter_floor=1.0,
         )
         model = open_yip(package.path).prepare().with_scene_operator()
-        render = lambda flux: model.operator.render(flux, model.grid)[0]  # noqa: E731
+        render = lambda flux: model.operators[0].render(flux, model.grid)[0]  # noqa: E731
         rng = np.random.default_rng(0)
         f, g = (jnp.asarray(rng.uniform(0.5, 1.5, model.grid.shape)) for _ in range(2))
         np.testing.assert_allclose(
@@ -142,7 +146,7 @@ def test_estimate_allocates_nothing_and_matches_the_build(syn_coro_2d):
         backend.flat_psfs.shape, backend.flat_psfs.dtype
     )
     estimate = BlendSceneOperator.size_bytes(backend, syn_coro_2d.grid)
-    built = syn_coro_2d.with_scene_operator().operator.nbytes
+    built = syn_coro_2d.with_scene_operator().operators[0].nbytes
     assert abs(estimate["resident"] - built) <= 0.1 * built
     assert syn_coro_2d.scene_operator_bytes() == estimate
 
@@ -152,6 +156,47 @@ def test_budget_refuses_before_building_and_none_disables_it(syn_coro_2d):
     with pytest.raises(MemoryLimit) as refused:
         syn_coro_2d.with_scene_operator(max_bytes=1)
     total = syn_coro_2d.scene_operator_bytes()["total"]
-    assert f"{total / 1e9:.2f} GB" in str(refused.value)
+    assert f"({total} bytes)" in str(refused.value)
     assert "max_bytes" in str(refused.value)
-    assert syn_coro_2d.with_scene_operator(max_bytes=None).operator.nbytes > 0
+    assert syn_coro_2d.with_scene_operator(max_bytes=None).operators[0].nbytes > 0
+
+
+def test_refusal_is_the_shared_memory_limit():
+    """Fails if the sinc refusal stops being a hwoutils MemoryLimit or loses routing."""
+    assert issubclass(yippy.sinc.MemoryLimit, MemoryLimit)
+    assert issubclass(yippy.sinc.MemoryLimit, yippy.sinc.AdmissionRefused)
+    assert issubclass(MemoryLimit, ValueError)
+
+
+class _Gain(AbstractSceneOperator):
+    """A stand-in operator: the flux scaled, valid or not as configured."""
+
+    gain: float
+    ok: bool = eqx.field(static=True, default=True)
+
+    def render(self, flux, grid):
+        return self.gain * flux, jnp.asarray(self.ok)
+
+
+def test_scene_coronagraph_sums_its_operators(syn_coro_2d):
+    """Fails if the render is not the sum of the operators, or drops a refusal."""
+    model = syn_coro_2d.with_scene_operator()
+    blend = model.operators[0]
+    assert isinstance(blend, AbstractSceneOperator)
+    flux = np.zeros(model.grid.shape)
+    flux[10:14, 10:14] = 1.0
+    scene = Image(jnp.asarray(flux), model.grid, (), Measure.integral(), "flux")
+    single = model.render_scene(scene, None, grid=model.grid)
+    gain = _Gain(0.5)
+    both = SceneCoronagraph(model, (blend, gain)).render_scene(
+        scene, None, grid=model.grid
+    )
+    assert single.valid and both.valid
+    alone = SceneCoronagraph(model, (gain,)).render_scene(scene, None, grid=model.grid)
+    expected = single.image.data + alone.image.data
+    assert float(jnp.abs(alone.image.data).max()) > 0
+    np.testing.assert_allclose(both.image.data, expected, rtol=1e-6, atol=1e-9)
+    refused = SceneCoronagraph(model, (blend, _Gain(1.0, ok=False))).render_scene(
+        scene, None, grid=model.grid
+    )
+    assert not refused.valid
