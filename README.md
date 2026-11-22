@@ -102,9 +102,7 @@ image or aperture-record route of coronagraphoto. The rules are:
 
 Pass the same `leakage_rule` to `curves` that the coronagraph was prepared with
 (`curves` uses it by default). Reading a 2D product's curves logs one warning per
-product saying so. The stored record for the ring rule carries the
-`PerformanceCurves.leakage_rule` label `"aperture_mean"`, because its leakage is the
-aperture mean of the symmetrized map; `coro.leakage_rule` holds the yippy rule.
+product saying so.
 `bandpass` is a `optixstuff.spectral.Band`, or `None` when the YIP has no edges.
 `primary` reads both diameter conventions and collecting area from the YIP.
 

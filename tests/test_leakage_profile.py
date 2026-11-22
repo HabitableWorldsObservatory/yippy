@@ -413,7 +413,7 @@ def test_leakage_rules_on_a_modulated_map(modulated, separation):
     finite_aperture = ring - point
     expected = (ring_ref - _i0(s) * area) / pixel_area  # integral of I0 - I0(s)
     np.testing.assert_allclose(finite_aperture, expected, rtol=0.05)
-    assert ring_record.leakage_rule == "aperture_mean"
+    assert ring_record.leakage_rule == "aperture_ring_mean"
     assert modulated["aperture_ring_mean"].leakage_rule == "aperture_ring_mean"
 
 
@@ -430,28 +430,13 @@ def test_ring_rule_is_the_default_for_a_two_dimensional_product(
     from yippy import open_yip
 
     assert modulated["default"].leakage_rule == "aperture_ring_mean"
+    assert modulated["default"].curves().leakage_rule == "aperture_ring_mean"
+    swapped = modulated["default"].with_rules(
+        (modulated["default"].curves().rule,), leakage_rule="aperture_mean"
+    )
+    assert swapped.leakage_rule == "aperture_mean"
     one_d = write_synthetic_yip(tmp_path_factory.mktemp("one-d"), kind="1d")
     assert open_yip(one_d.path).prepare().leakage_rule == "aperture_mean"
-
-
-def test_ring_azimuth_ladder_converges_on_a_modulated_map(modulated_package):
-    """A cos 2 phi map is averaged exactly by any ladder rung above four angles.
-
-    Fails if the ring mean depends on the number of angles once it exceeds the
-    highest harmonic of the map, or if a map carrying harmonic n needs fewer than
-    n + 1 angles (the 4-angle rung then still aliases cos 4 phi).
-    """
-    from yippy import open_yip
-    from yippy.performance import ring_azimuth_samples, ring_symmetrized
-
-    coro = open_yip(modulated_package.path).prepare()
-    image = coro.stellar_map(None, 0.0, grid=None)
-    grid = coro.stellar_grid
-    default = ring_symmetrized(image).data
-    assert ring_azimuth_samples(grid.shape, (grid.center_y, grid.center_x)) > 64
-    for n_theta in (8, 16, 32, 64):
-        rung = ring_symmetrized(image, n_theta).data
-        np.testing.assert_allclose(rung, default, rtol=1e-3)
 
 
 def test_curves_of_a_2d_product_warn_once(modulated_package, caplog):

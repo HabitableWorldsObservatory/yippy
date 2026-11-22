@@ -30,10 +30,9 @@ optixstuff. YIP loading, native offset selection, and export remain in yippy.
 
 The record contains throughput, `core_area_lod2`, absolute `leakage_fraction`,
 `leakage_density_lod2`, and `raw_contrast`. Its `leakage_rule` distinguishes
-`aperture_mean` from `azimuthal_ring_mean`; a `Coronagraph` also keeps the yippy rule
-(`aperture_ring_mean`, the default for a 2D product, is stored as `aperture_mean`
-of the azimuthally symmetrized map; see the README). Contrast is the selected leakage
-density times aperture area divided by throughput. `iwa_lod` is the first
+`aperture_mean`, `aperture_ring_mean` (the default for a 2D product) and the
+deprecated `azimuthal_ring_mean`; the rules are defined in optixstuff. Contrast is the selected
+leakage density times aperture area divided by throughput. `iwa_lod` is the first
 half-maximum-throughput crossing. `data_extent_lod` is the array half-width;
 it does not specify an outer working angle.
 

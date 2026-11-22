@@ -20,7 +20,7 @@ from optixstuff.coronagraph import (
     on_grid,
 )
 from optixstuff.grids import Image, Measure, PixelGrid
-from optixstuff.performance import PerformanceCurves, SampledProfile
+from optixstuff.performance import RING_RULE, PerformanceCurves, SampledProfile
 from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band
 
@@ -30,7 +30,7 @@ from ._yip import _YIPData
 from .header import HeaderData
 from .interpolation import SincOptions
 from .logger import logger
-from .performance import RING_RULE, resolve_leakage_rule
+from .performance import resolve_leakage_rule
 from .sampling import STELLAR_RECONSTRUCTION, fraction_image
 from .scene import (
     DENSE_BATCH,
@@ -75,13 +75,17 @@ class Coronagraph(AbstractTableCoronagraph):
     _stellar_ln_interp: interpax.CubicSpline
     _records: tuple[PerformanceCurves, ...]
     uniform_sky_profile: SampledProfile
-    leakage_rule: str = eqx.field(static=True)
     _host: _YIPData = eqx.field(static=True)
 
     @property
     def package(self):
         """Native package from which this model was prepared."""
         return self._host.package
+
+    @property
+    def leakage_rule(self) -> str:
+        """The leakage rule of the prepared records (the default for ``curves``)."""
+        return self._records[0].leakage_rule
 
     def __init__(
         self,
@@ -129,7 +133,6 @@ class Coronagraph(AbstractTableCoronagraph):
             if low_nm != high_nm:
                 self.bandpass = Band(low_nm, high_nm)
         self._offaxis_backend = host.offax
-        self.leakage_rule = host.leakage_rule
         self._stellar_ln_interp = interpax.CubicSpline(
             jnp.asarray(host.stellar_intens.ln_interp.x, dtype=float_dtype()),
             jnp.log(jnp.asarray(host.stellar_intens.psfs, dtype=float_dtype())),
@@ -205,10 +208,12 @@ class Coronagraph(AbstractTableCoronagraph):
         return profile.evaluate(separation_lod)
 
     def _find_record(self, rule, leakage_rule):
-        if leakage_rule != self.leakage_rule:
-            return None
         return next(
-            (record for record in self._records if record.rule == rule),
+            (
+                record
+                for record in self._records
+                if record.rule == rule and record.leakage_rule == leakage_rule
+            ),
             None,
         )
 
@@ -270,11 +275,7 @@ class Coronagraph(AbstractTableCoronagraph):
         leakage_rule = resolve_leakage_rule(leakage_rule, self._offaxis_backend.type)
         host = self._host_for_rule(rules[0], leakage_rule)
         records = tuple(_jax_record(host._prepare_record(rule)) for rule in rules)
-        model = eqx.tree_at(lambda c: c._records, self, records)
-        if leakage_rule != self.leakage_rule:
-            # A static field cannot be swapped by tree_at; set it on the copy.
-            object.__setattr__(model, "leakage_rule", leakage_rule)
-        return model
+        return eqx.tree_at(lambda c: c._records, self, records)
 
     def _host_for_rule(self, rule, leakage_rule):
         """Use the loaded host tables with independent per-request state."""
