@@ -260,17 +260,18 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     assert np.ptp(view.stellar_map(None, 0.0).data) > 0
     # Independent Fourier series integrated over target pixel boxes.
     # The 1e-14 bound allows float64 DFT and exponential roundoff.
-    # Reflect extension doubles each axis (period 8, zero Nyquist mode).
+    # Zero extension doubles each axis (period 8): the table is centered in a
+    # zero field, since nothing is reflected past its edge.
     stellar = view.stellar_map(None, 0.0)
-    assert stellar.outside == "reflect"
+    assert stellar.outside == "zero"
     data = np.asarray(stellar.integrated().data)
-    even = np.concatenate([data, data[::-1]], axis=0)
-    even = np.concatenate([even, even[:, ::-1]], axis=1)
+    even = np.zeros((8, 8))
+    even[2:6, 2:6] = data
     spectrum = np.fft.fft2(even)
     frequencies = np.fft.fftfreq(8)
     for pitch in (0.3, 0.4):
         ratio = pitch / 0.4
-        positions = (np.arange(4) - 1.5) * ratio + 1.5
+        positions = (np.arange(4) - 1.5) * ratio + 3.5
         phase = 2 * np.pi * positions[:, None] * frequencies
         basis = np.exp(1j * phase)
         basis[:, 4] = np.cos(phase[:, 4])

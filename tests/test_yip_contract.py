@@ -17,7 +17,7 @@ import astropy.io.fits as pyfits
 import numpy as np
 import pytest
 from lod_unit import lod
-from optixstuff.grids import Measure, PixelGrid
+from optixstuff.grids import Measure, PixelGrid, coverage, reconstruction_margin
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -283,10 +283,10 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == (Measure.intensive(), "transmission")
         assert image.reconstruction == "linear"
-        assert image.outside == "reflect"
-    # Stellar halos continue past the field; off-axis PSFs vanish outside it.
+        assert image.outside == "zero"
+    # No product is extended past its table: every image is zero outside it.
     for image in (native_star, batch_star, rendered_star):
-        assert image.outside == "reflect"
+        assert image.outside == "zero"
     for image in (native_source, batch_source, rendered_source):
         assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
@@ -410,13 +410,22 @@ def test_shipped_stellar_map_stays_positive(shipped_coro):
     and columns of the bright pixels at the level of the hole floor (about 1e-12),
     and a consumer that clamps at zero then rendered exact-zero pixels and bands
     (2 to 11 percent of the hole at detector pitches of 0.45 lambda/D and finer).
-    Every resampled value must be positive on a coarser and a finer grid.
+    Every resampled value must be positive on a coarser and a finer grid. The
+    grids reach past the table, where the map is zero, so the check covers the
+    pixels the table supports: their whole footprint inside it, less the
+    reconstruction margin.
     """
     frame = shipped_coro.stellar_grid.frame
     for n, pitch in ((144, 0.4532), (412, 0.1511)):
         grid = PixelGrid.regular((n, n), pitch, "lod", frame=frame)
-        data = np.asarray(shipped_coro.stellar_map(None, 0.0, grid=grid).data)
-        assert data.min() > 0.0
+        image = shipped_coro.stellar_map(None, 0.0, grid=grid)
+        supported = coverage(
+            shipped_coro.stellar_grid,
+            grid,
+            reconstruction_margin(image.reconstruction),
+        )
+        assert supported.sum() > 0.8 * supported.size
+        assert np.asarray(image.data)[supported].min() > 0.0
 
 
 def test_shipped_off_axis_psfs_ring_only_at_the_noise_floor(shipped_coro):
