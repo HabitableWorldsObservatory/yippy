@@ -65,8 +65,6 @@ class StellarIntens:
             self.grid,
             axes,
             self.measure,
-            # The residual halo continues past the tabulated field.
-            outside="reflect",
             reconstruction=STELLAR_RECONSTRUCTION,
         )
 

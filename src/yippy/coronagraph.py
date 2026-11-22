@@ -230,7 +230,6 @@ class Coronagraph(AbstractTableCoronagraph):
             self.stellar_grid,
             tuple(f"diameter_{i}" for i in range(data.ndim - 2)),
             self._host.stellar_intens.measure,
-            outside="reflect",
             reconstruction=STELLAR_RECONSTRUCTION,
         )
 

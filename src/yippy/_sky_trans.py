@@ -13,5 +13,4 @@ def sky_transmission_image(package) -> Image:
         Measure.intensive(),
         "transmission",
         reconstruction="linear",
-        outside="reflect",
     )
