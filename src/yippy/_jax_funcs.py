@@ -343,9 +343,20 @@ def shift_and_mask(
     return weighted_psf, weight_mask
 
 
+def _safe_hypot(x, y):
+    """Return ``sqrt(x**2 + y**2)`` with a finite derivative at the origin.
+
+    The value is unchanged; at the origin the radius has a cusp and the
+    derivative is taken as zero instead of NaN.
+    """
+    r2 = x**2 + y**2
+    positive = r2 > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, r2, 1.0)), 0.0)
+
+
 def convert_xy_1D(x, y):
     """Converts x and y to 1D coordinates."""
-    return jnp.sqrt(x**2 + y**2), 0
+    return _safe_hypot(x, y), 0
 
 
 def convert_xy_2DQ(x, y):
@@ -668,14 +679,17 @@ def idw_read_plan(
         _x, _y = x, y
 
     # Polar arc-length distance, linearized at the query.
-    r_q = jnp.hypot(_x, _y)
-    theta_q = jnp.arctan2(_y, _x)
+    # The radius and the distance are square roots that vanish at a node or at
+    # the origin, so they go through _safe_hypot to keep the gradient finite.
+    r_q = _safe_hypot(_x, _y)
+    at_origin = r_q == 0
+    theta_q = jnp.arctan2(_y, jnp.where(at_origin, 1.0, _x))
     r_n = jnp.hypot(flat_x_offsets, flat_y_offsets)
     theta_n = jnp.arctan2(flat_y_offsets, flat_x_offsets)
     dr = r_n - r_q
     dtheta = (theta_n - theta_q + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
     arc = r_q * dtheta
-    dists = jnp.sqrt(dr**2 + arc**2)
+    dists = _safe_hypot(dr, arc)
 
     # Find K Nearest Neighbors
     # We use top_k on negative distance to find the smallest distances
