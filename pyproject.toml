@@ -116,7 +116,11 @@ known-first-party = ["yippy"]
 convention = "google"
 
 [tool.pytest.ini_options]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # azimuthal_ring_mean is deprecated but still supported; its tests exercise it.
+    "ignore:leakage_rule 'azimuthal_ring_mean' is deprecated:DeprecationWarning",
+]
 markers = [
     "network: requires network access (skipped by default in CI)",
     "medium: tests with a 30-second default time budget",

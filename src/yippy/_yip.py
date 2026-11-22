@@ -30,7 +30,13 @@ from ._util import (
 from ._version import __version__
 from .interpolation import SincOptions, blend_read
 from .logger import logger
-from .performance import _iter_xaxis_positions
+from .performance import (
+    RING_RULE,
+    _iter_xaxis_positions,
+    record_label,
+    resolve_leakage_rule,
+    ring_leakage_record,
+)
 from .sampling import fraction_image
 from .sinc.evidence import Reason
 
@@ -89,7 +95,7 @@ class _YIPData:
         use_quarter_psf_datacube: bool = True,
         downsample_shape: tuple[int, int] | None = None,
         rule=DEFAULT_APERTURE_RULE,
-        leakage_rule: str = "aperture_mean",
+        leakage_rule: str | None = None,
         *,
         interpolation: str = "blend",
         sinc_options: SincOptions | None = None,
@@ -120,7 +126,6 @@ class _YIPData:
 
         # Store performance curve parameters
         self.rule = rule
-        self.leakage_rule = leakage_rule
         self.curves_by_rule = {}
 
         self.header = package.header.stellar_intensity
@@ -154,6 +159,7 @@ class _YIPData:
         )
 
         self.grid = self.offax.grid
+        self.leakage_rule = resolve_leakage_rule(leakage_rule, self.offax.type)
 
         if delivery is not None:
             self.stellar_header = self.header
@@ -448,6 +454,11 @@ class _YIPData:
                 "table_storage": "float64",
                 "rule": {"name": type(rule).__name__, **asdict(rule)},
                 "leakage_rule": leakage_rule,
+                **(
+                    {"ring_symmetrization": "pixel_weights_on_ring_symmetrized_map_v1"}
+                    if leakage_rule == RING_RULE
+                    else {}
+                ),
                 "stellar_diameter": stellar_diameter_lod,
                 "oversample": CORE_OVERSAMPLE,
                 "separations_lod": None
@@ -493,7 +504,12 @@ class _YIPData:
         rule = self.rule if rule is None else rule
         if not isinstance(rule, ApertureRule):
             raise TypeError("Performance records require Circular or HalfMaximum")
-        leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
+        leakage_rule = (
+            self.leakage_rule
+            if leakage_rule is None
+            else resolve_leakage_rule(leakage_rule, self.offax.type)
+        )
+        label = record_label(leakage_rule)
         diameter = (
             float(self.stellar_intens.diams[0].value)
             if stellar_diameter_lod is None
@@ -517,7 +533,7 @@ class _YIPData:
                 record = load_coro_performance_from_fits(path.name, path.parent)
                 if (
                     record.rule != rule
-                    or record.leakage_rule != leakage_rule
+                    or record.leakage_rule != label
                     or record.frame != self.grid.frame
                     or record.stellar_diameter_lod != diameter
                 ):
@@ -554,21 +570,32 @@ class _YIPData:
                 )
                 for p in positions
             ]
-            record = performance_curves(
-                (
-                    samples.__getitem__
-                    if separations_lod is None
-                    else lambda s: self.create_psf(s, 0.0)
-                ),
-                self.stellar_intens(diameter * lod),
-                rule,
-                separations_lod=native_axis
+            stellar = self.stellar_intens(diameter * lod)
+            offaxis = (
+                samples.__getitem__
                 if separations_lod is None
-                else separations_lod,
-                source_positions_lod=locations if separations_lod is None else None,
-                leakage_rule=leakage_rule,
+                else lambda s: self.create_psf(s, 0.0)
+            )
+            axis = native_axis if separations_lod is None else separations_lod
+            source_positions = locations if separations_lod is None else None
+            record = performance_curves(
+                offaxis,
+                stellar,
+                rule,
+                separations_lod=axis,
+                source_positions_lod=source_positions,
+                leakage_rule=label,
                 stellar_diameter_lod=diameter,
             )
+            if leakage_rule == RING_RULE:
+                record = ring_leakage_record(
+                    record,
+                    rule,
+                    offaxis,
+                    source_positions or [(float(s), 0.0) for s in axis],
+                    stellar,
+                    CORE_OVERSAMPLE,
+                )
             if save_to_fits:
                 save_coro_performance_to_fits(
                     record, filename, directory, identity=identity

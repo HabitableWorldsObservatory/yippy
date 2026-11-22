@@ -76,9 +76,35 @@ accepts measured arrays and their grids or headers from a producer.
 Supply every required rule in `rules=` at construction. `curves(rule)` selects
 a prepared record and raises for an unprepared rule. Reading a curve never
 mutates the model. `coro.with_rules((rule, ...))` returns the same coronagraph
-with a different set of prepared rules, without loading new tables. `leakage_rule="aperture_mean"` is the default;
-`"azimuthal_ring_mean"` selects ring-mean leakage density at construction.
-Pass the same `leakage_rule` to `curves` and scalar queries for that record.
+with a different set of prepared rules, without loading new tables.
+
+`leakage_rule` sets how the star's leakage is read at each separation. Every
+curve is a function of separation alone, so on a 2D product (a stellar map that is
+not rotationally symmetric) the leakage is an average over position angle or a
+single cut, never the value at a planet's own angle; that value comes from the
+image or aperture-record route of coronagraphoto. The rules are:
+
+- `"aperture_ring_mean"`: the default for a 2D product. At each separation, the
+  exact-coverage aperture of the rule (same circle, same pixel weights as the
+  throughput) averaged over position angle, `(1/2pi) integral of the aperture sum
+  with centre (s cos(phi), s sin(phi)) over phi`. It is computed as the aperture
+  weights summed over the stellar map replaced by its ring means, which is the same
+  quantity because the angle average of an aperture is rotationally symmetric. Each
+  ring mean uses `ceil(2 pi r_max)` equally spaced angles (1131 for a 256 pixel
+  map), one per pixel at the farthest ring; the ring means change by under 1e-4
+  between 256 and 1024 angles on the shipped `eac1_aavc_2d` map.
+- `"aperture_mean"`: the default for a 1D product. The aperture on the +x axis, the
+  same value at every angle of a rotationally symmetric product. On a 2D product it
+  is a +x cut, neither the planet value nor the azimuthal mean.
+- `"azimuthal_ring_mean"`: deprecated. A point-sample ring mean times the aperture
+  area, which ignores the aperture extent; `"aperture_ring_mean"` replaces it and
+  agrees with it as the aperture shrinks to a point.
+
+Pass the same `leakage_rule` to `curves` that the coronagraph was prepared with
+(`curves` uses it by default). Reading a 2D product's curves logs one warning per
+product saying so. The stored record for the ring rule carries the
+`PerformanceCurves.leakage_rule` label `"aperture_mean"`, because its leakage is the
+aperture mean of the symmetrized map; `coro.leakage_rule` holds the yippy rule.
 `bandpass` is a `optixstuff.spectral.Band`, or `None` when the YIP has no edges.
 `primary` reads both diameter conventions and collecting area from the YIP.
 

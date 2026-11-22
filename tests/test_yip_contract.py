@@ -382,7 +382,8 @@ def test_public_geometric_leakage_change(shipped_coro):
 
     from yippy._yip import _YIPData
 
-    host = _YIPData(shipped_coro.package)
+    # The references pin the +x aperture reading, not the 2D default ring rule.
+    host = _YIPData(shipped_coro.package, leakage_rule="aperture_mean")
     for rule, native_leakage, change_percent in (
         (
             Circular(0.7),

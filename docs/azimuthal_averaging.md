@@ -113,7 +113,10 @@ rotate-and-average approach. It is faster, more accurate, and produces
 cleaner azimuthal averages.
 
 For a residual density, divide the aperture record by the post-processing
-factor. The aperture-mean density convention differs from the ring mean above:
+factor. The aperture-mean density convention differs from the ring mean above.
+`leakage_rule="aperture_ring_mean"` (the default for a 2D product) is the
+exact-coverage aperture averaged over position angle; `"azimuthal_ring_mean"`
+below is deprecated in its favor:
 
 This example needs a configured coronagraph `coro`, an aperture `rule`,
 a separation, and a post-processing factor `ppf`.

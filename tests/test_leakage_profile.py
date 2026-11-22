@@ -311,3 +311,165 @@ def test_corner_arcs_of_constant_maps(shape, center, dtype):
         )
         np.testing.assert_allclose(evaluate(radii), 1.0, atol=1e-12)
         np.testing.assert_allclose(evaluate(np.array([corner + 0.01])), 0.0)
+
+
+# A modulated map I(r, phi) = I0(r) (1 + m cos 2 phi) has closed forms for every
+# leakage rule. The +x aperture picks up the modulation, the ring-averaged
+# aperture removes it, and the point-sample ring mean times the area ignores the
+# curvature of I0 across the aperture.
+MOD_AMPLITUDE = 0.8
+MOD_SCALE_LOD = 4.0
+MOD_LEVEL = 1e-9
+MOD_SEPARATIONS_LOD = (2.0, 3.0)
+
+
+def _i0(r_lod):
+    return MOD_LEVEL * np.exp(-r_lod / MOD_SCALE_LOD)
+
+
+def _disk_integral(f, center_x, radius=0.7, n_r=48, n_phi=96):
+    """Integral of f(x, y) over a disk by midpoint polar quadrature, in lambda/D^2."""
+    r = (np.arange(n_r) + 0.5) / n_r * radius
+    phi = (np.arange(n_phi) + 0.5) / n_phi * 2 * np.pi
+    rr, pp = np.meshgrid(r, phi, indexing="ij")
+    area = rr * (radius / n_r) * (2 * np.pi / n_phi)
+    return float(np.sum(f(center_x + rr * np.cos(pp), rr * np.sin(pp)) * area))
+
+
+@pytest.fixture(scope="module")
+def modulated_package(tmp_path_factory):
+    """A quarterly symmetric package whose stellar map carries a cos 2 phi term."""
+    import astropy.io.fits as pyfits
+    from synthetic_yip import write_synthetic_yip
+
+    package = write_synthetic_yip(
+        tmp_path_factory.mktemp("modulated"), kind="2dq", max_offset_lod=4.0
+    )
+    axis = (package.npix - 1) / 2
+    yy, xx = np.mgrid[: package.npix, : package.npix]
+    x, y = (xx - axis) * package.pixscale, (yy - axis) * package.pixscale
+    cos2 = (x**2 - y**2) / np.maximum(x**2 + y**2, 1e-30)
+    image = _i0(np.hypot(x, y)) * (1 + MOD_AMPLITUDE * cos2)
+    with pyfits.open(package.path / "stellar_intens.fits", mode="update") as hdul:
+        hdul[0].data[:] = image
+    return package
+
+
+@pytest.fixture(scope="module")
+def modulated(modulated_package):
+    """The three leakage rules prepared on the modulated package."""
+    from yippy import open_yip
+
+    package = open_yip(modulated_package.path)
+    with pytest.warns(DeprecationWarning, match="azimuthal_ring_mean"):
+        point = package.prepare(leakage_rule="azimuthal_ring_mean")
+    return {
+        "default": package.prepare(),
+        "aperture_mean": package.prepare(leakage_rule="aperture_mean"),
+        "aperture_ring_mean": package.prepare(leakage_rule="aperture_ring_mean"),
+        "azimuthal_ring_mean": point,
+        "pixel_area": modulated_package.pixscale**2,
+    }
+
+
+@pytest.mark.parametrize("separation", MOD_SEPARATIONS_LOD)
+def test_leakage_rules_on_a_modulated_map(modulated, separation):
+    """Each rule reads its documented quantity from I0(r) (1 + m cos 2 phi).
+
+    Fails if aperture_mean stops reading the +x axis, if the ring rule keeps
+    any of the modulation (the +x reading would then pass it) or averages a
+    point instead of the aperture, or if azimuthal_ring_mean gains the
+    finite-aperture term that distinguishes it from the ring rule.
+    """
+    pixel_area = modulated["pixel_area"]
+    s = separation
+
+    def leak(rule):
+        record = modulated[rule].curves(leakage_rule=rule)
+        return float(record.evaluate("leakage_fraction", s)), record
+
+    along_x, _ = leak("aperture_mean")
+    ring, ring_record = leak("aperture_ring_mean")
+    _, point_record = leak("azimuthal_ring_mean")
+    area = float(point_record.evaluate("core_area_lod2", s))
+    # The point rule stores its ring density per unit area; the leakage read by a
+    # calculator is that density times the aperture area.
+    point = float(point_record.evaluate("leakage_density_lod2", s)) * area
+
+    x_axis = _disk_integral(
+        lambda x, y: (
+            _i0(np.hypot(x, y)) * (1 + MOD_AMPLITUDE * (x**2 - y**2) / (x**2 + y**2))
+        ),
+        s,
+    )
+    ring_ref = _disk_integral(lambda x, y: _i0(np.hypot(x, y)), s)
+    np.testing.assert_allclose(along_x, x_axis / pixel_area, rtol=1e-3)
+    np.testing.assert_allclose(ring, ring_ref / pixel_area, rtol=1e-3)
+    # The two defaults differ by the modulation, so neither passes the other's test.
+    assert abs(along_x / ring - 1) > 0.05
+    # The point-sample rule is I0(s) times the aperture area; the ring rule adds
+    # the curvature of I0 across the aperture.
+    np.testing.assert_allclose(point * pixel_area / area / _i0(s), 1.0, rtol=1e-3)
+    finite_aperture = ring - point
+    expected = (ring_ref - _i0(s) * area) / pixel_area  # integral of I0 - I0(s)
+    np.testing.assert_allclose(finite_aperture, expected, rtol=0.05)
+    assert ring_record.leakage_rule == "aperture_mean"
+    assert modulated["aperture_ring_mean"].leakage_rule == "aperture_ring_mean"
+
+
+def test_ring_rule_is_the_default_for_a_two_dimensional_product(
+    modulated, tmp_path_factory
+):
+    """A 2D product defaults to the ring rule and a 1D one keeps the +x cut.
+
+    Fails if a 2D product reads the +x axis by default, or a 1D product pays for
+    the ring average (on a symmetric map the two agree, so the label is the test).
+    """
+    from synthetic_yip import write_synthetic_yip
+
+    from yippy import open_yip
+
+    assert modulated["default"].leakage_rule == "aperture_ring_mean"
+    one_d = write_synthetic_yip(tmp_path_factory.mktemp("one-d"), kind="1d")
+    assert open_yip(one_d.path).prepare().leakage_rule == "aperture_mean"
+
+
+def test_ring_azimuth_ladder_converges_on_a_modulated_map(modulated_package):
+    """A cos 2 phi map is averaged exactly by any ladder rung above four angles.
+
+    Fails if the ring mean depends on the number of angles once it exceeds the
+    highest harmonic of the map, or if a map carrying harmonic n needs fewer than
+    n + 1 angles (the 4-angle rung then still aliases cos 4 phi).
+    """
+    from yippy import open_yip
+    from yippy.performance import ring_azimuth_samples, ring_symmetrized
+
+    coro = open_yip(modulated_package.path).prepare()
+    image = coro.stellar_map(None, 0.0, grid=None)
+    grid = coro.stellar_grid
+    default = ring_symmetrized(image).data
+    assert ring_azimuth_samples(grid.shape, (grid.center_y, grid.center_x)) > 64
+    for n_theta in (8, 16, 32, 64):
+        rung = ring_symmetrized(image, n_theta).data
+        np.testing.assert_allclose(rung, default, rtol=1e-3)
+
+
+def test_curves_of_a_2d_product_warn_once(modulated_package, caplog):
+    """Reading a 2D product's curves logs one warning per product, not per read.
+
+    Fails if the warning repeats on every read, is missing on a 2D product, or is
+    raised for a rotationally symmetric product.
+    """
+    from yippy import open_yip
+    from yippy.coronagraph import _WARNED_2D
+
+    _WARNED_2D.clear()
+    coro = open_yip(modulated_package.path).prepare()
+    with caplog.at_level("WARNING", logger="yippy"):
+        coro.curves()
+        coro.curves()
+    messages = [
+        r.getMessage() for r in caplog.records if "2D product" in r.getMessage()
+    ]
+    assert len(messages) == 1
+    assert "position angle" in messages[0]

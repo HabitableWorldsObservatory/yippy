@@ -30,6 +30,7 @@ from ._yip import _YIPData
 from .header import HeaderData
 from .interpolation import SincOptions
 from .logger import logger
+from .performance import RING_RULE, resolve_leakage_rule
 from .sampling import STELLAR_RECONSTRUCTION, fraction_image
 from .scene import (
     DENSE_BATCH,
@@ -39,6 +40,8 @@ from .scene import (
 )
 from .sinc import SceneRenderer
 from .sinc.reader import PrefilteredReader
+
+_WARNED_2D: set = set()
 
 
 def _jax_record(record):
@@ -72,6 +75,7 @@ class Coronagraph(AbstractTableCoronagraph):
     _stellar_ln_interp: interpax.CubicSpline
     _records: tuple[PerformanceCurves, ...]
     uniform_sky_profile: SampledProfile
+    leakage_rule: str = eqx.field(static=True)
     _host: _YIPData = eqx.field(static=True)
 
     @property
@@ -88,7 +92,7 @@ class Coronagraph(AbstractTableCoronagraph):
         use_quarter_psf_datacube=True,
         downsample_shape=None,
         rules=(DEFAULT_APERTURE_RULE,),
-        leakage_rule="aperture_mean",
+        leakage_rule=None,
         interpolation="blend",
         sinc_options: SincOptions | None = None,
     ):
@@ -125,6 +129,7 @@ class Coronagraph(AbstractTableCoronagraph):
             if low_nm != high_nm:
                 self.bandpass = Band(low_nm, high_nm)
         self._offaxis_backend = host.offax
+        self.leakage_rule = host.leakage_rule
         self._stellar_ln_interp = interpax.CubicSpline(
             jnp.asarray(host.stellar_intens.ln_interp.x, dtype=float_dtype()),
             jnp.log(jnp.asarray(host.stellar_intens.psfs, dtype=float_dtype())),
@@ -147,14 +152,45 @@ class Coronagraph(AbstractTableCoronagraph):
             collecting_area_m2=pi * diameter_m**2 / 4 * (1 - self.header.obscured),
         )
 
-    def curves(self, rule=DEFAULT_APERTURE_RULE, *, leakage_rule="aperture_mean"):
-        """Select one prepared record; requesting an unprepared rule raises."""
+    def curves(self, rule=DEFAULT_APERTURE_RULE, *, leakage_rule=None):
+        """Select one prepared record; requesting an unprepared rule raises.
+
+        Every field is a function of separation alone. For a 2D product (a
+        stellar map that is not rotationally symmetric) the star leakage is
+        therefore an average over position angle, or a single cut, and is not
+        the leakage at a particular planet position angle; reading it as one
+        logs a warning once per product. ``leakage_rule`` defaults to the
+        coronagraph's own rule: ``aperture_ring_mean`` for a 2D product (the
+        exact-coverage aperture of ``rule`` averaged over position angle),
+        ``aperture_mean`` for a 1D product (the aperture at +x, equal to every
+        angle there). The leakage at a planet's own angle is the image or
+        aperture-record route of ``coronagraphoto``.
+        """
+        leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
         record = self._find_record(rule, leakage_rule)
         if record is None:
             raise ValueError(
                 "No prepared record; supply rules and leakage_rule at construction"
             )
+        self._warn_if_azimuthal()
         return record
+
+    def _warn_if_azimuthal(self):
+        """Log once per product that a 2D product's curves are not a planet value."""
+        key = (self.package.source.digest, self.leakage_rule)
+        if self._offaxis_backend.type == "1d" or key in _WARNED_2D:
+            return
+        _WARNED_2D.add(key)
+        what = {
+            RING_RULE: "averaged over position angle",
+            "aperture_mean": "read on the +x axis only",
+        }.get(self.leakage_rule, "a point-sample ring mean")
+        logger.warning(
+            f"{self.package.source.path.name} is a 2D product: its curves give the "
+            f"star leakage by separation only ({self.leakage_rule}, {what}). "
+            "The leakage at a planet's own position angle comes from the image or "
+            "aperture-record route (coronagraphoto), not from the curves."
+        )
 
     def uniform_sky_response(self, separation_lod):
         """Annular mean of the uniform-sky map at separations in lambda/D."""
@@ -169,12 +205,10 @@ class Coronagraph(AbstractTableCoronagraph):
         return profile.evaluate(separation_lod)
 
     def _find_record(self, rule, leakage_rule):
+        if leakage_rule != self.leakage_rule:
+            return None
         return next(
-            (
-                record
-                for record in self._records
-                if record.rule == rule and record.leakage_rule == leakage_rule
-            ),
+            (record for record in self._records if record.rule == rule),
             None,
         )
 
@@ -232,10 +266,15 @@ class Coronagraph(AbstractTableCoronagraph):
         if not rules:
             raise ValueError("rules must contain at least one aperture rule")
         if leakage_rule is None:
-            leakage_rule = self._records[0].leakage_rule
+            leakage_rule = self.leakage_rule
+        leakage_rule = resolve_leakage_rule(leakage_rule, self._offaxis_backend.type)
         host = self._host_for_rule(rules[0], leakage_rule)
         records = tuple(_jax_record(host._prepare_record(rule)) for rule in rules)
-        return eqx.tree_at(lambda c: c._records, self, records)
+        model = eqx.tree_at(lambda c: c._records, self, records)
+        if leakage_rule != self.leakage_rule:
+            # A static field cannot be swapped by tree_at; set it on the copy.
+            object.__setattr__(model, "leakage_rule", leakage_rule)
+        return model
 
     def _host_for_rule(self, rule, leakage_rule):
         """Use the loaded host tables with independent per-request state."""
@@ -289,7 +328,7 @@ class Coronagraph(AbstractTableCoronagraph):
     def _host_for_scene(self):
         """The host tables with the symmetric quarter storage the dense route needs."""
         record = self._records[0]
-        host = self._host_for_rule(record.rule, record.leakage_rule)
+        host = self._host_for_rule(record.rule, self.leakage_rule)
         backend = self._offaxis_backend
         # Signed tables and permission regions can break mirror symmetry.
         host.use_quarter_psf_datacube = (
