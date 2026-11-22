@@ -504,99 +504,17 @@ def test_float64_process_uses_separate_entries(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# PSF datacubes
+# Scene operator
 # ---------------------------------------------------------------------------
 
 
-def _small_2dq(tmp_path, name, **kwargs):
-    return _yip(tmp_path, name, kind="2dq", npix=16, max_offset_lod=2.0, **kwargs)
-
-
-def _cube(coro):
-    coro._prepare_dense_psfs()
-    return np.asarray(coro.psf_datacube)
-
-
 @pytest.mark.parametrize(("kind", "warned"), [("1d", True), ("2dq", False)])
-def test_datacube_warning_names_1d_sampling_only(tmp_path, caplog, kind, warned):
-    """Fails if a 1D datacube stops reporting that its PSFs are not rotated."""
+def test_scene_operator_warning_names_1d_sampling_only(tmp_path, caplog, kind, warned):
+    """Fails if a 1D scene operator stops reporting that its PSFs are not rotated."""
     path = _yip(tmp_path, f"warn_{kind}", kind=kind, npix=16, max_offset_lod=2.0)
-    coro = _YIPData(open_yip(path))
     with caplog.at_level("WARNING", logger="yippy"):
-        coro._prepare_dense_psfs()
+        open_yip(path).prepare().with_scene_operator()
     assert any("not rotated" in r.getMessage() for r in caplog.records) is warned
-
-
-def _assert_same_cube(warm, cold):
-    """Two independently synthesized cubes agree to synthesis roundoff.
-
-    Tolerance basis: XLA's multithreaded CPU kernels can order the FFT and
-    neighbor-sum additions differently between runs, moving pixels by up to
-    one unit roundoff of the peak (about 6e-8 of it in float32). ``1e-6`` of
-    the peak leaves margin for that; the aliasing defects guarded here change
-    the cube by tens of percent of the peak.
-    """
-    got, want = _cube(warm), _cube(cold)
-    assert_allclose(got, want, rtol=0, atol=1e-6 * want.max())
-
-
-def test_datacube_identity_includes_physical_symmetry(tmp_path):
-    """Full cubes built with different x symmetry do not alias."""
-    path = _small_2dq(tmp_path, "warm")
-    _cube(_YIPData(open_yip(path), use_quarter_psf_datacube=False))
-    warm = _YIPData(open_yip(path), use_quarter_psf_datacube=False, x_symmetric=False)
-    cold = _YIPData(
-        open_yip(_small_2dq(tmp_path, "cold")),
-        use_quarter_psf_datacube=False,
-        x_symmetric=False,
-    )
-    _assert_same_cube(warm, cold)
-
-
-def test_quarter_and_full_cubes_are_distinct(tmp_path):
-    """Quarter and full storage use separate entries."""
-    path = _small_2dq(tmp_path, "yip")
-    quarter = _YIPData(open_yip(path))
-    full = _YIPData(open_yip(path), use_quarter_psf_datacube=False)
-    assert quarter._datacube_cache_path != full._datacube_cache_path
-    assert _cube(quarter).shape != _cube(full).shape
-
-
-def test_gpu_path_loads_the_cpu_entry(tmp_path, monkeypatch):
-    """The GPU loader reads the same identity the CPU writer produced."""
-    path = _small_2dq(tmp_path, "yip")
-    expected = _cube(_YIPData(open_yip(path)))
-    other = _YIPData(open_yip(path))
-
-    def fail(*args, **kwargs):
-        raise AssertionError("cube was regenerated")
-
-    monkeypatch.setattr(other.offax, "create_psfs", fail)
-    other._prepare_dense_psfs_gpu()
-    assert_allclose(np.asarray(other.psf_datacube), expected, rtol=0, atol=0)
-
-
-def test_source_overwrite_invalidates_datacube(tmp_path):
-    """A rewritten package gets a fresh cube."""
-    path = _small_2dq(tmp_path, "warm")
-    _cube(_YIPData(open_yip(path)))
-    write_synthetic_yip(path, kind="2dq", npix=16, max_offset_lod=2.0, psf_flux=0.5)
-    _bump_mtime(path)
-    warm = _YIPData(open_yip(path))
-    cold = _YIPData(open_yip(_small_2dq(tmp_path, "cold", psf_flux=0.5)))
-    _assert_same_cube(warm, cold)
-
-
-def test_stale_object_does_not_label_cube_as_new_source(tmp_path):
-    """An object loaded before a source edit writes under its original identity."""
-    path = _small_2dq(tmp_path, "warm")
-    stale = _YIPData(open_yip(path))
-    write_synthetic_yip(path, kind="2dq", npix=16, max_offset_lod=2.0, psf_flux=0.5)
-    _bump_mtime(path)
-    _cube(stale)
-    warm = _YIPData(open_yip(path))
-    cold = _YIPData(open_yip(_small_2dq(tmp_path, "cold", psf_flux=0.5)))
-    _assert_same_cube(warm, cold)
 
 
 def test_synthesized_core_cache_does_not_feed_default_curves(tmp_path):

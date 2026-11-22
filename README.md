@@ -130,7 +130,18 @@ image, valid = coro.render_scene(scene_image, None, grid=detector_grid)
 ```
 
 `with_scene_operator()` returns a `SceneCoronagraph`, which carries a
-`DenseSceneOperator` (or a sinc `SceneRenderer`) beside the unchanged model.
+`BlendSceneOperator` (or a sinc `SceneRenderer`) beside the unchanged model.
+The blend operator renders the scene with one FFT product per stored PSF, so
+it holds the stored PSFs rather than one PSF per source pixel (about 60 MB in
+float32 and 120 MB in float64 for `eac1_aavc_2d` on its 256 by 256 grid, where a
+PSF per source takes 8.6 GB), and it is exactly linear in the source flux. A
+render may ring slightly below zero, so clip it where a nonnegative image is
+required.
+
+`coro.scene_operator_bytes()` reports the resident and scratch bytes of the
+operator from shapes alone. `with_scene_operator(max_bytes=2 * 2**30)` raises
+`yippy.sinc.MemoryLimit` before allocating when the estimate exceeds
+`max_bytes`; pass a larger value, or `None` to skip the check.
 
 ## Performance records
 

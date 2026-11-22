@@ -15,10 +15,9 @@ from optixstuff.performance import (
     SampledProfile,
     performance_curves,
 )
-from tqdm import tqdm
 
 from ._offjax import OffJAX
-from ._precision import dtype_tag, float_dtype
+from ._precision import dtype_tag
 from ._sky_trans import sky_transmission_image
 from ._stellar_intens import StellarIntens
 from ._util import (
@@ -181,9 +180,9 @@ class _YIPData:
         # Get the sky_trans mask
         self.sky_trans = sky_transmission_image(package)
 
-        # PSF datacube axes are (source_y, source_x, y, x).
-        # Given the computational cost of generating this
-        # datacube, it is only generated when needed.
+        # PSF datacube axes are (source_y, source_x, y, x). Only a delivery that
+        # mixes sinc and blend reads per source builds one; it is generated when
+        # a scene operator needs it.
         self.has_psf_datacube = False
         self.use_quarter_psf_datacube = use_quarter_psf_datacube
 
@@ -272,100 +271,12 @@ class _YIPData:
             indexing="xy",
         )
 
-    def _prepare_dense_psfs(self, batch_size=128):
-        """Load the PSF datacube from a file or generate it if it doesn't exist.
-
-        The PSF datacube has axes (source_y, source_x, y, x).
-        Given the computational cost of generating this
-        datacube, it is only generated when needed and saved to a numpy binary
-        file in the yip_path directory.
-
-        Args:
-            batch_size (int):
-                Number of PSFs to generate in each batch. Default is 128.
-        """
-        if self._sinc_delivery is not None:
-            return self._create_delivery_datacube(batch_size)
-        if self.offax.type == "1d":
-            logger.warning(
-                "Building a PSF datacube from a 1D YIP: off-axis PSFs are "
-                "translated to each source position, not rotated to its "
-                "position angle, so azimuthal PSF structure keeps its +x "
-                "orientation. Use a 2D YIP for spatially resolved scenes."
-            )
-        backend = jax.default_backend().lower()
-        if backend in ("gpu", "tpu"):
-            return self._prepare_dense_psfs_gpu(batch_size=batch_size)
-        ext = "_quarter" if self.use_quarter_psf_datacube else ""
-        datacube_path = self._datacube_cache_path
-        cached = _load_cached_datacube(datacube_path)
-        if cached is not None:
-            logger.info(f"Loading PSF datacube from {datacube_path}.")
-            psfs = jnp.asarray(cached)
-        else:
-            x_lod, y_lod = self._datacube_offsets()
-            psfs_shape = (*x_lod.shape, *self.psf_shape)
-            psfs = np.zeros(psfs_shape, dtype=float_dtype())
-            points = np.column_stack((x_lod.flatten(), y_lod.flatten()))
-            n_points = points.shape[0]
-
-            logger.info(
-                f"Calculating {'quarter' if ext else 'full'} data cube of "
-                f"spatially dependent PSFs ({n_points} points), please hold..."
-            )
-            with tqdm(total=n_points, desc="Computing PSFs") as pb:
-                for i in range(0, n_points, batch_size):
-                    # Select the current batch
-                    batch_points = points[i : i + batch_size]
-                    batch_psfs = self.offax.create_psfs_parallel(
-                        batch_points[:, 0], batch_points[:, 1]
-                    )
-
-                    # Store the batch in the data cube
-                    psfs.reshape((-1, self.npixels, self.npixels))[
-                        i : i + batch_size
-                    ] = batch_psfs.integrated().data
-                    pb.update(batch_points.shape[0])
-            _save_datacube(datacube_path, psfs)
-            logger.info(f"PSF datacube saved to {datacube_path}.")
-
-        # Move datacube to GPU/TPU device if conditions are met
-        backend = jax.default_backend().lower()
-        if self.use_quarter_psf_datacube and backend in ("gpu", "tpu"):
-            # Check if already a JAX array on the target device
-            target_device = jax.devices(backend)[0]
-            already_on_device = (
-                hasattr(psfs, "devices") and target_device in psfs.devices()
-            )
-
-            if already_on_device:
-                logger.info(f"PSF datacube already on {backend.upper()} device")
-            else:
-                logger.info(
-                    f"Moving PSF datacube to {backend.upper()} device "
-                    "(quarter symmetric datacube)"
-                )
-                # Convert to JAX array and place on device
-                # Note: avoid jnp.array() on existing JAX array to prevent copy
-                try:
-                    if not isinstance(psfs, jax.Array):
-                        psfs = jnp.asarray(psfs)
-                    psfs = jax.device_put(psfs, target_device)
-                    logger.info(
-                        f"Successfully moved PSF datacube to {backend.upper()} device"
-                    )
-                except (MemoryError, RuntimeError) as e:
-                    logger.warning(
-                        f"Failed to move PSF datacube to {backend.upper()} "
-                        f"device (insufficient memory): {e}. Keeping on CPU."
-                    )
-                    # psfs remains as numpy array on CPU
-
-        self.has_psf_datacube = True
-        self.psf_datacube = psfs
-
     def _create_delivery_datacube(self, batch_size):
-        """Cache midpoint-grid reads with integrity-bound status selections."""
+        """Cache midpoint-grid reads with integrity-bound status selections.
+
+        One PSF per source position: the scene route of a delivery that mixes sinc
+        and blend reads. The cube has axes (source_y, source_x, y, x).
+        """
         import json
 
         from .delivery.format import file_sha256
@@ -439,68 +350,6 @@ class _YIPData:
             tmp.unlink(missing_ok=True)
         self.psf_datacube, self.psf_datacube_info = jnp.asarray(cube), diagnostics
         self.has_psf_datacube = True
-
-    def _prepare_dense_psfs_gpu(self, batch_size=128):
-        """Generate PSF datacube on GPU/TPU, transferring each batch to host.
-
-        Uses vmap+jit (``offax.create_psfs``) instead of shard_map to avoid
-        the CPU multi-device overhead that ``create_psfs_parallel`` carries.
-        Each batch is copied to a pre-allocated host buffer immediately after
-        synthesis, then ``np.save`` writes the final cube. The on-device
-        accumulation + ``jnp.concatenate`` pattern is avoided because it
-        silently corrupts output on some GPUs (Blackwell observed; A100 with
-        broken CUDA12 plugin observed).
-
-        Args:
-            batch_size (int):
-                Number of PSFs to generate per batch. Default is 128.
-        """
-        ext = "_quarter" if self.use_quarter_psf_datacube else ""
-        if self._sinc_delivery is not None:
-            return self._create_delivery_datacube(batch_size)
-        datacube_path = self._datacube_cache_path
-        cached = _load_cached_datacube(datacube_path)
-        if cached is not None:
-            logger.info(f"Loading PSF datacube from {datacube_path}.")
-            psfs = jnp.asarray(cached)
-        else:
-            x_lod, y_lod = self._datacube_offsets()
-            psfs_shape = (*x_lod.shape, *self.psf_shape)
-            points = np.column_stack((x_lod.flatten(), y_lod.flatten()))
-            n_points = points.shape[0]
-
-            backend = jax.default_backend().upper()
-            logger.info(
-                f"Generating {'quarter' if ext else 'full'} PSF datacube "
-                f"on {backend} ({n_points} points)..."
-            )
-
-            # Pre-allocate host buffer and transfer each batch immediately.
-            # Avoids a silent jnp.concatenate corruption observed on some GPUs
-            # (e.g. Blackwell / RTX PRO 6000) when aggregating many GPU buffers
-            # before save.
-            psfs = np.empty(psfs_shape, dtype=float_dtype())
-            flat_view = psfs.reshape(-1, self.npixels, self.npixels)
-            with tqdm(total=n_points, desc="Computing PSFs") as pb:
-                for i in range(0, n_points, batch_size):
-                    batch_x = jnp.array(points[i : i + batch_size, 0])
-                    batch_y = jnp.array(points[i : i + batch_size, 1])
-                    batch_psfs = self.offax.create_psfs(batch_x, batch_y)
-                    flat_view[i : i + batch_size] = np.asarray(
-                        batch_psfs.integrated().data
-                    )
-                    pb.update(batch_x.shape[0])
-
-            _save_datacube(datacube_path, psfs)
-            logger.info(f"PSF datacube saved to {datacube_path}.")
-
-        target_device = jax.devices()[0]
-        if not (hasattr(psfs, "devices") and target_device in psfs.devices()):
-            psfs = jax.device_put(jnp.asarray(psfs), target_device)
-            logger.info(f"PSF datacube on {jax.default_backend().upper()} device")
-
-        self.has_psf_datacube = True
-        self.psf_datacube = psfs
 
     def __repr__(self):
         """String representation of the Coronagraph object."""

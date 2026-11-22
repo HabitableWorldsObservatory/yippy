@@ -482,7 +482,7 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         ) != cache_identity_digest(host._auto_perf_identity())
         changed._load_or_compute_performance()
         assert (changed._perf_dir / changed._perf_filename()).exists()
-        changed._prepare_dense_psfs(batch_size=4)
+        changed._create_delivery_datacube(4)
         first = np.asarray(changed.psf_datacube)
 
         def no_reads(*args, **kwargs):
@@ -490,16 +490,16 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
 
         with monkeypatch.context() as patch:
             patch.setattr(changed, "create_psfs_with_info", no_reads)
-            changed._prepare_dense_psfs_gpu(batch_size=4)
+            changed._create_delivery_datacube(4)
         np.testing.assert_array_equal(changed.psf_datacube, first)
         perf_path = changed._perf_dir / changed._perf_filename()
         stamp = perf_path.stat().st_mtime_ns
         changed._load_or_compute_performance()
         assert perf_path.stat().st_mtime_ns == stamp
-    host._prepare_dense_psfs(batch_size=4)
+    host._create_delivery_datacube(4)
     before = np.asarray(host.psf_datacube)
     selected = host.psf_datacube_info["selected_backend"].copy()
-    host._prepare_dense_psfs_gpu(batch_size=4)
+    host._create_delivery_datacube(4)
     np.testing.assert_array_equal(host.psf_datacube, before)
     np.testing.assert_array_equal(host.psf_datacube_info["selected_backend"], selected)
     np.testing.assert_array_equal(
@@ -514,10 +514,16 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
         assert np.isfinite(before[row, 0]).all()
         assert np.isnan(before[row, 1]).all()
     base_cube.with_suffix(".status.npz").unlink()
-    host._prepare_dense_psfs(batch_size=4)
+    host._create_delivery_datacube(4)
     assert base_cube.with_suffix(".status.npz").exists()
 
-    scene_model = admitted.with_scene_operator(batch_size=4)
+    scene_model = admitted.with_scene_operator()
+    # The per-source route reports its cube and refuses a budget below it.
+    assert (
+        admitted.scene_operator_bytes()["resident"] == scene_model.operator.psfs.nbytes
+    )
+    with pytest.raises(sc.MemoryLimit, match="max_bytes"):
+        admitted.with_scene_operator(max_bytes=1)
     image = Image(
         jnp.zeros(admitted.grid.shape), admitted.grid, (), Measure.integral(), "flux"
     )
@@ -838,13 +844,9 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
             assert len({c._datacube_cache_path for c in objects}) == len(objects)
             assert len({c._perf_filename() for c in objects}) == len(objects)
             for i, coro in enumerate(objects):
-                entry, reload = (
-                    (coro._prepare_dense_psfs, coro._prepare_dense_psfs_gpu)
-                    if i % 2 == 0
-                    else (coro._prepare_dense_psfs_gpu, coro._prepare_dense_psfs)
-                )
+                entry = reload = coro._create_delivery_datacube
                 assert not coro._datacube_cache_path.exists()
-                entry(batch_size=4)
+                entry(4)
                 before = np.asarray(coro.psf_datacube)
                 assert np.isfinite(before).all()
                 assert (coro._perf_dir / coro._perf_filename()).exists()
@@ -854,7 +856,7 @@ def test_fallback_options_cache(tmp_path, monkeypatch, gate):
 
                 with monkeypatch.context() as patch:
                     patch.setattr(coro, "create_psfs_with_info", no_reads)
-                    reload(batch_size=4)
+                    reload(4)
                 np.testing.assert_array_equal(coro.psf_datacube, before)
                 # Reconstructing the same request also reuses its performance entry.
                 perf_path = coro._perf_dir / coro._perf_filename()
@@ -955,9 +957,9 @@ def test_policy_cache_generation(admitted, budget):
     assert changed._datacube_cache_path != host._datacube_cache_path
     assert changed._perf_filename() != host._perf_filename()
     changed._load_or_compute_performance()
-    changed._prepare_dense_psfs_gpu(batch_size=4)
+    changed._create_delivery_datacube(4)
     before = np.asarray(changed.psf_datacube)
-    changed._prepare_dense_psfs(batch_size=4)
+    changed._create_delivery_datacube(4)
     np.testing.assert_array_equal(changed.psf_datacube, before)
     assert not changed.psf_datacube_info["accepted"].any()
     assert changed._datacube_cache_path.exists()

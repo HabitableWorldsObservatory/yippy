@@ -23,13 +23,15 @@ from optixstuff.performance import PerformanceCurves, SampledProfile
 from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band
 
+from ._jax_funcs import blend_pad
 from ._precision import float_dtype
 from ._yip import _YIPData
 from .header import HeaderData
 from .interpolation import SincOptions
+from .logger import logger
 from .sampling import fraction_image
-from .scene import DenseSceneOperator
-from .sinc import SceneRenderer
+from .scene import DENSE_BATCH, BlendSceneOperator, _DenseSceneOperator
+from .sinc import MemoryLimit, SceneRenderer
 from .sinc.reader import PrefilteredReader
 
 
@@ -237,38 +239,102 @@ class Coronagraph(AbstractTableCoronagraph):
         host.offax = self._offaxis_backend
         return host
 
-    def with_scene_operator(self, *, batch_size=128):
-        """Prepare a scene renderer for this model on its native source grid.
+    def _dense_delivery(self):
+        """Whether scene reads mix sinc and blend per source (one PSF per source)."""
+        return self._host._sinc_delivery is not None
 
-        Admitted prefiltered products render from their coefficient table.
-        Other interpolation modes cache dense PSFs with per-source admission.
-        """
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
+    def _prefiltered_scene(self):
+        """Whether the scene renders from a prefiltered coefficient table."""
         backend = self._offaxis_backend
         reader = getattr(backend, "reader", None)
-        if isinstance(reader, PrefilteredReader) and backend.blend_nodes is None:
-            x, y = self.grid.coordinates()
-            operator = SceneRenderer.from_raster(reader, 0, x[0], y[:, 0])
+        return isinstance(reader, PrefilteredReader) and backend.blend_nodes is None
+
+    def scene_operator_bytes(self):
+        """Estimate the bytes of `with_scene_operator` without allocating them.
+
+        Returns a dict with the keys ``resident`` (the operator), ``scratch``
+        (the transient peak of building or rendering) and ``total``. The
+        estimate comes from shapes and node offsets only. A prefiltered
+        delivery reports the upper bound of its coefficient table; its own
+        memory budget governs the build.
+        """
+        backend = self._offaxis_backend
+        itemsize = jnp.dtype(float_dtype()).itemsize
+        if self._prefiltered_scene():
+            coefficients = backend.reader.coefficients
+            resident = (
+                int(np.prod(coefficients.shape[1:])) * coefficients.dtype.itemsize
+            )
+            scratch = 5 * int(np.prod(coefficients.shape[-2:])) * 8
+        elif self._dense_delivery():
+            host = self._host_for_scene()
+            sy, sx = host._datacube_offsets()[0].shape
+            npix = int(self._host.npixels)
+            resident = sy * sx * npix * npix * itemsize
+            padded = npix + 2 * blend_pad(npix)
+            batch = DENSE_BATCH * 4 * padded * (padded // 2 + 1) * 2 * itemsize
+            # The cube is gathered on the host, then copied to the device.
+            scratch = resident + batch
         else:
-            record = self._records[0]
-            host = self._host_for_rule(record.rule, record.leakage_rule)
-            # Signed tables and permission regions can break mirror symmetry.
-            host.use_quarter_psf_datacube = (
-                host.use_quarter_psf_datacube
-                and backend.type in ("1d", "2dq")
-                and host.x_symmetric
-                and host.y_symmetric
-                and self.grid.is_geometric
+            return BlendSceneOperator.size_bytes(backend, self.grid)
+        return {"resident": resident, "scratch": scratch, "total": resident + scratch}
+
+    def _host_for_scene(self):
+        """The host tables with the symmetric quarter storage the dense route needs."""
+        record = self._records[0]
+        host = self._host_for_rule(record.rule, record.leakage_rule)
+        backend = self._offaxis_backend
+        # Signed tables and permission regions can break mirror symmetry.
+        host.use_quarter_psf_datacube = (
+            host.use_quarter_psf_datacube
+            and backend.type in ("1d", "2dq")
+            and host.x_symmetric
+            and host.y_symmetric
+            and self.grid.is_geometric
+        )
+        return host
+
+    def with_scene_operator(self, *, max_bytes=2 * 2**30):
+        """Prepare a scene renderer for this model on its native source grid.
+
+        Admitted prefiltered products render from their coefficient table. A blend
+        model renders through ``BlendSceneOperator``, one FFT product per stored
+        PSF. A delivery that mixes sinc and blend reads builds one PSF per source.
+
+        Args:
+            max_bytes: Refuse, before allocating, an operator whose estimated
+                total (see ``scene_operator_bytes``) exceeds this many bytes.
+                ``None`` disables the check.
+
+        Raises:
+            yippy.sinc.MemoryLimit: The estimate exceeds ``max_bytes``.
+        """
+        if max_bytes is not None:
+            estimate = self.scene_operator_bytes()
+            logger.info(
+                f"Scene operator estimate: {estimate['resident'] / 1e9:.2f} GB "
+                f"resident, {estimate['scratch'] / 1e9:.2f} GB scratch."
             )
-            host._prepare_dense_psfs(batch_size)
+            if estimate["total"] > max_bytes and not self._prefiltered_scene():
+                raise MemoryLimit(
+                    f"scene operator needs about {estimate['total'] / 1e9:.2f} GB "
+                    f"({estimate['resident'] / 1e9:.2f} GB resident plus "
+                    f"{estimate['scratch'] / 1e9:.2f} GB scratch), above "
+                    f"max_bytes={max_bytes} ({max_bytes / 1e9:.2f} GB); raise "
+                    "max_bytes or pass None to build it anyway"
+                )
+        backend = self._offaxis_backend
+        if self._prefiltered_scene():
+            x, y = self.grid.coordinates()
+            operator = SceneRenderer.from_raster(backend.reader, 0, x[0], y[:, 0])
+        elif self._dense_delivery():
+            host = self._host_for_scene()
+            host._create_delivery_datacube(DENSE_BATCH)
             cube = jnp.asarray(host.psf_datacube)
-            valid = (
-                host.psf_datacube_info["accepted"]
-                if host._sinc_delivery is not None
-                else jnp.ones(cube.shape[:2], dtype=bool)
-            )
-            operator = DenseSceneOperator(cube, valid)
+            valid = host.psf_datacube_info["accepted"]
+            operator = _DenseSceneOperator(cube, valid)
+        else:
+            operator = BlendSceneOperator.from_backend(backend, self.grid)
         return SceneCoronagraph(self, operator)
 
     def __repr__(self):
@@ -282,7 +348,7 @@ class Coronagraph(AbstractTableCoronagraph):
 class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
     """YIP imaging model with a prepared native scene operator."""
 
-    operator: DenseSceneOperator | SceneRenderer
+    operator: BlendSceneOperator | SceneRenderer | _DenseSceneOperator
 
     def __init__(self, model, operator):
         """Reuse the prepared imaging tables and bind the chosen operator."""

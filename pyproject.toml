@@ -14,7 +14,6 @@ dependencies = [
   "optixstuff>=7.0.0",  # unreleased: next release, see .github/sibling-pins.txt
   "jaxtyping>=0.3.3",
   "lod_unit>=1.8.0",
-  "tqdm>=4.66.3",
   "jax>=0.8.1",
   "equinox>=0.13.2",
   "interpax>=0.3.12",

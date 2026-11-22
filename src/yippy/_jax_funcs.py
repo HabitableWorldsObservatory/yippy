@@ -403,65 +403,29 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
     return fft_shift_y(_PSF, shift, y_phasor)
 
 
-def synthesize_psf_separable(
+def blend_pad(n_pixels):
+    """Zero padding per side that keeps FFT translations from wrapping (even total)."""
+    n_pad = int(1.5 * n_pixels)
+    return n_pad + 1 if (n_pixels + 2 * n_pad) % 2 else n_pad
+
+
+def separable_read_plan(
     x,
     y,
     pixel_scale_arcsec,
-    flat_psfs,
     x_offsets,
     y_offsets,
     offset_to_flat_idx,
-    kx,
-    ky,
-    n_pad,
     x_symmetric,
     y_symmetric,
     input_type,
-    max_offset,
 ):
-    """Synthesizes PSF using separable 1D FFTs.
+    """Return the nodes, weights and pixel shifts of one separable blend read.
 
-    Optimized for speed and stability with even-sized padding.
-    Uses flat_psfs with offset_to_flat_idx mapping for memory efficiency.
-
-    For 1D input the neighbors are the tabulated PSFs along +x at the radial
-    separation of (x, y). They are mirrored for x < 0 or y < 0 and translated,
-    but not rotated to the position angle: rotation would also rotate the
-    pupil's diffraction structure, which is fixed on the detector.
-
-    Args:
-        x (float):
-            X coordinate in lambda/D.
-        y (float):
-            Y coordinate in lambda/D.
-        pixel_scale_arcsec (float):
-            Pixel scale in lambda/D per pixel.
-        flat_psfs (jnp.ndarray):
-            Flat array of PSFs with shape (N_psfs, H, W).
-        x_offsets (jnp.ndarray):
-            Sorted array of unique x offsets.
-        y_offsets (jnp.ndarray):
-            Sorted array of unique y offsets.
-        offset_to_flat_idx (jnp.ndarray):
-            2D array mapping (x_idx, y_idx) -> flat_psfs index.
-        kx (jnp.ndarray):
-            FFT frequencies for x-axis.
-        ky (jnp.ndarray):
-            FFT frequencies for y-axis.
-        n_pad (int):
-            Number of padding pixels.
-        x_symmetric (bool):
-            Whether PSFs are symmetric about x=0.
-        y_symmetric (bool):
-            Whether PSFs are symmetric about y=0.
-        input_type (str):
-            Type of input data ("1d", "2dq", or "2df").
-        max_offset (float):
-            Maximum valid offset distance (-1 to disable bounds check).
-
-    Returns:
-        jnp.ndarray:
-            Synthesized PSF at the requested (x, y) position.
+    The result is ``(flat_indices, weights, shift_x, shift_y)``, one entry per
+    neighbor. A PSF read is the weighted sum of the neighbors, each translated by
+    its shift in the canonical quadrant, then reflected for negative coordinates
+    when the response is symmetric.
     """
     # Neighbor lookup
     if input_type == "1d":
@@ -473,7 +437,6 @@ def synthesize_psf_separable(
 
     # Use the index mapping to get flat_psfs indices from (x_idx, y_idx) pairs
     flat_indices = offset_to_flat_idx[inds[:, 0], inds[:, 1]]
-    neighbors = flat_psfs[flat_indices]
 
     # We calculate weights based on the relative position of _x/_y
     # within the bounding box of the neighbors found.
@@ -540,6 +503,81 @@ def synthesize_psf_separable(
     query_y = jnp.where(y < 0, -y, y) if y_symmetric else y
     shift_x = (query_x - offsets[:, 0]) / pixel_scale_arcsec
     shift_y = (query_y - offsets[:, 1]) / pixel_scale_arcsec
+    return flat_indices, weights, shift_x, shift_y
+
+
+def synthesize_psf_separable(
+    x,
+    y,
+    pixel_scale_arcsec,
+    flat_psfs,
+    x_offsets,
+    y_offsets,
+    offset_to_flat_idx,
+    kx,
+    ky,
+    n_pad,
+    x_symmetric,
+    y_symmetric,
+    input_type,
+    max_offset,
+):
+    """Synthesizes PSF using separable 1D FFTs.
+
+    Optimized for speed and stability with even-sized padding.
+    Uses flat_psfs with offset_to_flat_idx mapping for memory efficiency.
+
+    For 1D input the neighbors are the tabulated PSFs along +x at the radial
+    separation of (x, y). They are mirrored for x < 0 or y < 0 and translated,
+    but not rotated to the position angle: rotation would also rotate the
+    pupil's diffraction structure, which is fixed on the detector.
+
+    Args:
+        x (float):
+            X coordinate in lambda/D.
+        y (float):
+            Y coordinate in lambda/D.
+        pixel_scale_arcsec (float):
+            Pixel scale in lambda/D per pixel.
+        flat_psfs (jnp.ndarray):
+            Flat array of PSFs with shape (N_psfs, H, W).
+        x_offsets (jnp.ndarray):
+            Sorted array of unique x offsets.
+        y_offsets (jnp.ndarray):
+            Sorted array of unique y offsets.
+        offset_to_flat_idx (jnp.ndarray):
+            2D array mapping (x_idx, y_idx) -> flat_psfs index.
+        kx (jnp.ndarray):
+            FFT frequencies for x-axis.
+        ky (jnp.ndarray):
+            FFT frequencies for y-axis.
+        n_pad (int):
+            Number of padding pixels.
+        x_symmetric (bool):
+            Whether PSFs are symmetric about x=0.
+        y_symmetric (bool):
+            Whether PSFs are symmetric about y=0.
+        input_type (str):
+            Type of input data ("1d", "2dq", or "2df").
+        max_offset (float):
+            Maximum valid offset distance (-1 to disable bounds check).
+
+    Returns:
+        jnp.ndarray:
+            Synthesized PSF at the requested (x, y) position.
+    """
+    flat_indices, weights, shift_x, shift_y = separable_read_plan(
+        x,
+        y,
+        pixel_scale_arcsec,
+        x_offsets,
+        y_offsets,
+        offset_to_flat_idx,
+        x_symmetric,
+        y_symmetric,
+        input_type,
+    )
+    neighbors = flat_psfs[flat_indices]
 
     # Pad (using consistent n_pad from init)
     # (K, H, W) -> (K, H_pad, W_pad)
@@ -603,29 +641,23 @@ def synthesize_psf_separable(
     return psf
 
 
-def synthesize_psf_idw(
+def idw_read_plan(
     x,
     y,
     pixel_scale_arcsec,
-    flat_psfs,
     flat_x_offsets,
     flat_y_offsets,
-    kx,
-    ky,
-    n_pad,
     x_symmetric,
     y_symmetric,
     input_type,
     k_neighbors=4,
 ):
-    """Synthesizes PSF using Power-2 Polar IDW for irregular grids.
+    """Return the nodes, weights and pixel shifts of one IDW blend read.
 
-    Distance is the tangent-plane arc length at the query,
-    ``d = sqrt(dr**2 + (r_q * dtheta)**2)``, and weights use ``1 / d**2``.
-    The polar metric matches the radial/azimuthal anisotropy of coronagraph
-    PSF structure, and the squared exponent acts as a soft nearest-neighbor
-    on smooth grids. See yippy-paper Section 4 for the kernel-selection
-    rationale.
+    The result is ``(indices, weights, shift_x, shift_y)``, one entry per
+    neighbor. A PSF read is the weighted sum of the neighbors, each translated by
+    its shift in the canonical quadrant, then reflected for negative coordinates
+    when the response is symmetric.
     """
     # Handle Symmetry (Map to 1st Quadrant if 2DQ)
     if input_type == "2dq":
@@ -650,9 +682,6 @@ def synthesize_psf_idw(
     neg_dists, inds = lax.top_k(-dists, k_neighbors)
     near_dists = -neg_dists
 
-    # Get Neighbors
-    neighbors = flat_psfs[inds]
-
     # Power-2 inverse-distance weights with a small epsilon to avoid /0.
     weights = 1.0 / (near_dists + 1e-10) ** 2
     weights = weights / jnp.sum(weights)
@@ -664,6 +693,45 @@ def synthesize_psf_idw(
     query_y = jnp.where(y < 0, -y, y) if y_symmetric else y
     shift_x = (query_x - flat_x_offsets[inds]) / pixel_scale_arcsec
     shift_y = (query_y - flat_y_offsets[inds]) / pixel_scale_arcsec
+    return inds, weights, shift_x, shift_y
+
+
+def synthesize_psf_idw(
+    x,
+    y,
+    pixel_scale_arcsec,
+    flat_psfs,
+    flat_x_offsets,
+    flat_y_offsets,
+    kx,
+    ky,
+    n_pad,
+    x_symmetric,
+    y_symmetric,
+    input_type,
+    k_neighbors=4,
+):
+    """Synthesizes PSF using Power-2 Polar IDW for irregular grids.
+
+    Distance is the tangent-plane arc length at the query,
+    ``d = sqrt(dr**2 + (r_q * dtheta)**2)``, and weights use ``1 / d**2``.
+    The polar metric matches the radial/azimuthal anisotropy of coronagraph
+    PSF structure, and the squared exponent acts as a soft nearest-neighbor
+    on smooth grids. See yippy-paper Section 4 for the kernel-selection
+    rationale.
+    """
+    inds, weights, shift_x, shift_y = idw_read_plan(
+        x,
+        y,
+        pixel_scale_arcsec,
+        flat_x_offsets,
+        flat_y_offsets,
+        x_symmetric,
+        y_symmetric,
+        input_type,
+        k_neighbors,
+    )
+    neighbors = flat_psfs[inds]
 
     # Pad and FFT (Standard Shift Logic)
     pad_width = ((0, 0), (n_pad, n_pad), (n_pad, n_pad))

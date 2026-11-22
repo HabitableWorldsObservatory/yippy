@@ -21,8 +21,9 @@ from astropy.io import fits
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, resample
 
-from yippy import DenseSceneOperator, SceneCoronagraph, open_yip
+from yippy import SceneCoronagraph, open_yip
 from yippy.performance import stellar_intensity_curves
+from yippy.scene import _DenseSceneOperator
 
 # Positions between tabulated knots, where the reader has to interpolate. The
 # knot spacing of the synthetic package is 0.5 lambda/D.
@@ -293,12 +294,14 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
 
 
 @pytest.mark.parametrize("npix,kind", [(8, "2dq"), (9, "2dq"), (8, "1d")])
-def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
+def test_scene_source_grid_matches_point_sources(tmp_path, npix, kind):
     """Fails if scene deltas and point sources differ by half a native pixel.
 
-    Float32 FFT floor: 2e-6 of peak for batched/single reads and reflected
-    quadrants. The explicit half-pixel mutant must differ by >0.1 of peak,
-    over 50,000 times the allowed error. Odd grids retain integer offsets.
+    The node regrouping drops Fourier ringing that a one-PSF-per-source read keeps
+    outside the window: on these 8 and 9 pixel windows up to 3e-3 of one source's
+    peak and 1.2e-2 of the peak of a fully lit raster. The explicit half-pixel
+    mutant must differ by >0.1 of peak, and a flipped detector axis by tens of
+    percent of the ramp image. Odd grids retain integer offsets.
     """
     from synthetic_yip import write_synthetic_yip
 
@@ -311,9 +314,7 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
         psf_sigma_lod=0.25,
         occulter_floor=1.0,
     )
-    full = open_yip(package.path).prepare(use_quarter_psf_datacube=False)
-    full = full.with_scene_operator(batch_size=81)
-    cube = np.asarray(full.operator.psfs)
+    full = open_yip(package.path).prepare().with_scene_operator()
     center = (npix - 1) / 2
     row, col = npix // 2 - 1, npix // 2 + 1
     x, y = (col - center) * 0.25, (row - center) * 0.25
@@ -324,7 +325,7 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     result = full.render_scene(image, None, grid=full.grid)
     assert result.valid
     rendered = result.image.data
-    tolerance = direct.max() * 2e-6
+    tolerance = direct.max() * 3e-3
     np.testing.assert_allclose(rendered, direct, rtol=0, atol=tolerance)
     shifted = np.asarray(
         full.source_psfs(None, [x + 0.125], [y + 0.125], grid=full.grid)
@@ -334,28 +335,29 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     assert np.max(np.abs(shifted - direct)) > direct.max() * 0.1
     # Independent integer-offset reader anchor for odd n, half-integer for even.
     assert x == (col - ((npix - 1) // 2)) * 0.25 if npix % 2 else x == 0.375
-    quarter = (
-        open_yip(package.path)
-        .prepare(use_quarter_psf_datacube=True)
-        .with_scene_operator(batch_size=81)
-    )
-    small = np.asarray(quarter.operator.psfs)
-    assert small.shape[:2] == ((npix + 1) // 2, (npix + 1) // 2)
     # Unequal flux in every pixel checks reflected detector axes and odd shared axes.
     flux = np.arange(1, npix**2 + 1).reshape(npix, npix)
     raster = replace(image, data=jnp.asarray(flux, dtype=jnp.float32))
+    cube = np.asarray(
+        full._offaxis_backend._create_psfs(
+            *(jnp.asarray(c).ravel() for c in full.grid.coordinates())
+        )
+    ).reshape(npix, npix, npix, npix)
     expected = np.einsum("ij,ijyx->yx", flux, cube)
     expected = resample(
         replace(image, data=expected, reconstruction="band_limited"), full.grid
     ).data
-    result = quarter.render_scene(raster, None, grid=full.grid)
+    result = full.render_scene(raster, None, grid=full.grid)
     assert result.valid
-    np.testing.assert_allclose(result.image.data, expected, rtol=2e-6)
+    np.testing.assert_allclose(
+        result.image.data, expected, rtol=0, atol=3e-2 * expected.max()
+    )
     # A refused and nonfinite plane must be inert even in the reflected halves.
-    psfs = quarter.operator.psfs.at[-1, -1].set(jnp.nan)
+    half = npix // 2
+    psfs = jnp.asarray(cube[half:, half:]).at[-1, -1].set(jnp.nan)
     # Reject a different, finite plane as well: admission is independent of NaN.
-    mask = quarter.operator.valid.at[-1, -2:].set(False)
-    partial = SceneCoronagraph(quarter, DenseSceneOperator(psfs, mask))
+    mask = jnp.ones(psfs.shape[:2], bool).at[-1, -2:].set(False)
+    partial = SceneCoronagraph(full, _DenseSceneOperator(psfs, mask))
     origin = replace(
         image, data=jnp.zeros_like(image.data).at[npix // 2, npix // 2].set(1.0)
     )
@@ -365,19 +367,6 @@ def test_datacube_source_grid_matches_point_sources(tmp_path, npix, kind):
     assert not partial.render_scene(lit, None, grid=full.grid).valid
     refused = replace(origin, data=origin.data.at[0, 1].set(1.0))
     assert not partial.render_scene(refused, None, grid=full.grid).valid
-    from yippy._yip import _YIPData
-
-    host = _YIPData(open_yip(package.path), use_quarter_psf_datacube=True)
-    host._datacube_cache_path.unlink()
-    quarter = quarter.with_scene_operator(batch_size=81)
-    np.testing.assert_allclose(
-        quarter.operator.psfs, small, rtol=0, atol=small.max() * 2e-6
-    )
-    host = _YIPData(open_yip(package.path), use_quarter_psf_datacube=False)
-    assert host._datacube_identity()["layout"] == 2
-    host._datacube_cache_path.unlink()
-    host._prepare_dense_psfs_gpu(batch_size=81)
-    np.testing.assert_allclose(host.psf_datacube, cube, rtol=0, atol=cube.max() * 2e-6)
 
 
 def test_uniform_raster_reproduces_calibrated_sky_map(tmp_path):

@@ -9,7 +9,7 @@ from jax.sharding import PartitionSpec as P
 from lod_unit import lod
 from optixstuff.grids import Image, PixelGrid
 
-from ._jax_funcs import synthesize_psf_idw, synthesize_psf_separable
+from ._jax_funcs import blend_pad, synthesize_psf_idw, synthesize_psf_separable
 from ._offax import OffAx
 from .sampling import fraction_image
 
@@ -73,12 +73,7 @@ class OffJAX(OffAx):
         )
 
         n_pixels = self.flat_psfs.shape[-1]
-        n_pad = int(1.5 * n_pixels)
-        n_fft = n_pixels + 2 * n_pad
-        n_pad = int(1.5 * n_pixels)
-        if (n_pixels + 2 * n_pad) % 2 != 0:
-            n_pad += 1
-
+        n_pad = blend_pad(n_pixels)
         n_fft = n_pixels + 2 * n_pad  # Guaranteed even
 
         # Create 1D Frequency Vectors
@@ -87,17 +82,15 @@ class OffJAX(OffAx):
         # ky: Standard frequencies (0 to 0.5, -0.5 to -1/N)
         self.ky = device_put(jnp.fft.fftfreq(n_fft))
 
-        # Calculate max_offset for bounds check
+        # Calculate max_offset for bounds check (1D only; -1 disables it)
         max_offset = -1.0
         if self.type == "1d" and hasattr(self, "max_offset_in_image"):
             max_offset = self.max_offset_in_image.to(lod).value
+        self.max_offset_lod = float(max_offset)
 
         if self.type == "1d":
             # Optimized for 1D (radially symmetric) data using separable FFTs
             # Uses flat_psfs with offset_to_flat_idx mapping for memory efficiency
-            max_offset = -1.0
-            if hasattr(self, "max_offset_in_image"):
-                max_offset = self.max_offset_in_image.to(lod).value
 
             def create_psf_kernel(x, y, psfs, x_off, y_off, idx_map, kx, ky):
                 return synthesize_psf_separable(

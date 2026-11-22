@@ -92,9 +92,9 @@ def test_prepare_reuses_native_samples(tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "open", forbid_source_reads(builtins.open))
     monkeypatch.setattr(io, "open", forbid_source_reads(io.open))
-    changed = model.with_rules((Circular(0.65),)).with_scene_operator(batch_size=4)
+    changed = model.with_rules((Circular(0.65),)).with_scene_operator()
     assert changed.package is package
-    assert changed.operator.psfs.shape[-2:] == (8, 8)
+    assert changed.operator.shape == (8, 8)
 
 
 def test_perf_filename_and_datacube_path_carry_the_signature(synthetic_1d):
