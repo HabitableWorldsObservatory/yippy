@@ -17,9 +17,15 @@ from yippy.scene import AbstractSceneOperator
 
 
 def _dense_image(backend, grid, flux):
-    """Contract the flux with one blend PSF per lit source."""
+    """Contract the flux with one blend PSF per lit source inside the node hull.
+
+    A source outside the hull of the tabulated nodes has no data and
+    contributes zero (an unsymmetric table that stores one quadrant has no
+    nodes in the other three).
+    """
     x, y = (np.asarray(c, np.float64).ravel() for c in grid.coordinates())
-    lit = np.flatnonzero(flux.ravel())
+    inside = np.asarray(backend.in_source_domain(x, y))
+    lit = np.flatnonzero((flux.ravel() != 0) & inside)
     image = np.zeros(grid.shape)
     for i in range(0, lit.size, 16):
         block = lit[i : i + 16]

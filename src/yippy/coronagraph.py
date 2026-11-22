@@ -241,21 +241,22 @@ class Coronagraph(AbstractTableCoronagraph):
             raise ValueError("Coordinates must be equal-length vectors")
         backend = self._offaxis_backend
         if hasattr(backend, "create_psfs_with_info"):
+            # The delivery keeps its own admission as the source domain; the
+            # image of a source it refuses is zero here, not the NaN of its read.
             read = backend.create_psfs_with_info(x, y)
-            image = fraction_image(
-                read.intensity,
-                self.grid,
-                ("source",),
-                backend.measure,
-            )
-            return SourcePSFs(image, read.accepted)
+            accepted = jnp.asarray(read.accepted, bool)
+            intensity = jnp.where(accepted[:, None, None], read.intensity, 0.0)
+            image = fraction_image(intensity, self.grid, ("source",), backend.measure)
+            return SourcePSFs(image, accepted)
         finite = jnp.isfinite(x) & jnp.isfinite(y)
-        image = backend.create_psfs(
-            jnp.where(finite, x, 0.0), jnp.where(finite, y, 0.0)
-        )
-        valid = finite & jnp.all(jnp.isfinite(image.data), axis=(-1, -2))
+        x, y = jnp.where(finite, x, 0.0), jnp.where(finite, y, 0.0)
+        # The read clamps to the outermost ring, so it is finite and
+        # differentiable for any position; the source domain is the node hull.
+        inside = backend.in_source_domain(x, y)
+        image = backend.create_psfs(x, y)
+        valid = finite & inside & jnp.all(jnp.isfinite(image.data), axis=(-1, -2))
         return SourcePSFs(
-            replace(image, data=jnp.where(valid[:, None, None], image.data, jnp.nan)),
+            replace(image, data=jnp.where(valid[:, None, None], image.data, 0.0)),
             valid,
         )
 

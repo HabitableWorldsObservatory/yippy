@@ -221,8 +221,9 @@ def test_reads_units_refusals(admitted):
     assert not refused.accepted
     assert int(refused.reason_bits) & int(Reason.NONFINITE_QUERY)
     assert not admitted.source_psfs(None, np.nan, 0.0).valid[0]
-    assert np.isnan(
-        eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).image.data
+    # A refused source is flagged and its image is exactly zero, not NaN.
+    assert (
+        eqx.filter_jit(admitted.source_psfs)(None, np.nan, 0.0).image.data == 0.0
     ).all()
     batch = admitted.source_psfs(
         None, jnp.array([0.07, np.nan]), jnp.array([-0.04, 0.0])

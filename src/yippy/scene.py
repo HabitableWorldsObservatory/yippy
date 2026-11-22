@@ -168,9 +168,9 @@ def _blend_plan(backend, grid, valid, itemsize):
         np.concatenate(c) for c in zip(*parts, strict=True)
     )
     admitted = np.asarray(valid, bool).ravel().copy()
-    max_offset = getattr(backend, "max_offset_lod", -1.0)
-    if backend.type == "1d" and max_offset > 0:
-        admitted &= np.hypot(xs, ys) <= max_offset
+    # The operator reads a source only inside the hull of the tabulated nodes,
+    # the same domain the point reader has.
+    admitted &= np.asarray(backend.in_source_domain(xs, ys))
     weight = np.where(admitted[:, None], weight, 0.0)
     flips = tuple(
         (fx, fy)

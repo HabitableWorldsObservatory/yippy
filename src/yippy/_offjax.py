@@ -2,16 +2,47 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import device_put, jit, shard_map, vmap
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-from lod_unit import lod
 from optixstuff.grids import Image, PixelGrid
+from scipy.spatial import ConvexHull, QhullError
 
-from ._jax_funcs import blend_pad, synthesize_psf_idw, synthesize_psf_separable
+from ._jax_funcs import (
+    blend_pad,
+    clamp_to_radius,
+    synthesize_psf_idw,
+    synthesize_psf_separable,
+)
 from ._offax import OffAx
 from .sampling import fraction_image
+
+# A source this close beyond the hull (relative to its radius) is on it: the
+# radii of a single-precision table carry rounding of about 1e-7.
+_DOMAIN_TOL = 1e-6
+
+
+def _hull_halfplanes(offsets, x_symmetric, y_symmetric):
+    """Half-planes ``normal . p <= distance`` of the hull of the node positions.
+
+    A table stored for one quadrant is completed by its mirror images first.
+    Returns ``None`` when the nodes do not span an area (a radially symmetric
+    table tabulates one axis), where the domain is the disk of the outermost
+    node instead.
+    """
+    points = np.asarray(offsets, float)
+    if x_symmetric:
+        points = np.vstack([points, points * [-1.0, 1.0]])
+    if y_symmetric:
+        points = np.vstack([points, points * [1.0, -1.0]])
+    try:
+        hull = ConvexHull(points)
+    except QhullError:
+        return None
+    # Each row of equations is (normal_x, normal_y, offset) with n . p + c <= 0.
+    return hull.equations[:, :2], -hull.equations[:, 2]
 
 
 class OffJAX(OffAx):
@@ -82,11 +113,18 @@ class OffJAX(OffAx):
         # ky: Standard frequencies (0 to 0.5, -0.5 to -1/N)
         self.ky = device_put(jnp.fft.fftfreq(n_fft))
 
-        # Calculate max_offset for bounds check (1D only; -1 disables it)
-        max_offset = -1.0
-        if self.type == "1d" and hasattr(self, "max_offset_in_image"):
-            max_offset = self.max_offset_in_image.to(lod).value
-        self.max_offset_lod = float(max_offset)
+        # The source domain is the hull of the tabulated source positions: a
+        # source beyond the outermost node has no data. The stamp is a smaller
+        # square, and a node between the two holds its measured wing.
+        self.source_radius_lod = float(
+            np.max(np.hypot(self.flat_offsets[:, 0], self.flat_offsets[:, 1]))
+        )
+        radius = self.source_radius_lod
+        self._hull = (
+            None
+            if self.type == "1d"
+            else _hull_halfplanes(self.flat_offsets, self.x_symmetric, self.y_symmetric)
+        )
 
         if self.type == "1d":
             # Optimized for 1D (radially symmetric) data using separable FFTs
@@ -107,7 +145,6 @@ class OffJAX(OffAx):
                     x_symmetric=self.x_symmetric,
                     y_symmetric=self.y_symmetric,
                     input_type=self.type,
-                    max_offset=max_offset,
                 )
 
         else:
@@ -116,8 +153,7 @@ class OffJAX(OffAx):
             # Note: idx_map param is unused here but kept for a consistent signature
             def create_psf_kernel(x, y, psfs, x_off, y_off, idx_map, kx, ky):
                 return synthesize_psf_idw(
-                    x,
-                    y,
+                    *clamp_to_radius(x, y, radius),
                     pixel_scale_arcsec=self.pixel_scale_arcsec.value,
                     flat_psfs=psfs,
                     flat_x_offsets=x_off,
@@ -179,6 +215,25 @@ class OffJAX(OffAx):
             )
 
         self._create_psf = create_psf_wrapper
+
+    def in_source_domain(self, x, y):
+        """Whether positions lie inside the hull of the tabulated source nodes.
+
+        The hull is the polygon of the nodes (completed by their mirror images)
+        for a two-dimensional table and the disk of the outermost node for a
+        radially symmetric one. A position within a rounding tolerance of the
+        edge is inside.
+        """
+        x, y = jnp.asarray(x), jnp.asarray(y)
+        radius = self.source_radius_lod
+        slack = _DOMAIN_TOL * radius
+        if self._hull is None:
+            return jnp.hypot(x, y) <= radius + slack
+        normals, distance = (jnp.asarray(a) for a in self._hull)
+        reach = normals[:, 0] * x[..., None] + normals[:, 1] * y[..., None]
+        return jnp.all(reach <= distance + slack, axis=-1) & (
+            jnp.hypot(x, y) <= radius + slack
+        )
 
     def create_psf(self, x, y) -> Image:
         """Return one native source flux fraction image."""

@@ -354,6 +354,21 @@ def _safe_hypot(x, y):
     return jnp.where(positive, jnp.sqrt(jnp.where(positive, r2, 1.0)), 0.0)
 
 
+def clamp_to_radius(x, y, radius):
+    """Scale ``(x, y)`` toward the origin so it lies within ``radius``.
+
+    The direction is kept and a point already inside is returned unchanged. A
+    read beyond its tabulated positions then lands on the outermost ring,
+    where the read and its derivative are finite, instead of extrapolating.
+    The caller zeroes the result for a source outside; the gradient of the
+    clamped read is finite, so the zero is an exact zero gradient.
+    """
+    r = _safe_hypot(x, y)
+    outside = r > radius
+    scale = jnp.where(outside, radius / jnp.where(outside, r, 1.0), 1.0)
+    return x * scale, y * scale
+
+
 def convert_xy_1D(x, y):
     """Converts x and y to 1D coordinates."""
     return _safe_hypot(x, y), 0
@@ -531,7 +546,6 @@ def synthesize_psf_separable(
     x_symmetric,
     y_symmetric,
     input_type,
-    max_offset,
 ):
     """Synthesizes PSF using separable 1D FFTs.
 
@@ -570,8 +584,6 @@ def synthesize_psf_separable(
             Whether PSFs are symmetric about y=0.
         input_type (str):
             Type of input data ("1d", "2dq", or "2df").
-        max_offset (float):
-            Maximum valid offset distance (-1 to disable bounds check).
 
     Returns:
         jnp.ndarray:
@@ -638,16 +650,6 @@ def synthesize_psf_separable(
         psf = lax.cond(y < 0, lambda p: jnp.flip(p, axis=0), lambda p: p, psf)
 
     psf = jnp.maximum(psf, 0.0)
-
-    # Mask if out of bounds
-    # Only currently implemented for 1D (radial symmetry)
-    # max_offset must be provided (> 0) to enable masking
-    psf = lax.cond(
-        (input_type == "1d") & (max_offset > 0),
-        lambda p: jnp.where(jnp.sqrt(x**2 + y**2) > max_offset, 0.0, p),
-        lambda p: p,
-        psf,
-    )
 
     return psf
 
