@@ -1,29 +1,34 @@
 """A source read is differentiable in the source position, including at a node.
 
-The blend reader turns a position into inverse-distance weights and pixel
-shifts. A square root of a squared distance has an undefined derivative where
-the distance is zero, which is exactly where a position sits on a tabulated
-node or at the origin, so a gradient-based fit started there got NaN. The
-expected values here are central differences of the same read, so the test
-asserts that the derivative exists and is the slope of the value, not any
-physics.
+The blend reader turns a position into weights and pixel shifts. A square root
+of a squared distance has an undefined derivative where the distance is zero,
+which is exactly where a position sits on a tabulated node or at the origin, so
+a gradient-based fit started there got NaN. The expected values here are
+central differences of the same read, so the test asserts that the derivative
+exists and is the slope of the value, not any physics.
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax import lax
 
-from yippy import _jax_funcs as jf
 from yippy import open_yip
 
 # Positions in lambda/D on the synthetic packages, whose nodes sit on a 0.5
 # grid from 0 to 6: the origin, an exact node, and a generic point. The 1D
 # package tabulates only the +x axis, so its node is on the axis.
+# The ring package has nodes at radii 1.0, 1.6 and 2.9 on azimuths 0, 30, 60 and
+# 90 degrees; its node is the 1.6 ring at 30 degrees, a corner of the bilinear
+# blend where both the ring and the azimuth bracket change.
 POSITIONS = {
     "1d": {"origin": (0.0, 0.0), "node": (2.0, 0.0), "generic": (2.3, 1.2)},
     "2dq": {"origin": (0.0, 0.0), "node": (2.0, 1.0), "generic": (2.3, 1.2)},
+    "rings": {
+        "origin": (0.0, 0.0),
+        "node": (1.6 * np.cos(np.pi / 6), 1.6 * np.sin(np.pi / 6)),
+        "generic": (2.3, 1.2),
+    },
 }
 H = 1e-7
 # The probe has unit-variance entries, so gradients at ordinary positions are
@@ -34,12 +39,13 @@ ATOL = 1e-6
 
 
 @pytest.fixture(scope="module")
-def backends(synthetic_1d, synthetic_2d):
+def backends(synthetic_1d, synthetic_2d, synthetic_rings):
     """Double-precision readers: a float32 read cannot resolve a 1e-7 step."""
     with jax.enable_x64():
         return {
             "1d": open_yip(synthetic_1d.path).prepare()._offaxis_backend,
             "2dq": open_yip(synthetic_2d.path).prepare()._offaxis_backend,
+            "rings": open_yip(synthetic_rings.path).prepare()._offaxis_backend,
         }
 
 
@@ -58,14 +64,17 @@ def _weighted_read(backend):
 
 
 @pytest.mark.parametrize("name", ["origin", "node", "generic"])
-@pytest.mark.parametrize("kind", ["1d", "2dq"])
+@pytest.mark.parametrize("kind", ["1d", "2dq", "rings"])
 def test_read_gradient_is_finite_and_matches_finite_difference(kind, name, backends):
     """The derivative of a read is finite and is the slope of the read.
 
-    The 2D blend weights are smooth at a node, so the derivative equals the
-    central difference there. The 1D reader interpolates linearly between
-    nodes, which leaves a kink at a node: the derivative is the slope on one
-    side, so it must equal the forward or the backward difference.
+    The 1D and ring readers interpolate linearly between nodes, which leaves a
+    kink at a node: the derivative is a subgradient there, so each component
+    must lie between the backward and the forward difference. Elsewhere, and
+    on the 2dq grid, the central difference applies.
+
+    Fails if a gradient is NaN or infinite at a node or at the origin, or is
+    not the slope of the read.
     """
     x, y = POSITIONS[kind][name]
     with jax.enable_x64():
@@ -78,41 +87,10 @@ def test_read_gradient_is_finite_and_matches_finite_difference(kind, name, backe
         f0 = float(f0)
     assert np.all(np.isfinite(grad)), f"gradient is not finite at {name}: {grad}"
     central = np.array([(fx[0] - fx[1]) / (2 * H), (fy[0] - fy[1]) / (2 * H)])
-    if kind == "1d" and name == "node":
+    if kind in ("1d", "rings") and name == "node":
         forward = np.array([(fx[0] - f0) / H, (fy[0] - f0) / H])
         backward = np.array([(f0 - fx[1]) / H, (f0 - fy[1]) / H])
-        assert min(abs(grad[0] - forward[0]), abs(grad[0] - backward[0])) < 1e-5
-        assert abs(grad[1] - central[1]) < ATOL
+        low, high = np.minimum(forward, backward), np.maximum(forward, backward)
+        assert np.all((grad >= low - 1e-5) & (grad <= high + 1e-5)), (grad, low, high)
     else:
         assert np.allclose(grad, central, rtol=0.0, atol=ATOL), (grad, central)
-
-
-def _old_idw_weights(x, y, scale, fx, fy, k=4):
-    """The weights before the gradient-safe form, for a value comparison."""
-    r_q = jnp.hypot(x, y)
-    theta_q = jnp.arctan2(y, x)
-    r_n = jnp.hypot(fx, fy)
-    theta_n = jnp.arctan2(fy, fx)
-    dtheta = (theta_n - theta_q + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
-    dists = jnp.sqrt((r_n - r_q) ** 2 + (r_q * dtheta) ** 2)
-    neg, inds = lax.top_k(-dists, k)
-    w = 1.0 / (-neg + 1e-10) ** 2
-    return inds, w / jnp.sum(w)
-
-
-@pytest.mark.parametrize("name", ["origin", "node", "generic"])
-def test_idw_weights_equal_the_previous_formula(name, backends):
-    """Making the distance gradient-safe changes no weight."""
-    backend = backends["2dq"]
-    x, y = POSITIONS["2dq"][name]
-    with jax.enable_x64():
-        fx = jnp.asarray(backend.flat_x_offsets, jnp.float64)
-        fy = jnp.asarray(backend.flat_y_offsets, jnp.float64)
-        inds, weights, _, _ = jf.idw_read_plan(
-            jnp.float64(x), jnp.float64(y), 0.25, fx, fy, True, True, "2dq", 4
-        )
-        old_inds, old_weights = _old_idw_weights(
-            jnp.float64(x), jnp.float64(y), 0.25, fx, fy
-        )
-    assert np.array_equal(inds, old_inds)
-    assert np.allclose(weights, old_weights, rtol=1e-12, atol=0.0)

@@ -102,6 +102,19 @@ def synthetic_2d(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def synthetic_rings(tmp_path_factory):
+    """A quarterly symmetric package on rings, with a rational throughput ramp."""
+    from synthetic_yip import write_synthetic_yip
+
+    return write_synthetic_yip(
+        tmp_path_factory.mktemp("yip_rings") / "synthetic_rings",
+        kind="2dq_rings",
+        occulter_shape="rational",
+        occulter_s0_lod=0.8,
+    )
+
+
+@pytest.fixture(scope="session")
 def syn_coro_1d(synthetic_1d):
     """Coronagraph over the radially symmetric analytic package."""
     return open_yip(synthetic_1d.path).prepare()

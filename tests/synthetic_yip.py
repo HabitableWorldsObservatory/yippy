@@ -85,6 +85,7 @@ class SyntheticYIP:
     occulter_floor: float
     offsets: np.ndarray
     kind: str
+    occulter_shape: str = "exp"
 
     @property
     def max_offset_in_image(self) -> float:
@@ -101,7 +102,10 @@ class SyntheticYIP:
     def occulter(self, separation_lod):
         """Closed-form occulter transmission at a source separation."""
         s = np.asarray(separation_lod, dtype=float)
-        rise = 1.0 - np.exp(-((s / self.occulter_s0_lod) ** 2))
+        if self.occulter_shape == "rational":
+            rise = s**2 / (s**2 + self.occulter_s0_lod**2)
+        else:
+            rise = 1.0 - np.exp(-((s / self.occulter_s0_lod) ** 2))
         return self.occulter_floor + (1.0 - self.occulter_floor) * rise
 
     def encircled_flux(self, radius_lod: float) -> float:
@@ -168,6 +172,9 @@ def write_synthetic_yip(
     min_offset_lod: float = 0.0,
     max_offset_lod: float = 6.0,
     offset_step_lod: float = 0.5,
+    occulter_shape: str = "exp",
+    ring_radii_lod: tuple[float, ...] = (0.0, 1.0, 1.6, 2.9),
+    ring_azimuths_deg: tuple[float, ...] = (0.0, 30.0, 60.0, 90.0),
 ) -> SyntheticYIP:
     """Write a five-file package and return the constants that describe it.
 
@@ -175,7 +182,9 @@ def write_synthetic_yip(
         directory: where to write; created if absent.
         kind: ``"1d"`` for offsets along +x only (radially symmetric), or
             ``"2dq"`` for an x-y grid of non-negative offsets (quarterly
-            symmetric). The reader takes a different path through each.
+            symmetric), or ``"2dq_rings"`` for the same symmetry with offsets on
+            rings of constant radius, as the shipped two-dimensional deliveries
+            tabulate them. The reader takes a different path through each.
         npix: image side in pixels.
         pixscale: lambda/D per pixel.
         psf_sigma_lod: off-axis PSF standard deviation in lambda/D.
@@ -189,6 +198,11 @@ def write_synthetic_yip(
         min_offset_lod: smallest source offset to tabulate.
         max_offset_lod: largest source offset to tabulate.
         offset_step_lod: spacing of the offset grid.
+        occulter_shape: ``"exp"`` for the Gaussian rise above, or ``"rational"``
+            for ``s^2 / (s^2 + s0^2)``, a throughput ramp with a long shoulder.
+        ring_radii_lod: ring radii of the ``"2dq_rings"`` kind.
+        ring_azimuths_deg: node azimuths on every ring of the ``"2dq_rings"``
+            kind, within the first quadrant.
 
     Returns:
         A :class:`SyntheticYIP` describing what was written.
@@ -215,11 +229,27 @@ def write_synthetic_yip(
         xx, yy = np.meshgrid(steps, steps, indexing="ij")
         offsets = np.column_stack([xx.ravel(), yy.ravel()])
         offset_payload = offsets.astype(np.float64)
+    elif kind == "2dq_rings":
+        radius, azimuth = np.meshgrid(
+            ring_radii_lod, np.radians(ring_azimuths_deg), indexing="ij"
+        )
+        offsets = np.column_stack(
+            [(radius * np.cos(azimuth)).ravel(), (radius * np.sin(azimuth)).ravel()]
+        )
+        # A ring of zero radius is the single on-axis node.
+        _, first = np.unique(offsets.round(12), axis=0, return_index=True)
+        offsets = offsets[np.sort(first)]
+        offset_payload = offsets.astype(np.float64)
     else:
-        raise ValueError(f"kind must be '1d' or '2dq', got {kind!r}")
+        raise ValueError(f"kind must be '1d', '2dq' or '2dq_rings', got {kind!r}")
+    if occulter_shape not in ("exp", "rational"):
+        raise ValueError("occulter_shape must be 'exp' or 'rational'")
 
     separations = np.hypot(offsets[:, 0], offsets[:, 1])
-    rise = 1.0 - np.exp(-((separations / occulter_s0_lod) ** 2))
+    if occulter_shape == "rational":
+        rise = separations**2 / (separations**2 + occulter_s0_lod**2)
+    else:
+        rise = 1.0 - np.exp(-((separations / occulter_s0_lod) ** 2))
     occulter = occulter_floor + (1.0 - occulter_floor) * rise
     psfs = np.stack(
         [
@@ -278,6 +308,7 @@ def write_synthetic_yip(
         occulter_floor=occulter_floor,
         offsets=offsets,
         kind=kind,
+        occulter_shape=occulter_shape,
     )
 
 

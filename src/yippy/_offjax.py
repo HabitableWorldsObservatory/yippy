@@ -111,9 +111,9 @@ class OffJAX(OffAx):
                 )
 
         else:
-            # 2D, uses IDW interpolation for irregular grids
+            # 2D, bilinear (radius, azimuth) blend over polar rings
             # Uses flat_psfs with flat_x_offsets/flat_y_offsets directly
-            # Note: idx_map param is unused for IDW but kept for consistent signature
+            # Note: idx_map param is unused here but kept for a consistent signature
             def create_psf_kernel(x, y, psfs, x_off, y_off, idx_map, kx, ky):
                 return synthesize_psf_idw(
                     x,
@@ -128,7 +128,6 @@ class OffJAX(OffAx):
                     x_symmetric=self.x_symmetric,
                     y_symmetric=self.y_symmetric,
                     input_type=self.type,
-                    k_neighbors=4,
                 )
 
         # ---------------------------------------------------------
@@ -149,7 +148,7 @@ class OffJAX(OffAx):
             x_handle = self.x_offsets
             y_handle = self.y_offsets
         else:
-            # For IDW interpolation: use flat offset arrays
+            # For the ring blend: use flat offset arrays
             x_handle = self.flat_x_offsets
             y_handle = self.flat_y_offsets
 

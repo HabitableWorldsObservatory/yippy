@@ -652,6 +652,29 @@ def synthesize_psf_separable(
     return psf
 
 
+# Nodes whose radii differ by less than this fraction of (1 + radius) share a
+# ring. It is wide enough for the single-precision rounding of the radii (about
+# 4e-6 lambda/D at 60) and far below any gap between rings.
+_RING_TOL = 1e-5
+
+
+def _angular_bracket(theta_q, theta_n, member):
+    """The two member nodes that bracket an angle, with their weights.
+
+    Returns ``(ahead, behind, w_ahead)``: the member node first reached turning
+    counter-clockwise from ``theta_q``, the one first reached turning clockwise,
+    and the linear weight of the first (the second gets ``1 - w_ahead``). The
+    angle is periodic. A ring with one member returns it twice.
+    """
+    inf = jnp.inf
+    d_ahead = jnp.where(member, (theta_n - theta_q) % (2.0 * jnp.pi), inf)
+    d_behind = jnp.where(member, (theta_q - theta_n) % (2.0 * jnp.pi), inf)
+    ahead, behind = jnp.argmin(d_ahead), jnp.argmin(d_behind)
+    span = d_ahead[ahead] + d_behind[behind]
+    w_ahead = d_behind[behind] / jnp.where(span > 0, span, 1.0)
+    return ahead, behind, jnp.where(span > 0, w_ahead, 0.5)
+
+
 def idw_read_plan(
     x,
     y,
@@ -661,14 +684,25 @@ def idw_read_plan(
     x_symmetric,
     y_symmetric,
     input_type,
-    k_neighbors=4,
 ):
-    """Return the nodes, weights and pixel shifts of one IDW blend read.
+    """Return the nodes, weights and pixel shifts of one polar blend read.
 
-    The result is ``(indices, weights, shift_x, shift_y)``, one entry per
-    neighbor. A PSF read is the weighted sum of the neighbors, each translated by
-    its shift in the canonical quadrant, then reflected for negative coordinates
+    The result is ``(indices, weights, shift_x, shift_y)``, four entries each. A
+    PSF read is the weighted sum of the four nodes, each translated by its
+    shift in the canonical quadrant, then reflected for negative coordinates
     when the response is symmetric.
+
+    The weights are bilinear in radius and azimuth. Nodes of one radius form a
+    ring; the read takes the two rings that bracket the query radius, linear in
+    radius, and in each ring the two nodes that bracket the query azimuth,
+    linear in angle. Both interpolations are linear, so the read is continuous
+    in position, reproduces a node exactly at the node, and follows a radial
+    ramp such as the throughput at the inner working angle instead of
+    saturating at the nearest node. Beyond the first or last ring the nearest
+    ring is used alone. A ring of one node (the origin) ignores the azimuth.
+
+    The weights sum to one and the read is a PSF, not a flux-normalized image:
+    its total is the bilinear interpolation of the node totals.
     """
     # Handle Symmetry (Map to 1st Quadrant if 2DQ)
     if input_type == "2dq":
@@ -678,27 +712,34 @@ def idw_read_plan(
     else:
         _x, _y = x, y
 
-    # Polar arc-length distance, linearized at the query.
-    # The radius and the distance are square roots that vanish at a node or at
-    # the origin, so they go through _safe_hypot to keep the gradient finite.
+    # The radius is a square root that vanishes at the origin, so it goes
+    # through _safe_hypot to keep the gradient finite there.
     r_q = _safe_hypot(_x, _y)
     at_origin = r_q == 0
     theta_q = jnp.arctan2(_y, jnp.where(at_origin, 1.0, _x))
     r_n = jnp.hypot(flat_x_offsets, flat_y_offsets)
     theta_n = jnp.arctan2(flat_y_offsets, flat_x_offsets)
-    dr = r_n - r_q
-    dtheta = (theta_n - theta_q + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
-    arc = r_q * dtheta
-    dists = _safe_hypot(dr, arc)
 
-    # Find K Nearest Neighbors
-    # We use top_k on negative distance to find the smallest distances
-    neg_dists, inds = lax.top_k(-dists, k_neighbors)
-    near_dists = -neg_dists
+    # Bracketing ring radii; a missing side repeats the other, giving t = 0.
+    inf = jnp.inf
+    below = r_n <= r_q + _RING_TOL * (1.0 + r_q)
+    r_lo = jnp.max(jnp.where(below, r_n, -inf))
+    r_hi = jnp.min(jnp.where(below, inf, r_n))
+    r_lo = jnp.where(jnp.isfinite(r_lo), r_lo, r_hi)
+    r_hi = jnp.where(jnp.isfinite(r_hi), r_hi, r_lo)
+    gap = r_hi - r_lo
+    t = jnp.where(
+        gap > 0, jnp.clip((r_q - r_lo) / jnp.where(gap > 0, gap, 1.0), 0, 1), 0.0
+    )
 
-    # Power-2 inverse-distance weights with a small epsilon to avoid /0.
-    weights = 1.0 / (near_dists + 1e-10) ** 2
-    weights = weights / jnp.sum(weights)
+    inds, weights = [], []
+    for ring_r, ring_w in ((r_lo, 1.0 - t), (r_hi, t)):
+        ahead, behind, w_ahead = _angular_bracket(
+            theta_q, theta_n, jnp.abs(r_n - ring_r) <= _RING_TOL * (1.0 + ring_r)
+        )
+        inds += [ahead, behind]
+        weights += [ring_w * w_ahead, ring_w * (1.0 - w_ahead)]
+    inds, weights = jnp.stack(inds), jnp.stack(weights)
 
     # Interpolate in the canonical quadrant, then reflect the finished image.
     # Reflecting before a fractional FFT shift can disagree at the Nyquist
@@ -723,16 +764,11 @@ def synthesize_psf_idw(
     x_symmetric,
     y_symmetric,
     input_type,
-    k_neighbors=4,
 ):
-    """Synthesizes PSF using Power-2 Polar IDW for irregular grids.
+    """Synthesize a PSF from polar-ring nodes by bilinear (radius, azimuth) blending.
 
-    Distance is the tangent-plane arc length at the query,
-    ``d = sqrt(dr**2 + (r_q * dtheta)**2)``, and weights use ``1 / d**2``.
-    The polar metric matches the radial/azimuthal anisotropy of coronagraph
-    PSF structure, and the squared exponent acts as a soft nearest-neighbor
-    on smooth grids. See yippy-paper Section 4 for the kernel-selection
-    rationale.
+    See ``idw_read_plan`` for the weights. The result is a PSF, not a
+    flux-normalized image.
     """
     inds, weights, shift_x, shift_y = idw_read_plan(
         x,
@@ -743,7 +779,6 @@ def synthesize_psf_idw(
         x_symmetric,
         y_symmetric,
         input_type,
-        k_neighbors,
     )
     neighbors = flat_psfs[inds]
 
