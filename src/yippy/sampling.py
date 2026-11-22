@@ -2,6 +2,11 @@
 
 from optixstuff.grids import Image, Measure
 
+# The stellar halo spans about eight decades from the bright field to the dark hole,
+# so a band-limited (sinc) interpolant rings at the level of the hole floor along
+# the rows and columns of the bright pixels and goes negative. Linear cannot.
+STELLAR_RECONSTRUCTION = "linear"
+
 
 def sample_units(sample_kind, grid):
     """Return the decoded measure and the factor from stored to decoded values."""
@@ -15,16 +20,29 @@ def sample_units(sample_kind, grid):
 
 
 def fraction_image(
-    data, grid, axes, measure, *, outside="zero", quantity="stellar_flux_fraction"
+    data,
+    grid,
+    axes,
+    measure,
+    *,
+    outside="zero",
+    quantity="stellar_flux_fraction",
+    reconstruction=None,
 ):
-    """Recover the native image measure from per-pixel photon diagnostics."""
+    """Recover the native image measure from per-pixel photon diagnostics.
+
+    reconstruction overrides the default (nearest for integrals, band_limited for
+    densities); a stellar halo spanning many decades declares linear, because a
+    band-limited interpolant rings below the dark-hole floor.
+    """
     image = Image(
         data,
         grid,
         axes,
         Measure.integral(),
         quantity,
-        reconstruction="nearest" if measure == Measure.integral() else "band_limited",
+        reconstruction=reconstruction
+        or ("nearest" if measure == Measure.integral() else "band_limited"),
         outside=outside,
     )
     return image if measure == image.measure else image.density("grid")

@@ -7,7 +7,7 @@ from lod_unit import lod
 from optixstuff.grids import Frame, Image
 from scipy.interpolate import CubicSpline
 
-from .sampling import fraction_image, sample_units
+from .sampling import STELLAR_RECONSTRUCTION, fraction_image, sample_units
 
 
 class StellarIntens:
@@ -67,6 +67,7 @@ class StellarIntens:
             self.measure,
             # The residual halo continues past the tabulated field.
             outside="reflect",
+            reconstruction=STELLAR_RECONSTRUCTION,
         )
 
     def _evaluate_array(self, stellar_diam, lam=None, D=None):

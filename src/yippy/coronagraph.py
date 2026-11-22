@@ -30,7 +30,7 @@ from ._yip import _YIPData
 from .header import HeaderData
 from .interpolation import SincOptions
 from .logger import logger
-from .sampling import fraction_image
+from .sampling import STELLAR_RECONSTRUCTION, fraction_image
 from .scene import (
     DENSE_BATCH,
     AbstractSceneOperator,
@@ -192,6 +192,7 @@ class Coronagraph(AbstractTableCoronagraph):
             tuple(f"diameter_{i}" for i in range(data.ndim - 2)),
             self._host.stellar_intens.measure,
             outside="reflect",
+            reconstruction=STELLAR_RECONSTRUCTION,
         )
 
     def _native_source_psfs(self, x_lod, y_lod):
