@@ -18,6 +18,34 @@ class HeaderData:
     xcenter and ycenter retain the header's 00LL pixel corner counts.
     Use pixel_grid() for pixel-center coordinates and the reference frame.
     D_INSC remains metadata; it does not change the native circumscribed frame.
+
+    Attributes:
+        simple: FITS SIMPLE flag.
+        bitpix: FITS BITPIX data type code.
+        naxis: Number of FITS axes.
+        naxis1: Length of the first (x) axis, in pixels.
+        naxis2: Length of the second (y) axis, in pixels.
+        naxis3: Length of the third axis, zero when absent.
+        design: Optical design name from DESIGN.
+        diameter: Circumscribed telescope diameter from D; a length (default unit m).
+        diameter_inscribed: Inscribed telescope diameter from D_INSC; a length (default
+            unit m).
+        pixscale: Pixel scale from PIXSCALE, in lambda/D per pixel.
+        lambda0: Reference wavelength from LAMBDA (default unit um).
+        minlam: Shortest bandpass wavelength from MINLAM (default unit um).
+        maxlam: Longest bandpass wavelength from MAXLAM (default unit um).
+        xcenter: Optical axis in x, in pixel corner counts (XCENTER).
+        ycenter: Optical axis in y, in pixel corner counts (YCENTER).
+        obscured: Obscured aperture-area fraction from OBSCURED.
+        jitter: RMS jitter per axis from JITTER (default unit mas).
+        n_lam: Number of wavelength samples from N_LAM.
+        n_star: Number of stellar samples from N_STAR.
+        zernike: Aberration set name from ZERNIKE.
+        wfe: Wavefront error from WFE (default unit pm).
+        sample_kind: Intensity sampling convention, ``"point"``, ``"integral"`` or
+            ``"mean"`` (SAMPKIND).
+        diameter_convention: Diameter convention of the native frame.
+        coordinate_model: Coordinate model of the native frame.
     """
 
     simple: bool
@@ -58,6 +86,13 @@ class HeaderData:
 
         Missing centers use the geometric midpoint of the supplied (ny, nx)
         shape, or the header image shape. Native FITS products use circumscribed D.
+
+        Args:
+            shape: Optional (ny, nx) shape of the grid in pixels; None uses the header
+                image shape.
+
+        Returns:
+            The native pixel grid in lambda/D with its reference frame.
         """
         shape = (self.naxis2, self.naxis1) if shape is None else tuple(shape)
         for key, value in (
@@ -93,17 +128,14 @@ class HeaderData:
         returned.
 
         Args:
-            comment (str):
-                The comment string associated with a FITS header key.
-            default_unit (u.Unit):
-                The default unit to return if no unit is found in the comment.
-            key (str):
-                The key of the header entry to extract the unit from.
+            comment: The comment string associated with a FITS header key.
+            default_unit: The default unit to return if no unit is found in the
+                comment.
+            key: The key of the header entry to extract the unit from.
 
         Returns:
-            u.Unit:
-                The extracted astropy unit or the default unit if no
-                recognizable unit is found.
+            The extracted astropy unit or the default unit if no recognizable
+            unit is found.
 
         Raises:
             Warning:
@@ -158,17 +190,14 @@ class HeaderData:
         """Retrieves a header value by key and converts it to a specified unit.
 
         Args:
-            header (fits.Header):
-                The FITS header from which to retrieve the value.
-            key (str):
-                The key of the header entry to retrieve.
-            default_unit (u.Unit):
-                The unit to associate with the returned value.
+            header: The FITS header from which to retrieve the value.
+            key: The key of the header entry to retrieve.
+            default_unit: The unit to associate with the returned value when the
+                entry comment names none.
 
         Returns:
-            Optional[u.Quantity]:
-                The header value with the specified unit, or None if the key is
-                not present.
+            The header value with the unit from its comment (or the default
+            unit), or None if the key is not present.
         """
         if key in header:
             value = float(header[key])
@@ -185,13 +214,11 @@ class HeaderData:
         checking for any unhandled fields.
 
         Args:
-            header (fits.Header):
-                The FITS header to parse.
+            header: The FITS header to parse.
 
         Returns:
-            HeaderData:
-                An initialized HeaderData object populated with values from the
-                FITS header.
+            An initialized HeaderData object populated with values from the FITS
+            header.
 
         Raises:
             Warning:
@@ -262,6 +289,17 @@ def lod_inscribed_to_circumscribed(separation_lod, frame: Frame, diameter_inscri
 
     Pass header.diameter_inscribed.to_value("m") for diameter_inscribed_m.
     The separation may be an array or a traced scalar.
+
+    Args:
+        separation_lod: Offsets in lambda/D of the inscribed diameter; an array or a
+            traced scalar.
+        frame: Circumscribed frame supplying the telescope diameter in m.
+        diameter_inscribed_m: Inscribed telescope diameter in m; positive and no larger
+            than the frame diameter.
+
+    Returns:
+        The offsets in lambda/D of the circumscribed frame, with the shape of
+        ``separation_lod``.
     """
     if frame.diameter_convention != "circumscribed":
         raise ValueError("frame must use the circumscribed diameter")

@@ -30,7 +30,21 @@ from .format import (
 
 
 def route_interpolation(path, requested, options, downsample_shape, *, package=None):
-    """Select and validate the off-axis route before legacy data loading."""
+    """Select and validate the off-axis route before legacy data loading.
+
+    Args:
+        path: Package directory.
+        requested: Requested mode: ``"blend"``, ``"auto"`` or ``"sinc"``.
+        options: SincOptions of the request; None uses the defaults.
+        downsample_shape: Requested (ny, nx) downsampled PSF shape; it is refused for a
+            versioned delivery.
+        package: Open package supplying the manifest and arrays; None reads them from
+            ``path``.
+
+    Returns:
+        Tuple of the validated delivery (None for a legacy package), the delivery
+        backend (None for a legacy package) and the routing information.
+    """
     if requested not in ("blend", "auto", "sinc"):
         raise ValueError("interpolation must be 'blend', 'auto', or 'sinc'")
     is_blend = requested == "blend"
@@ -167,7 +181,16 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
 
 
 def cache_interpolation_identity(info, backend):
-    """Bind routing, declarations, policy and dynamic reader receipt to caches."""
+    """Bind routing, declarations, policy and dynamic reader receipt to caches.
+
+    Args:
+        info: Routing information of the product.
+        backend: Off-axis backend; a delivery backend with a reader adds its policy,
+            domain, profile and receipt.
+
+    Returns:
+        Dictionary of the values that identify the interpolation route in a cache key.
+    """
     identity = {
         key: value
         for key, value in asdict(info).items()

@@ -10,7 +10,14 @@ from yippy.sinc.kernel import AbstractKernelProfile, read_stencil
 
 
 def single_ax(ax):
-    """Resolve one axes, rejecting arrays with an explicit shape error."""
+    """Resolve one axes, rejecting arrays with an explicit shape error.
+
+    Args:
+        ax: A matplotlib axes, or None to create a new figure with one axes.
+
+    Returns:
+        The axes to draw on.
+    """
     if ax is None:
         return plt.subplots(layout="constrained")[1]
     if not isinstance(ax, plt.Axes):
@@ -26,7 +33,14 @@ def require_x64():
 
 
 def query_xy(query):
-    """Convert one finite coordinate pair to a host array."""
+    """Convert one finite coordinate pair to a host array.
+
+    Args:
+        query: Source position (x, y), two finite numbers.
+
+    Returns:
+        Float array of shape (2,).
+    """
     point = np.asarray(query, dtype=float)
     if point.shape != (2,) or not np.all(np.isfinite(point)):
         raise ValueError("query must be a finite (x, y) pair")
@@ -37,6 +51,14 @@ def lattice_parts(lattice):
     """Return validated ``(origin, spacing, shape_yx)`` host arrays of a lattice.
 
     Accepts a PixelGrid or an ``(origin_xy, spacing_xy, shape_yx)`` tuple.
+
+    Args:
+        lattice: A PixelGrid, or a tuple of the (x, y) origin, the positive
+            (x, y) node spacing and the integer (rows, columns) shape.
+
+    Returns:
+        A tuple ``(origin, spacing, shape)``: float arrays of shape (2,) for
+        the origin and spacing and an array of shape (2,) for the shape.
     """
     if hasattr(lattice, "basis"):
         origin, spacing, shape = (
@@ -69,6 +91,14 @@ def stencil_reader(reader):
 
     ``at(query_xy)`` returns the reader's own stencil as host arrays
     ``(nodes, weights, valid)``, each [2, taps].
+
+    Args:
+        reader: A reader that exposes ``stencil`` and a sampled ``grid``.
+
+    Returns:
+        A tuple ``(origin, spacing, shape_yx, reflected, at)``: the lattice
+        arrays, whether the table is read by reflection, and the stencil
+        function.
     """
     origin, spacing, shape = lattice_parts(reader.grid.source)
 
@@ -84,6 +114,17 @@ def stencil_profile(profile, origin, spacing, size_xy, reflected):
 
     A prefiltered profile needs the weights of its designed band, which only a
     reader carries, so it is refused here.
+
+    Args:
+        profile: The kernel profile whose stencil is drawn.
+        origin: Coordinate of node zero, per axis (x, y).
+        spacing: Node spacing, per axis (x, y), in the unit of ``origin``.
+        size_xy: Stored node count per axis (x first).
+        reflected: Whether the table is read by reflection.
+
+    Returns:
+        A function ``at(query_xy)`` returning the host arrays
+        ``(nodes, weights, valid)``, each [2, taps].
     """
     if not isinstance(profile, AbstractKernelProfile):
         raise TypeError("profile must be a kernel profile; or pass a reader")

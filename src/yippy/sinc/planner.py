@@ -23,6 +23,15 @@ class PrefilterPlan:
     and ``candidates`` the (taps, two-axis tone error) pairs that were tried, in
     order. These are sampled maxima of the kernel's response on the declared
     band, not error bounds on a delivered image.
+
+    Attributes:
+        profile: Chosen prefiltered kernel profile, or None on refusal.
+        tone_error_two_axis: Estimated worst two-axis tone error of the chosen
+            profile, dimensionless; NaN on refusal.
+        candidates: Pairs of (taps, two-axis tone error) tried, in order.
+        reason_bits: Integer reason mask; zero when a profile was planned.
+        kernel_design: Ordered (key, value) design record of the chosen
+            profile; empty on refusal.
     """
 
     profile: PrefilteredKernelProfile | None
@@ -37,7 +46,11 @@ class PrefilterPlan:
         return self.profile is not None
 
     def require(self) -> PrefilteredKernelProfile:
-        """Return the profile, or raise PlanRefused carrying this plan."""
+        """Return the profile, or raise PlanRefused carrying this plan.
+
+        Returns:
+            The planned prefiltered kernel profile.
+        """
         if self.profile is None:
             raise PlanRefused(self)
         return self.profile
@@ -101,7 +114,22 @@ def plan_prefilter(*, declared_lattice, products, reflection, domain, max_tone_e
 
 
 def plan_radial_checks(count, limit, kind, spacing, seed):
-    """Stratify the served radius into ``count`` shells, one off-node check each."""
+    """Stratify the served radius into ``count`` shells, one off-node check each.
+
+    Args:
+        count: Number of shells, and so of checks.
+        limit: Served limits in lambda/D: the outer radius as the first entry
+            for an annulus, or the (x, y) box limits otherwise.
+        kind: Domain kind, "annulus" or "box".
+        spacing: Source node pitches (x, y), in lambda/D.
+        seed: Seed for the random generator.
+
+    Returns:
+        List of (x, y) check coordinates in lambda/D, one per shell.
+
+    Raises:
+        ValueError: If no off-node interior point is found for a shell.
+    """
     rng = np.random.default_rng(seed)
     golden = (math.sqrt(5.0) - 1.0) / 2.0
     phase = float(rng.uniform())
@@ -137,6 +165,23 @@ def plan_sampling(
 
     The positive quadrant serves half-open limits along both axes. The upper
     coverage margin comes from the selected kernel, including its filter halo.
+
+    Args:
+        reference_nm: Reference wavelength, in nm.
+        minimum_nm: Shortest wavelength in the band, in nm.
+        support_extent: Support widths along the two axes.
+        limits_lod: Two positive served limits (x, y), in lambda/D.
+        decimals: Number of decimal places the spacing is rounded down to.
+        profile: Kernel profile supplying the margins. If None, the default raw
+            profile is used.
+
+    Returns:
+        Tuple of the node pitch in lambda/D, the per-axis sampling ratios
+        (dimensionless), the served cell counts (x, y) and the halo-padded node
+        counts (x, y).
+
+    Raises:
+        ValueError: If the limits are not two finite positive values.
     """
     profile = KernelProfile() if profile is None else profile
     if len(limits_lod) != 2 or not all(math.isfinite(v) and v > 0 for v in limits_lod):
@@ -154,7 +199,15 @@ def plan_sampling(
 
 
 def plan_mirror_bases(cells_xy, nodes_xy):
-    """Choose interior, axis and outer-edge nodes for reflection checks."""
+    """Choose interior, axis and outer-edge nodes for reflection checks.
+
+    Args:
+        cells_xy: Served cell counts (x, y).
+        nodes_xy: Stored node counts (x, y).
+
+    Returns:
+        Tuple of unique (x, y) node indices that lie inside the stored nodes.
+    """
     jx, jy = (n - 1 for n in cells_xy)
     nx, ny = nodes_xy
     ordered = (
@@ -171,7 +224,19 @@ def plan_mirror_bases(cells_xy, nodes_xy):
 
 
 def plan_cell_checks(cells_xy, spacing_lod, kind):
-    """Place sixteen off-node checks in the outermost served box cell."""
+    """Place sixteen off-node checks in the outermost served box cell.
+
+    Args:
+        cells_xy: Served cell counts (x, y).
+        spacing_lod: Isotropic node pitch, in lambda/D.
+        kind: Domain kind; only "box" is supported.
+
+    Returns:
+        List of sixteen (x, y) check coordinates, in lambda/D.
+
+    Raises:
+        ValueError: If the domain kind is not "box".
+    """
     if kind != "box":
         raise ValueError("the cell check layout needs two limits (a box)")
     jx, jy = (n - 1 for n in cells_xy)

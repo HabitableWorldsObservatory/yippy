@@ -13,7 +13,17 @@ STELLAR_RECONSTRUCTION = "linear"
 
 
 def sample_units(sample_kind, grid):
-    """Return the decoded measure and the factor from stored to decoded values."""
+    """Return the decoded measure and the factor from stored to decoded values.
+
+    Args:
+        sample_kind: How stored pixel values sample the image: ``"point"``,
+            ``"integral"`` or ``"mean"``.
+        grid: Pixel grid whose cell area converts stored values to the measure.
+
+    Returns:
+        Pair of (decoded measure, multiplicative factor taking stored values to
+        decoded values).
+    """
     if sample_kind == "point":
         return Measure.density("grid"), 1.0 / grid.cell_area("grid")
     if sample_kind == "integral":
@@ -38,6 +48,21 @@ def fraction_image(
     reconstruction overrides the default (nearest for integrals, band_limited for
     densities); a stellar halo spanning many decades declares linear, because a
     band-limited interpolant rings below the dark-hole floor.
+
+    Args:
+        data: Per-pixel photon fractions, with any leading axes named by ``axes``
+            preceding (y, x).
+        grid: Pixel grid of the native image.
+        axes: Names of the leading axes of ``data``.
+        measure: Measure of the stored native values, used to decide whether the
+            result is returned as stored or converted to a density.
+        outside: Fill rule for positions outside the grid.
+        quantity: Name of the physical quantity carried by the image.
+        reconstruction: Reconstruction override between pixels, or None for the
+            default.
+
+    Returns:
+        Image of the recovered native measure on ``grid``.
     """
     image = Image(
         data,

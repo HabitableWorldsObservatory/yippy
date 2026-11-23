@@ -33,7 +33,27 @@ def yip_header(
     time_multiplier_detection=None,
     time_multiplier_characterization=None,
 ):
-    """Encode a native focal grid and its optical metadata as FITS cards."""
+    """Encode a native focal grid and its optical metadata as FITS cards.
+
+    Args:
+        grid: Native focal grid in lambda/D with a circumscribed frame; it sets D,
+            PIXSCALE, LAMBDA, XCENTER and YCENTER.
+        design: Optical design name (DESIGN); omitted from the header when None.
+        inscribed_diameter_m: Inscribed telescope diameter in m (D_INSC).
+        low_nm: Shortest bandpass wavelength in nm (MINLAM).
+        high_nm: Longest bandpass wavelength in nm (MAXLAM).
+        obscured: Obscured aperture-area fraction (OBSCURED).
+        jitter_mas: RMS jitter per axis in mas (JITTER).
+        n_wavelengths: Number of wavelength samples (N_LAM).
+        n_pointings: Number of stellar samples (N_STAR).
+        zernike: Aberration set name (ZERNIKE).
+        wfe_nm: Wavefront error in nm (WFE).
+        time_multiplier_detection: Detection time multiplier (TMULDET).
+        time_multiplier_characterization: Characterization time multiplier (TMULCHAR).
+
+    Returns:
+        FITS header holding a card for the grid and for each keyword that is not None.
+    """
     if (
         grid.unit != "lod"
         or grid.frame is None
@@ -215,6 +235,14 @@ def write_yip(path: str | Path, package_or_arrays: YIPPackage | Mapping) -> Path
     encoded in that convention and a cell integral Image is stored directly. A versioned
     sinc delivery is copied with its manifest and supporting files to a new
     or empty directory. Reopen a multi-plane copy with the desired product ID.
+
+    Args:
+        path: Directory of the package to write; created when absent.
+        package_or_arrays: Open YIP package, or a mapping of the named arrays and
+            optional ``grid``, ``headers`` and ``sample_kind`` entries.
+
+    Returns:
+        The package directory that was written.
     """
     path = Path(path)
     if not isinstance(package_or_arrays, (YIPPackage, Mapping)):

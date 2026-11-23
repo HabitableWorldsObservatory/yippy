@@ -80,6 +80,7 @@ class ValidationReport:
         axis_exact: Per axis image, whether the flip is bit-for-bit identical.
         mirror_worst: Largest mirror or axis residual, or NaN.
         mirror_tolerance: Mirror and axis residual limit.
+        product_id: Plane ID of the validated product, or None when not selected.
     """
 
     passed: bool
@@ -102,7 +103,11 @@ class ValidationReport:
     product_id: str | None = None
 
     def to_dict(self):
-        """Return a JSON-serializable view of the report."""
+        """Return a JSON-serializable view of the report.
+
+        Returns:
+            Dictionary of the report fields, with tuples as lists.
+        """
         out = {
             key: (list(value) if isinstance(value, tuple) else value)
             for key, value in self.__dict__.items()
@@ -110,7 +115,11 @@ class ValidationReport:
         return json.loads(json.dumps(out, default=float, allow_nan=True))
 
     def summary(self):
-        """Return the printed pass or fail summary."""
+        """Return the printed pass or fail summary.
+
+        Returns:
+            Text of the pass or fail summary.
+        """
         lines = [
             f"{'PASS' if self.passed else 'FAIL'}: sinc delivery"
             + (f" (product {self.product_id})" if self.product_id else ""),
@@ -321,7 +330,12 @@ class Plan:
     notes: tuple[str, ...] = ()
 
     def served(self):
-        """Return the manifest ``served`` block this plan is built for."""
+        """Return the manifest ``served`` block this plan is built for.
+
+        Returns:
+            Dictionary of the ``served`` manifest block: kind, boundary and the radii or
+            bounds in lambda0/D.
+        """
         if self.limit_kind == "annulus":
             return {
                 "kind": "annulus",
@@ -337,7 +351,12 @@ class Plan:
         }
 
     def summary_dict(self):
-        """Return the lattice and served values to copy into the manifest."""
+        """Return the lattice and served values to copy into the manifest.
+
+        Returns:
+            Dictionary of the lattice, served and count values to copy into the
+            manifest.
+        """
         return {
             "source_origin_lod": [0.0, 0.0],
             "source_spacing_lod": [self.spacing_lod, self.spacing_lod],
@@ -496,6 +515,10 @@ def write_plan(result, outdir):
 
     Returns:
         The paths written, keyed by file name.
+
+    Args:
+        result: Plan whose lists and summary are written.
+        outdir: Output directory; created when absent.
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -551,7 +574,14 @@ def _parser():
 
 
 def main(argv=None):
-    """Run the ``yippy-sinc`` command line and return the exit code."""
+    """Run the ``yippy-sinc`` command line and return the exit code.
+
+    Args:
+        argv: Command-line arguments; None reads ``sys.argv``.
+
+    Returns:
+        Exit code: 0 on success, 1 when validation fails, 2 on a tool error.
+    """
     args = _parser().parse_args(argv)
     try:
         if args.command == "validate":

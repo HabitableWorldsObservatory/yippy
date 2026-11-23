@@ -94,7 +94,22 @@ class _YIPData:
         interpolation: str = "blend",
         sinc_options: SincOptions | None = None,
     ):
-        """Prepare interpolation backends and aperture records from native samples."""
+        """Prepare interpolation backends and aperture records from native samples.
+
+        Args:
+            package: Open coronagraph package supplying the native products.
+            x_symmetric: Whether the response is mirror symmetric about the x axis.
+            y_symmetric: Whether the response is mirror symmetric about the y axis.
+            use_quarter_psf_datacube: Whether a generated PSF datacube stores only
+                the positive quarter of source offsets.
+            downsample_shape: Optional (ny, nx) target shape for the stored PSFs.
+            rule: Aperture rule used for the performance curves.
+            leakage_rule: Name of the leakage rule, or None for the product
+                default.
+            interpolation: Interpolation mode requested for off-axis reads, for
+                example ``"blend"`` or ``"auto"``.
+            sinc_options: Optional sinc construction controls; None uses defaults.
+        """
         from .delivery.routing import route_interpolation
 
         self.package = package
@@ -198,7 +213,15 @@ class _YIPData:
         logger.info(f"Created {yip_path.stem}")
 
     def create_psf(self, x_lod, y_lod):
-        """Return the native off-axis intensity at one source position."""
+        """Return the native off-axis intensity at one source position.
+
+        Args:
+            x_lod: Source x position in lambda/D.
+            y_lod: Source y position in lambda/D.
+
+        Returns:
+            Native off-axis source flux fraction image.
+        """
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
             return fraction_image(
                 self.create_psf_with_info(x_lod, y_lod).intensity,
@@ -209,7 +232,16 @@ class _YIPData:
         return self.offax.create_psf(x_lod, y_lod)
 
     def create_psfs(self, x, y):
-        """Return off-axis photon fractions for equal-length coordinate vectors."""
+        """Return off-axis photon fractions for equal-length coordinate vectors.
+
+        Args:
+            x: Source x positions in lambda/D, shape (N,).
+            y: Source y positions in lambda/D, shape (N,).
+
+        Returns:
+            Off-axis photon fraction images with leading axis ``source`` of
+            length N.
+        """
         if self._sinc_delivery is None and self.interpolation_info.requested == "auto":
             return fraction_image(
                 self.create_psfs_with_info(x, y).intensity,
@@ -220,7 +252,16 @@ class _YIPData:
         return self.offax.create_psfs(x, y)
 
     def create_psf_with_info(self, x_lod, y_lod):
-        """Return an image and backend diagnostics in photon fractions per pixel."""
+        """Return an image and backend diagnostics in photon fractions per pixel.
+
+        Args:
+            x_lod: Source x position in lambda/D.
+            y_lod: Source y position in lambda/D.
+
+        Returns:
+            Interpolation read holding the image in photon fractions per pixel
+            and its status and error diagnostics.
+        """
         if hasattr(self.offax, "create_psf_with_info"):
             return self.offax.create_psf_with_info(x_lod, y_lod)
         finite = jnp.isfinite(x_lod) & jnp.isfinite(y_lod)
@@ -236,7 +277,15 @@ class _YIPData:
         )
 
     def create_psfs_with_info(self, x, y):
-        """Return batch images with per-query status and backend selections."""
+        """Return batch images with per-query status and backend selections.
+
+        Args:
+            x: Source x positions in lambda/D, shape (N,).
+            y: Source y positions in lambda/D, shape (N,).
+
+        Returns:
+            Batched interpolation read with leading axis of length N.
+        """
         if hasattr(self.offax, "create_psfs_with_info"):
             return self.offax.create_psfs_with_info(x, y)
         return jax.vmap(self.create_psf_with_info)(x, y)
@@ -352,7 +401,11 @@ class _YIPData:
         self.has_psf_datacube = True
 
     def __repr__(self):
-        """String representation of the Coronagraph object."""
+        """String representation of the Coronagraph object.
+
+        Returns:
+            Multi-line description of the coronagraph and its off-axis PSFs.
+        """
         base_str = f"Coronagraph {self.name} ({self.package.source.path})\n"
         base_str += f"{self.offax.type} off-axis PSFs, {self.offax.n_psfs} provided"
 

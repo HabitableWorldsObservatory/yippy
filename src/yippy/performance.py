@@ -38,6 +38,13 @@ def resolve_leakage_rule(leakage_rule, product_type):
     ``azimuthal_ring_mean`` still works but is deprecated: the ring rule is its
     finite-aperture generalization (the two agree as the aperture shrinks to a
     point), so it is subsumed. It warns with ``DeprecationWarning``.
+
+    Args:
+        leakage_rule: Requested rule name, or None for the product default.
+        product_type: Off-axis backend type, ``"1d"`` or another value for 2D.
+
+    Returns:
+        The rule name to use.
     """
     if leakage_rule is None:
         return "aperture_mean" if product_type == "1d" else RING_RULE
@@ -58,7 +65,14 @@ def resolve_leakage_rule(leakage_rule, product_type):
 
 @dataclass
 class _OffAxisPosition:
-    """Data for a single off-axis PSF position along the performance axis."""
+    """Data for a single off-axis PSF position along the performance axis.
+
+    Attributes:
+        separation: Absolute x offset in lambda/D.
+        image: The native off-axis PSF.
+        px: Nominal x position in the image, in pixels, including subpixel phase.
+        py: Nominal y position in the image, in pixels, including subpixel phase.
+    """
 
     separation: float  # |x| in lam/D
     image: Image  # the native off-axis PSF
@@ -145,6 +159,14 @@ def stellar_intensity_curves(
     diameter dependence; otherwise out-of-range diameters yield NaN.
     The profile interpolates in linear intensity between sampled radii.
     The spatial reader is static under JIT; use ``eqx.filter_jit``.
+
+    Args:
+        backend: Backend that supplies the stellar map and its grid.
+        stellar_diameter_lod: Stellar diameter in lambda/D; may be traced.
+        interpolation: Radial profile interpolation, ``"keys"`` or ``"quintic"``.
+
+    Returns:
+        Ring-mean profile versus radius, in stellar flux fraction per pixel.
     """
     if interpolation not in ("keys", "quintic"):
         raise ValueError("interpolation must be 'keys' or 'quintic'")

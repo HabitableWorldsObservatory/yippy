@@ -33,7 +33,20 @@ class OffAx:
         *,
         sample_kind="point",
     ) -> None:
-        """Prepare interpolation geometry from shipped samples and their grid."""
+        """Prepare interpolation geometry from shipped samples and their grid.
+
+        Args:
+            psfs: Shipped off-axis PSF samples, one native image per source
+                offset.
+            offsets: Source offsets (x, y) in lambda/D, one row per PSF.
+            grid: Pixel-center geometry of the native images in the package
+                reference frame.
+            x_symmetric: Whether the response is mirror symmetric about the x axis.
+            y_symmetric: Whether the response is mirror symmetric about the y axis.
+            downsample_shape: Optional (ny, nx) target shape for the stored PSFs.
+            sample_kind: How stored pixel values sample the image: ``"point"``,
+                ``"integral"`` or ``"mean"``.
+        """
         self.pixel_scale_arcsec = grid.step * lod / u.pix
         self.x_symmetric = x_symmetric
         self.y_symmetric = y_symmetric
@@ -162,14 +175,13 @@ class OffAx:
         """Get PSF at the given offset indices.
 
         Args:
-            x_idx (int):
+            x_idx:
                 Index into x_offsets array.
-            y_idx (int):
+            y_idx:
                 Index into y_offsets array.
 
         Returns:
-            Image or None:
-                Native unocculted source flux fraction, or None when absent.
+            Native unocculted source flux fraction, or None when absent.
         """
         flat_idx = self.offset_to_flat_idx[x_idx, y_idx]
         if flat_idx >= 0:
@@ -192,22 +204,21 @@ class OffAx:
           is the center of the image, where the star is located.
 
         Args:
-            x (astropy.units.Quantity):
+            x:
                 x position. Can be either units of pixel, lod, an angular
                 unit (e.g. arcsec), or a length unit (e.g. AU)
-            y (astropy.units.Quantity):
+            y:
                 y position. Can be either units of pixel, lod, an angular
                 unit (e.g. arcsec), or a length unit (e.g. AU)
-            lam (astropy.units.Quantity):
+            lam:
                 Wavelength of the observation
-            D (astropy.units.Quantity):
+            D:
                 Diameter of the telescope
-            dist (astropy.units.Quantity):
+            dist:
                 Distance to the system
 
         Returns:
-            Image:
-                Native unocculted source flux fractions at the given position.
+            Native unocculted source flux fractions at the given position.
         """
         if (
             isinstance(x, Quantity)

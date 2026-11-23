@@ -41,7 +41,17 @@ CACHE_DIR_ENV_VAR = "YIPPY_CACHE_DIR"
 
 @dataclass(frozen=True)
 class Archive:
-    """A catalog YIP and the release asset that contains its native files."""
+    """A catalog YIP and the release asset that contains its native files.
+
+    Attributes:
+        name: Catalog name of the YIP, also the name of its folder and of the zip asset.
+        coronagraph: Coronagraph design name.
+        designer: Designer of the coronagraph.
+        sampling: Off-axis sampling of the product, ``"1d"`` or ``"2d"``.
+        digest: Checksum of the zip asset, as ``algorithm:hexdigest``.
+        telescope: Telescope name, or None when the product does not name one.
+        release: Tag of the GitHub release that holds the asset.
+    """
 
     name: str
     coronagraph: str
@@ -65,7 +75,15 @@ class Archive:
         )
 
     def archive_path(self, cache_path: str | Path | None = None) -> Path:
-        """Locate the compressed archive without downloading or unpacking it."""
+        """Locate the compressed archive without downloading or unpacking it.
+
+        Args:
+            cache_path: Cache directory to look in; None uses ``cache_dir()``.
+
+        Returns:
+            Path of the compressed archive inside the cache directory, whether or not it
+            exists.
+        """
         root = cache_dir() if cache_path is None else Path(cache_path).expanduser()
         return root / self.filename
 
@@ -113,6 +131,9 @@ def cache_dir() -> Path:
          ``~/.cache/yippy`` on Linux).
 
     Override per call by passing ``cache_path`` to :func:`fetch_yip`.
+
+    Returns:
+        Default cache directory for YIP archives.
     """
     env = os.environ.get(CACHE_DIR_ENV_VAR)
     if env:
@@ -140,6 +161,17 @@ def fetch_yip(
     ``YIPPY_CACHE_DIR`` environment variable). Pass ``cache_path`` to
     override the cache location for this call only -- useful for
     shared institutional setups or project-scoped caches.
+
+    Args:
+        name: Catalog name of the YIP, for example ``"eac1_aavc_2d"``; exclusive with
+            the filters.
+        telescope: Telescope filter for the structured query.
+        coronagraph: Coronagraph filter for the structured query.
+        sampling: Sampling filter for the structured query, ``"1d"`` or ``"2d"``.
+        cache_path: Cache directory for this call only; None uses ``cache_dir()``.
+
+    Returns:
+        Path, as a string, of the unpacked YIP folder.
 
     Raises:
         TypeError: if both ``name`` and filters are passed (or neither).
@@ -216,6 +248,13 @@ _FILTERABLE_FIELDS = frozenset({"telescope", "coronagraph", "sampling"})
 def list_yips(**filters: str) -> list[str]:
     """Return catalog names matching all filters. No filters returns all names.
 
+    Args:
+        **filters: Catalog fields to match exactly: ``telescope``, ``coronagraph`` or
+            ``sampling``.
+
+    Returns:
+        Catalog names of the YIPs that match every filter, in catalog order.
+
     Raises:
         TypeError: if a filter key is not a valid catalog field.
     """
@@ -233,12 +272,25 @@ def list_yips(**filters: str) -> list[str]:
 
 
 def yip_exists(name: str) -> bool:
-    """True iff ``name`` is an available YIP in the catalog."""
+    """True iff ``name`` is an available YIP in the catalog.
+
+    Args:
+        name: Catalog name to look up.
+
+    Returns:
+        True when ``name`` is in the catalog.
+    """
     return name in _CATALOG
 
 
 def yip_info(name: str) -> Archive:
     """Describe a catalog asset without downloading it.
+
+    Args:
+        name: Catalog name to look up.
+
+    Returns:
+        The catalog entry for ``name``.
 
     Raises:
         KeyError: if ``name`` is not in the catalog.

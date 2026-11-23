@@ -9,6 +9,19 @@ def write_synthetic_yip(path, *, grid, offsets_xy_lod, psfs, stellar, sky, heade
     The grid describes the native image coordinates. Headers can supply a
     common FITS Header or per-product cards, including distinct product grids.
     The caller supplies all radiometry, source coordinates and diameters.
+
+    Args:
+        path: Output file path for the YIP FITS file.
+        grid: Native image pixel grid shared by the PSF products.
+        offsets_xy_lod: Off-axis source positions (x, y) in lambda/D, one row
+            per PSF in ``psfs``.
+        psfs: Off-axis PSF cube, one native image per source offset.
+        stellar: Pair of (stellar diameters in lambda/D, stellar intensity maps).
+        sky: Sky transmission image on the native grid.
+        headers: A common FITS Header or per-product header cards.
+
+    Returns:
+        Whatever ``write_yip`` returns for the written file.
     """
     diameters, intensity = stellar
     return write_yip(

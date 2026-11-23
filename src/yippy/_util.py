@@ -44,21 +44,45 @@ def _canonical_cache_value(value):
 
 
 def cache_identity_json(identity: dict) -> str:
-    """Deterministic serialization of a cache identity mapping."""
+    """Deterministic serialization of a cache identity mapping.
+
+    Args:
+        identity: Mapping of cache identity fields; values must be scalars,
+            lists, tuples or nested mappings.
+
+    Returns:
+        Compact JSON string with sorted keys.
+    """
     return json.dumps(
         _canonical_cache_value(identity), sort_keys=True, separators=(",", ":")
     )
 
 
 def cache_identity_digest(identity: dict) -> str:
-    """SHA-256 hex digest of the canonical serialization of ``identity``."""
+    """SHA-256 hex digest of the canonical serialization of ``identity``.
+
+    Args:
+        identity: Mapping of cache identity fields.
+
+    Returns:
+        Hexadecimal SHA-256 digest of the canonical JSON.
+    """
     return hashlib.sha256(cache_identity_json(identity).encode()).hexdigest()
 
 
 def save_coro_performance_to_fits(
     record, filename, outdir, overwrite=True, identity=None
 ):
-    """Atomically store the complete single-axis record as float64 columns."""
+    """Atomically store the complete single-axis record as float64 columns.
+
+    Args:
+        record: Performance curves record to write.
+        filename: Output file name inside ``outdir``.
+        outdir: Directory that receives the file.
+        overwrite: When False, raise ``FileExistsError`` if the file exists.
+        identity: Optional cache identity mapping; its digest and canonical JSON
+            are stored in the header.
+    """
     import os
     from dataclasses import asdict
 
@@ -96,7 +120,15 @@ def save_coro_performance_to_fits(
 
 
 def read_performance_cache_key(path: Path) -> str | None:
-    """Identity digest, or None for missing/unreadable/old-format records."""
+    """Identity digest, or None for missing/unreadable/old-format records.
+
+    Args:
+        path: Path of the cached performance FITS file.
+
+    Returns:
+        Stored identity digest, or None when the file cannot be read or has a
+        different format version.
+    """
     try:
         header = fits.getheader(path, 0)
         return (
@@ -109,7 +141,15 @@ def read_performance_cache_key(path: Path) -> str | None:
 
 
 def load_coro_performance_from_fits(filename: str, indir: Path):
-    """Read a complete record; legacy partial tables are not supported."""
+    """Read a complete record; legacy partial tables are not supported.
+
+    Args:
+        filename: Name of the cached FITS file inside ``indir``.
+        indir: Directory holding the file.
+
+    Returns:
+        The stored performance curves record.
+    """
     from optixstuff.apertures import Circular, HalfMaximum
     from optixstuff.performance import PerformanceCurves
 

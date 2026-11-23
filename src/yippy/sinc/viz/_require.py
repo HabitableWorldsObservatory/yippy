@@ -2,7 +2,11 @@
 
 
 def eyepiece():
-    """Return eyepiece or raise with the install hint for this extra."""
+    """Return eyepiece or raise with the install hint for this extra.
+
+    Returns:
+        The imported ``eyepiece`` module.
+    """
     try:
         import eyepiece as ep
     except ImportError as err:

@@ -12,11 +12,16 @@ import numpy as np
 def float_dtype():
     """Active default float dtype: float64 if jax_enable_x64 else float32.
 
-    Returns a numpy dtype usable for both ``np.*`` and ``jnp.*`` allocations.
+    Returns:
+        A numpy dtype usable for both ``np.*`` and ``jnp.*`` allocations.
     """
     return jax.dtypes.canonicalize_dtype(np.float64)
 
 
 def dtype_tag():
-    """Short cache key for the active float dtype: ``"f32"`` or ``"f64"``."""
+    """Short cache key for the active float dtype.
+
+    Returns:
+        ``"f64"`` when the active float dtype is 8 bytes wide, else ``"f32"``.
+    """
     return "f64" if np.dtype(float_dtype()).itemsize == 8 else "f32"

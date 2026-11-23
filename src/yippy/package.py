@@ -23,7 +23,13 @@ from .schema import PRODUCT_FILES, WRITE_LOCK
 
 @dataclass(frozen=True)
 class Source:
-    """Directory and SHA-256 identity of the selected package inputs."""
+    """Directory and SHA-256 identity of the selected package inputs.
+
+    Attributes:
+        path: Directory holding the package inputs.
+        digest: SHA-256 hex digest of the product names, relative file names and file
+            contents.
+    """
 
     path: Path
     digest: str
@@ -34,7 +40,11 @@ def _generation(stat):
 
 
 class _SourceFile:
-    """An open source generation shared by hashing, header intake and lazy reads."""
+    """An open source generation shared by hashing, header intake and lazy reads.
+
+    Args:
+        path: Path of the file to open for binary reading.
+    """
 
     def __init__(self, path):
         self.stream = path.open("rb")
@@ -87,7 +97,13 @@ def _source(path, products, files, product_id):
 
 @dataclass(frozen=True)
 class ProductHeaders:
-    """Metadata and native pixel geometry for each sampled image product."""
+    """Metadata and native pixel geometry for each sampled image product.
+
+    Attributes:
+        offaxis_psfs: Header of the off-axis PSF cube.
+        stellar_intensity: Header of the stellar intensity cube.
+        sky_transmission: Header of the sky transmission image.
+    """
 
     offaxis_psfs: HeaderData
     stellar_intensity: HeaderData
@@ -96,7 +112,13 @@ class ProductHeaders:
 
 @dataclass(frozen=True, eq=False)
 class YIPPackage:
-    """The measured samples in shipped order, before interpolation or symmetry."""
+    """The measured samples in shipped order, before interpolation or symmetry.
+
+    Attributes:
+        source: Directory and content digest of the selected inputs.
+        product_id: Selected plane ID of a versioned delivery, or None for a native
+            package.
+    """
 
     source: Source
     product_id: str | None
@@ -123,12 +145,23 @@ class YIPPackage:
             raise ValueError("YIP source files changed; open the package again")
 
     def fits_header(self, product):
-        """Return an independent FITS header, including comments and extra cards."""
+        """Return an independent FITS header, including comments and extra cards.
+
+        Args:
+            product: Native product name, such as ``"offaxis_psfs"``.
+
+        Returns:
+            A new FITS header with the cards of the product file.
+        """
         return fits.Header.fromstring(self._header_cards[product], sep="\n")
 
     @cached_property
     def header(self):
-        """Unit-aware image headers, each with its own pixel grid."""
+        """Unit-aware image headers, each with its own pixel grid.
+
+        Returns:
+            Headers of the three image products, each with units attached.
+        """
         manifest = self._manifest
         offaxis = self.fits_header("offaxis_psfs")
         return ProductHeaders(
@@ -158,7 +191,12 @@ class YIPPackage:
 
     @cached_property
     def offsets_xy_lod(self):
-        """Native (x, y) offsets in lambda/D, one row per shipped PSF."""
+        """Native (x, y) offsets in lambda/D, one row per shipped PSF.
+
+        Returns:
+            Native (x, y) offsets in lambda/D, shape [n_psf, 2]; a 1D offset list is
+            returned with y equal to zero.
+        """
         raw = self._native_array("offsets_xy_lod")
         count = self.header.offaxis_psfs.naxis3
         if raw.ndim == 1:
@@ -195,7 +233,15 @@ class YIPPackage:
         return self._native_array("sky_transmission")
 
     def prepare(self, rules=(DEFAULT_APERTURE_RULE,), **options):
-        """Prepare the numerical coronagraph from this package."""
+        """Prepare the numerical coronagraph from this package.
+
+        Args:
+            rules: Aperture rules to prepare records for.
+            **options: Further keyword arguments of ``Coronagraph``.
+
+        Returns:
+            The numerical ``Coronagraph`` prepared from this package.
+        """
         from .coronagraph import Coronagraph
 
         return Coronagraph(self, rules=rules, **options)
@@ -206,6 +252,17 @@ def open_yip(path_or_name, *, product_id=None, filenames=None) -> YIPPackage:
 
     For a multi-plane sinc delivery, select the monochromatic product by ID.
     A filename override maps native product names to local FITS filenames.
+
+    Args:
+        path_or_name: Package directory, or the catalog name of a YIP to fetch when no
+            such directory exists.
+        product_id: Plane ID to select in a multi-plane versioned delivery; it must be
+            None for a native package.
+        filenames: Optional mapping from native product names to local FITS filenames
+            that override the defaults.
+
+    Returns:
+        The open package; image samples are read on first access.
     """
     path = Path(path_or_name).expanduser()
     if isinstance(path_or_name, str) and not path.exists() and yip_exists(path_or_name):

@@ -27,7 +27,17 @@ from yippy.sinc.prefilter import design_grid, design_record, sampling_ratios
 
 
 class Normalization(eqx.Module):
-    """Source-independent product conversions; reads retain delivered units."""
+    """Source-independent product conversions; reads retain delivered units.
+
+    Attributes:
+        reference: Name of the normalization reference.
+        photon_conversion: Conversion from delivered units to photons, one value
+            per product, shape (n_products,).
+        reference_uncertainty_fraction: Fractional uncertainty of the reference,
+            shape (n_products,).
+        included_factors: Names of the factors included in the conversion.
+        provenance_id: Identifier of the provenance record.
+    """
 
     reference: str = eqx.field(static=True)
     photon_conversion: F64 = eqx.field(converter=jnp.asarray)
@@ -49,7 +59,13 @@ class Normalization(eqx.Module):
 
 
 class Premises(eqx.Module):
-    """Six ordered physical premises, evidence codes and provenance sources."""
+    """Six ordered physical premises, evidence codes and provenance sources.
+
+    Attributes:
+        values: Truth value of each premise, shape (6,).
+        evidence: Evidence code of each premise, shape (6,).
+        source_ids: Six provenance identifiers, one per premise.
+    """
 
     values: Boolean = eqx.field(converter=jnp.asarray)
     evidence: I32 = eqx.field(converter=jnp.asarray)
@@ -65,7 +81,30 @@ class Premises(eqx.Module):
 
 
 class Products(eqx.Module):
-    """Exact monochromatic or fixed band-mean products with explicit support."""
+    """Exact monochromatic or fixed band-mean products with explicit support.
+
+    Attributes:
+        pixels: Detector pixel grid, in lambda/D with a frame.
+        normalization: Product conversions.
+        kind: Spectral kind, "monochromatic" or "band_mean".
+        wavelength_nm: Central wavelength per product, in nm, shape (n_products,).
+        limits_nm: Lower and upper wavelength limit per product, in nm, shape
+            (n_products, 2).
+        sampling_min_nm: Shortest wavelength used for sampling checks per
+            product, in nm, shape (n_products,).
+        campaign_sampling_min_nm: Campaign minimum wavelength, in nm; NaN if
+            none was declared. Scalar.
+        support_extent_xy: Support extents (x, y) per product, shape
+            (n_products, 2).
+        support_evidence: Evidence code of the support per product, shape
+            (n_products,).
+        support_source_ids: Provenance identifier of the support per product.
+        premises: Physical premises of the delivery.
+        optical_id: Identifier of the optical model.
+        spectral_weight_id: Identifier of the spectral weighting.
+        identity: Identity string of the delivery.
+        measure: Measure of the intensity values, integral by default.
+    """
 
     pixels: PixelGrid
     normalization: Normalization
@@ -124,6 +163,17 @@ class Reflection(eqx.Module):
     its residual is relative to the image's own maximum, which is below the
     off-frame peak and therefore stricter. Without a positive denominator, only
     exact identity passes.
+
+    Attributes:
+        kind: Reflection kind, "none" or "two_axis_pixel_flip_v1".
+        axes: Which source axes are reflected, shape (2,) as (x, y).
+        declaration_id: Identifier of the reflection declaration.
+        argument_id: Identifier of the supporting argument.
+        evidence: Evidence code of the declaration, scalar.
+        check_report_id: Identifier of the check report.
+        check_passed: Whether the mirror checks passed, one per product.
+        tolerance: Largest allowed mirror residual relative to the local peak,
+            dimensionless; defaults to MIRROR_TOLERANCE.
     """
 
     kind: str = eqx.field(static=True)
@@ -157,6 +207,18 @@ class SampledGrid(eqx.Module):
     images, or ``"prefiltered_coefficients"``, the coefficient table a
     PrefilteredReader builds from them and keeps in their place. Readers are
     constructed only from samples.
+
+    Attributes:
+        intensity: Stored values, shape (product, sy, sx, row, column), in the
+            delivered units, float32 or float64.
+        source: Source-node pixel grid, in lambda/D.
+        products: Products the samples belong to.
+        reflection: Reflection declaration.
+        receipt_id: Identifier of the admission receipt.
+        profile_id: Identifier of the kernel profile admitted under; empty if
+            built outside admission.
+        stored: What ``intensity`` holds, "samples" or
+            "prefiltered_coefficients".
     """
 
     intensity: jax.Array
@@ -185,7 +247,19 @@ class SampledGrid(eqx.Module):
 
 
 class CheckSet(eqx.Module):
-    """Independent off-node images and optional independently supplied core peaks."""
+    """Independent off-node images and optional independently supplied core peaks.
+
+    Attributes:
+        source_xy_lod: Check source coordinates, shape (n_checks, 2), in lambda/D.
+        intensity: Independent check images, shape (n_checks, row, column), in
+            the delivered units.
+        product_index: Product of each check, shape (n_checks,).
+        core_peak: Independently supplied core peak per check, shape
+            (n_checks,), in the delivered units.
+        provenance_id: Identifier of the provenance record.
+        reference_method_id: Identifier of the reference method.
+        target_id: Identifier of the error target.
+    """
 
     source_xy_lod: F64 = eqx.field(converter=jnp.asarray)
     intensity: jax.Array = eqx.field(converter=jnp.asarray)
@@ -216,6 +290,14 @@ class MirrorCheckSet(eqx.Module):
 
     Each product must include x-negative, y-negative and both-negative checks.
     These finite comparisons are empirical evidence, never a global bound.
+
+    Attributes:
+        source_xy_lod: Check source coordinates, shape (n_checks, 2), in lambda/D.
+        indices_xy: Signed node indices (x, y), shape (n_checks, 2).
+        intensity: Independent node images, shape (n_checks, row, column), in
+            the delivered units.
+        product_index: Product of each check, shape (n_checks,).
+        provenance_id: Identifier of the provenance record.
     """
 
     source_xy_lod: F64 = eqx.field(converter=jnp.asarray)

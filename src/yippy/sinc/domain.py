@@ -15,7 +15,16 @@ _RAW_PROFILE = KernelProfile()
 
 
 class Domain(eqx.Module):
-    """A box or origin-centered annulus, without tolerance-expanded boundaries."""
+    """A box or origin-centered annulus, without tolerance-expanded boundaries.
+
+    Attributes:
+        kind: Either "box" or "annulus".
+        boundary: Either "closed" or "lower_closed_upper_open".
+        limits_xy_lod: Box limits, shape (2, 2): row 0 holds the lower (x, y)
+            and row 1 the upper (x, y), in lambda/D. Zero for an annulus.
+        radii_lod: Inner and outer radius, shape (2,), in lambda/D. Zero for
+            a box.
+    """
 
     kind: str = eqx.field(static=True)
     boundary: str = eqx.field(static=True)
@@ -48,7 +57,14 @@ class Domain(eqx.Module):
                 raise ValueError("Annulus requires ordered radii and zero box limits")
 
     def contains(self, source_xy_lod):
-        """Test original signed coordinates after explicit subnormal flushing."""
+        """Test original signed coordinates after explicit subnormal flushing.
+
+        Args:
+            source_xy_lod: Query source coordinate (x, y), in lambda/D.
+
+        Returns:
+            Scalar boolean, True if the query is inside the domain.
+        """
         query = flush_subnormal(source_xy_lod)
         if self.kind == "box":
             low = jnp.all(query >= self.limits_xy_lod[0])
@@ -65,7 +81,14 @@ class Domain(eqx.Module):
 
 
 def normal_or_zero(value):
-    """Check host binary64 values without backend denormal-mode dependence."""
+    """Check host binary64 values without backend denormal-mode dependence.
+
+    Args:
+        value: Host float to test.
+
+    Returns:
+        True if the value is finite and either zero or a normal number.
+    """
     return math.isfinite(value) and (value == 0 or abs(value) >= sys.float_info.min)
 
 
@@ -75,6 +98,12 @@ def in_supported_range(domain):
     Box limits must have magnitude <= 1e6; annulus radii must be 0 (inner only)
     or in [1e-6, 1e6], so the squared membership comparisons neither underflow
     nor overflow. Admission and reader construction share this gate.
+
+    Args:
+        domain: Permission domain to test.
+
+    Returns:
+        True if the domain limits or radii are in range.
     """
     if domain.kind == "box":
         return all(abs(v) <= 1e6 for row in domain.limits_xy_lod.tolist() for v in row)
@@ -87,6 +116,16 @@ def coverage(query, lattice, reflected, profile=_RAW_PROFILE):
 
     A query is covered when its taps, and the profile's halo of stored nodes
     beyond the first and the last tap, all lie inside the signed table.
+
+    Args:
+        query: Source coordinate (x, y), in lambda/D.
+        lattice: Source pixel grid of the stored table.
+        reflected: Whether the table stores one reflected quadrant.
+        profile: Kernel profile giving the stencil and halo size. Defaults to
+            the raw profile.
+
+    Returns:
+        Scalar boolean, True if the full stencil is covered.
     """
     start = profile.stencil_start(query, origin_xy(lattice), spacing_xy(lattice))
     size = jnp.asarray(lattice.shape[::-1], dtype=jnp.float64)
@@ -112,6 +151,17 @@ def safe_query(domain, lattice, reflected, profile=_RAW_PROFILE):
     and exact floor rule. This finite list is not a proof of nonemptiness for
     every floating-point geometry: an unresolved intersection returns None,
     causing admission to refuse with INCOMPLETE_STENCIL.
+
+    Args:
+        domain: Permission domain.
+        lattice: Source pixel grid of the stored table.
+        reflected: Whether the table stores one reflected quadrant.
+        profile: Kernel profile giving the stencil and halo size. Defaults to
+            the raw profile.
+
+    Returns:
+        Source coordinate (x, y) in lambda/D, shape (2,), that is both
+        permitted and fully covered, or None if no candidate qualifies.
     """
     origin = origin_xy(lattice).tolist()
     spacing = spacing_xy(lattice).tolist()
@@ -173,7 +223,19 @@ def safe_query(domain, lattice, reflected, profile=_RAW_PROFILE):
 
 
 def restrict_domain(declared, override=None):
-    """Validate numeric range and require an override to restrict permission."""
+    """Validate numeric range and require an override to restrict permission.
+
+    Args:
+        declared: Domain declared by the delivery, or None.
+        override: Optional restricting domain of the same kind and boundary.
+
+    Returns:
+        The override if given, else the declared domain (possibly None).
+
+    Raises:
+        ValueError: If a domain is out of range or the override expands or
+            changes the declared geometry.
+    """
     for domain in (declared, override):
         if domain is not None and not in_supported_range(domain):
             raise ValueError("Domain outside supported numeric range")
@@ -198,7 +260,19 @@ def restrict_domain(declared, override=None):
 
 
 def validate_check_positions(positions, domain, lattice, reflected, profile=None):
-    """Reject independent checks outside permission or full stencil coverage."""
+    """Reject independent checks outside permission or full stencil coverage.
+
+    Args:
+        positions: Check coordinates (x, y), in lambda/D, one per check.
+        domain: Permission domain, or None to skip the permission test.
+        lattice: Source pixel grid of the stored table.
+        reflected: Whether the table stores one reflected quadrant.
+        profile: Kernel profile giving the stencil and halo size. If None, the
+            default raw profile is used.
+
+    Raises:
+        ValueError: If a check lies outside the domain or stencil coverage.
+    """
     profile = KernelProfile() if profile is None else profile
     for position in positions:
         query = jnp.asarray(position, dtype=jnp.float64)

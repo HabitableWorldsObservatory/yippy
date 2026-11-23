@@ -15,7 +15,13 @@ Boolean = Bool[jax.Array, "..."]
 
 
 def check_array(value, shape, dtype):
-    """Reject malformed arrays without inspecting traced values."""
+    """Reject malformed arrays without inspecting traced values.
+
+    Args:
+        value: Array to check.
+        shape: Required shape tuple.
+        dtype: Iterable of accepted dtypes.
+    """
     if not hasattr(value, "shape") or value.shape != shape:
         raise ValueError(f"Expected shape {shape}, got {getattr(value, 'shape', None)}")
     if value.dtype not in tuple(jnp.dtype(d) for d in dtype):
@@ -23,7 +29,11 @@ def check_array(value, shape, dtype):
 
 
 def check_static(module):
-    """Keep textual PyTree metadata immutable and correctly typed."""
+    """Keep textual PyTree metadata immutable and correctly typed.
+
+    Args:
+        module: Dataclass module whose static fields are checked.
+    """
     for field in fields(module):
         if not field.metadata.get("static", False):
             continue

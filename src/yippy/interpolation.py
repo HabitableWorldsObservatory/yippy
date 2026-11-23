@@ -15,8 +15,7 @@ from .sinc.evidence import BoundKind, Reason, Status
 class SincOptions:
     """Select a fixed product and optional sinc construction controls.
 
-    Args:
-        taps: Optional prefilter tap count (5..10); None lets the sinc package select.
+    Attributes:
         product_id: Exact manifest plane ID, required for multiple planes.
         domain: Optional permission restriction in reference lambda/D.
         memory: Explicit MemoryBudget. None uses array-size estimates
@@ -24,6 +23,7 @@ class SincOptions:
             Compiler workspace and caller-owned arrays are outside this budget.
         policy: Optional ReadPolicy. Its error budget is expressed in
             incident photon fractions per pixel. None selects sampling mode.
+        taps: Optional prefilter tap count (5..10); None lets the sinc package select.
     """
 
     product_id: str | None = None
@@ -35,7 +35,21 @@ class SincOptions:
 
 @dataclass(frozen=True)
 class InterpolationInfo:
-    """Immutable construction routing and provenance, without image storage."""
+    """Immutable construction routing and provenance, without image storage.
+
+    Attributes:
+        requested: Interpolation mode the caller asked for.
+        effective: Interpolation mode actually used.
+        reasons: Reasons the effective mode differs from the requested one.
+        manifest_sha256: SHA-256 of the sinc manifest, empty when none applies.
+        product_id: Manifest plane ID in use, empty when none applies.
+        yippy_version: yippy version that built the routing.
+        kernel_profile: Name of the sinc kernel profile.
+        receipt_id: Identifier of the sinc construction receipt.
+        receipt: The construction receipt object, or None.
+        manifest_json: Serialized sinc manifest.
+        options_json: Serialized interpolation options.
+    """
 
     requested: str
     effective: str
@@ -51,7 +65,19 @@ class InterpolationInfo:
 
 
 class ReadLedger(eqx.Module):
-    """Error ledger in absolute incident photon fractions per pixel."""
+    """Error ledger in absolute incident photon fractions per pixel.
+
+    Attributes:
+        bound: Error bound of each ledger term, in incident photon fractions
+            per pixel; infinite when unknown.
+        evidence: Evidence code of each term.
+        applicable: Whether each term applies to the read.
+        term_ids: Names of the ledger terms.
+        target_id: Identifier of the quantity the bound is expressed in.
+        metric_id: Identifier of the error metric.
+        profile_id: Identifier of the kernel or backend profile.
+        bound_kind: Kind of bound, from the sinc ``BoundKind`` enum.
+    """
 
     bound: jax.Array
     evidence: jax.Array
@@ -68,6 +94,20 @@ class InterpolationRead(eqx.Module):
 
     Status, reason bits and bound kinds follow the version-one sinc enums.
     selected_backend is 0 for blend and 1 for sinc. Unknown errors stay infinite.
+
+    Attributes:
+        intensity: Image read in incident photon fractions per pixel.
+        accepted: Whether the read was accepted.
+        sampling_ok: Whether the sampling condition held.
+        status: Status code from the sinc ``Status`` enum.
+        reason_bits: Bit set of ``Reason`` flags.
+        bound_available: Whether an error bound is available.
+        bound_kind: Kind of bound, from the sinc ``BoundKind`` enum.
+        abs_error_bound: Absolute error bound in incident photon fractions per
+            pixel; infinite when unknown.
+        empirical_max_abs: Empirical maximum absolute error, NaN when not measured.
+        ledger: Per-term error ledger.
+        selected_backend: 0 for blend, 1 for sinc.
     """
 
     intensity: jax.Array
@@ -92,7 +132,19 @@ def blend_read(
     target_id="incident_photon_per_pixel",
     profile_id="blend",
 ):
-    """Attach unknown-error diagnostics."""
+    """Attach unknown-error diagnostics.
+
+    Args:
+        image: Image read in incident photon fractions per pixel.
+        finite: Whether the query position was finite.
+        reasons: Initial reason bits.
+        fallback: Whether a fallback path produced the image.
+        target_id: Identifier of the quantity the image is expressed in.
+        profile_id: Identifier of the backend profile.
+
+    Returns:
+        Read with the image set to NaN where invalid and the error bound unknown.
+    """
     valid = finite & jnp.all(jnp.isfinite(image))
     # Version-one sinc reason bits: NONFINITE_QUERY and FALLBACK_USED.
     bits = jnp.asarray(reasons, jnp.uint32)

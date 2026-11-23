@@ -11,7 +11,20 @@ lib_color = "229"
 
 # ANSI escape sequences for colors
 class ColorCodes:
-    """ANSI escape sequences for colors."""
+    """ANSI escape sequences for colors.
+
+    Attributes:
+        RESET: Sequence that resets all text attributes.
+        BLACK: Black foreground.
+        RED: Red foreground.
+        GREEN: Green foreground.
+        YELLOW: Yellow foreground.
+        BLUE: Blue foreground.
+        MAGENTA: Magenta foreground.
+        CYAN: Cyan foreground.
+        WHITE: White foreground.
+        LIB: Foreground color used for the yippy tag.
+    """
 
     RESET = "\033[0m"
     BLACK = "\033[30m"
@@ -27,7 +40,11 @@ class ColorCodes:
 
 # Custom formatter to add colors
 class ColorFormatter(logging.Formatter):
-    """Custom formatter to add colors to log messages."""
+    """Custom formatter to add colors to log messages.
+
+    Attributes:
+        COLORS: Map from logging level number to the ANSI color of its message.
+    """
 
     COLORS: ClassVar[dict[int, str]] = {
         logging.DEBUG: ColorCodes.BLUE,
@@ -38,7 +55,14 @@ class ColorFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord):
-        """Format the log message with colors."""
+        """Format the log message with colors.
+
+        Args:
+            record: Log record to format.
+
+        Returns:
+            The formatted message prefixed with the colored library tag.
+        """
         log = super().format(record)
         color = self.COLORS.get(record.levelno, ColorCodes.WHITE)
         return f"{ColorCodes.LIB}\033[48;5;16m[{lib_name}]\033[0m {color}{log}"

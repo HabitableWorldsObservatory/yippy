@@ -38,6 +38,28 @@ class DeliveryBackend(eqx.Module):
 
     Quadrant products never create a blend representation. For these products,
     auto refusal returns statuses/NaNs because midpoint-aware blend is unavailable.
+
+    Attributes:
+        training_nodes: Stored PSFs of a prefiltered reader in row-major lattice order,
+            or None.
+        reader: The sinc reader, or None when only blend reads are used.
+        blend_nodes: Signed full-grid stored PSFs [node, y, x] for blend reads, or None.
+        blend_offsets: Source offsets of ``blend_nodes`` [node, 2] in lambda0/D, or
+            None.
+        x_offsets: Lattice x positions of the stored sources, in lambda0/D.
+        y_offsets: Lattice y positions of the stored sources, in lambda0/D.
+        conversion: Factor that turns stored intensity into photon fractions per pixel.
+        pitch_lod: Detector pixel pitch in reference lambda/D per pixel.
+        measure: Measure of the stored samples.
+        grid: Native detector pixel grid.
+        psf_shape: Detector array shape (ny, nx) of one stored PSF.
+        requested: Interpolation mode that was requested, such as ``"sinc"`` or
+            ``"auto"``.
+        fallback_reasons: Bit mask of the reasons that sent the product to the blend
+            route.
+        n_psfs: Number of stored PSFs.
+        product_identity: Manifest digest and plane ID that identify the product.
+        type: Backend type tag; ``"sinc"`` for this backend.
     """
 
     training_nodes: jax.Array | None
@@ -58,7 +80,16 @@ class DeliveryBackend(eqx.Module):
     type: str = eqx.field(static=True, default="sinc")
 
     def __init__(self, delivery, reader, requested, fallback_reasons=0):
-        """Bind one selected native plane and its photon-unit conversion."""
+        """Bind one selected native plane and its photon-unit conversion.
+
+        Args:
+            delivery: Validated delivery whose selected plane is bound.
+            reader: Sinc reader built from the delivery, or None for blend-only reads.
+            requested: Interpolation mode that was requested, such as ``"sinc"``,
+                ``"blend"`` or ``"auto"``.
+            fallback_reasons: Bit mask of the reasons that sent the product to the blend
+                route; 0 when none.
+        """
         self.reader = reader
         self.training_nodes = None
         if reader is not None and reader.grid.stored == "prefiltered_coefficients":
@@ -105,7 +136,15 @@ class DeliveryBackend(eqx.Module):
         return self.grid.center_x * self.pitch_lod * lod
 
     def get_psf_by_offset_idx(self, x_idx, y_idx):
-        """Return a measured training image for performance diagnostics."""
+        """Return a measured training image for performance diagnostics.
+
+        Args:
+            x_idx: Index of the source along the x lattice axis.
+            y_idx: Index of the source along the y lattice axis.
+
+        Returns:
+            The measured training image in photon fractions on the native detector grid.
+        """
         if self.reader is not None:
             index = y_idx * self.x_offsets.size + x_idx
             image = (
@@ -150,7 +189,16 @@ class DeliveryBackend(eqx.Module):
 
     @eqx.filter_jit
     def create_psf_with_info(self, x_lod, y_lod):
-        """Read a fixed product and return photon-unit image and diagnostics."""
+        """Read a fixed product and return photon-unit image and diagnostics.
+
+        Args:
+            x_lod: Source x position in lambda0/D.
+            y_lod: Source y position in lambda0/D.
+
+        Returns:
+            The interpolation read: the photon-unit image with its acceptance, status,
+            error evidence and ledger.
+        """
         dtype = (
             jnp.float64
             if self.reader is not None
@@ -248,7 +296,16 @@ class DeliveryBackend(eqx.Module):
         return converted
 
     def create_psfs_with_info(self, x_lod, y_lod):
-        """Read equal-length coordinate vectors with serial bounded scratch."""
+        """Read equal-length coordinate vectors with serial bounded scratch.
+
+        Args:
+            x_lod: Source x positions in lambda0/D, a vector of length N.
+            y_lod: Source y positions in lambda0/D, a vector of the same length.
+
+        Returns:
+            The interpolation reads of the N sources, stacked on a leading axis of
+            length N.
+        """
         dtype = (
             jnp.float64
             if self.reader is not None
@@ -276,7 +333,15 @@ class DeliveryBackend(eqx.Module):
         return result.intensity
 
     def create_psf(self, x_lod, y_lod):
-        """Return photon fractions, raising eagerly on a refused query."""
+        """Return photon fractions, raising eagerly on a refused query.
+
+        Args:
+            x_lod: Source x position in lambda0/D.
+            y_lod: Source y position in lambda0/D.
+
+        Returns:
+            The PSF image of the source in photon fractions on the native detector grid.
+        """
         return fraction_image(
             self._require(self.create_psf_with_info(x_lod, y_lod)),
             self.grid,
@@ -285,7 +350,16 @@ class DeliveryBackend(eqx.Module):
         )
 
     def create_psfs(self, x_lod, y_lod):
-        """Return photon fractions for a vector of source coordinates."""
+        """Return photon fractions for a vector of source coordinates.
+
+        Args:
+            x_lod: Source x positions in lambda0/D, a vector of length N.
+            y_lod: Source y positions in lambda0/D, a vector of the same length.
+
+        Returns:
+            PSF images in photon fractions on the native detector grid, with a leading
+            source axis of length N.
+        """
         return fraction_image(
             self._require(self.create_psfs_with_info(x_lod, y_lod)),
             self.grid,
@@ -294,9 +368,25 @@ class DeliveryBackend(eqx.Module):
         )
 
     def create_psfs_parallel(self, x_vals, y_vals):
-        """Use the same bounded batch route; parallel tuning is not provided."""
+        """Use the same bounded batch route; parallel tuning is not provided.
+
+        Args:
+            x_vals: Source x positions in lambda0/D, a vector of length N.
+            y_vals: Source y positions in lambda0/D, a vector of the same length.
+
+        Returns:
+            The same images as ``create_psfs``.
+        """
         return self.create_psfs(x_vals, y_vals)
 
     def __call__(self, x, y):
-        """Accept reference-unit quantities at the host compatibility boundary."""
+        """Accept reference-unit quantities at the host compatibility boundary.
+
+        Args:
+            x: Source x position in reference lambda/D; a quantity or a float.
+            y: Source y position in reference lambda/D; a quantity or a float.
+
+        Returns:
+            The PSF image of the source, as returned by ``create_psf``.
+        """
         return self.create_psf(getattr(x, "value", x), getattr(y, "value", y))

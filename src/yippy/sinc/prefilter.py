@@ -23,6 +23,7 @@ Everything here runs eagerly in float64 on the host, once per load.
 """
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -71,6 +72,14 @@ def bump_transform(frequency, taps, beta):
     The compactly supported Kaiser-Bessel function has the closed transform
     taps * sinh(z) / (z * I0(beta)) with z**2 = beta**2 - (pi * taps * f)**2,
     continued as sin(z) / z beyond the main lobe.
+
+    Args:
+        frequency: Frequencies in cycles per node; any shape.
+        taps: Bump taps per axis.
+        beta: Kaiser-Bessel shape parameter, dimensionless.
+
+    Returns:
+        Transform values, same shape as ``frequency``.
     """
     square = beta**2 - (jnp.pi * taps * frequency) ** 2
     root = jnp.sqrt(jnp.abs(square))
@@ -80,7 +89,15 @@ def bump_transform(frequency, taps, beta):
 
 
 def bump_scale(taps, beta):
-    """Mean tap sum of the bump over registrations, so read weights sum to about 1."""
+    """Mean tap sum of the bump over registrations, so read weights sum to about 1.
+
+    Args:
+        taps: Bump taps per axis.
+        beta: Kaiser-Bessel shape parameter, dimensionless.
+
+    Returns:
+        Mean over 64 registrations of the summed bump weights, dimensionless.
+    """
     registration = (8.0 * jnp.arange(64) + 0.5) / 512.0
     offsets = jnp.arange(-taps, taps + 1)
     return float(
@@ -116,12 +133,29 @@ class _Filters:
     """Filters of one axis design, keyed by the stored nodes on each side."""
 
     def __init__(self, taps, beta, scale, band, half_width):
+        """Record the axis design.
+
+        Args:
+            taps: Bump taps per axis.
+            beta: Kaiser-Bessel shape parameter, dimensionless.
+            scale: Mean tap sum of the bump, dimensionless.
+            band: Band edge, in cycles per node.
+            half_width: Half-width of the interior filter, in nodes.
+        """
         self.taps, self.beta, self.scale = taps, beta, scale
         self.band, self.half_width = band, half_width
         self._cache = {}
 
     def get(self, left, right):
-        """Return the filter on offsets -left..right, mirrored where left < right."""
+        """Return the filter on offsets -left..right, mirrored where left < right.
+
+        Args:
+            left: Number of stored nodes on the low side.
+            right: Number of stored nodes on the high side.
+
+        Returns:
+            Filter coefficients for offsets -left..right, length left + right + 1.
+        """
         key = (left, right)
         if key not in self._cache:
             if left < right:
@@ -134,7 +168,16 @@ class _Filters:
         return self._cache[key]
 
     def transfer(self, left, right, frequency):
-        """Transfer function D(f) of one filter, relative to its own node."""
+        """Transfer function D(f) of one filter, relative to its own node.
+
+        Args:
+            left: Number of stored nodes on the low side.
+            right: Number of stored nodes on the high side.
+            frequency: Frequencies in cycles per node, shape (n_f,).
+
+        Returns:
+            Complex transfer function values, shape (n_f,).
+        """
         offsets = jnp.arange(-left, right + 1)
         phase = 2j * jnp.pi * frequency[:, None] * offsets[None, :]
         return jnp.exp(phase) @ self.get(left, right).astype(jnp.complex128)
@@ -174,6 +217,22 @@ class AxisDesign:
     ``sample_gain`` is the worst absolute weight sum that carries a stored-sample
     error into a read. All three are maxima over a finite set of frequencies and
     registrations: estimates of the kernel's worst case, not outward bounds.
+
+    Attributes:
+        taps: Bump taps per axis.
+        filter_half_width: Half-width of the interior filter, in nodes.
+        band: Band edge, in cycles per node.
+        beta: Kaiser-Bessel shape parameter, dimensionless.
+        scale: Mean tap sum of the bump, dimensionless.
+        tone_error: Worst in-band tone error over every covered read,
+            dimensionless.
+        interior_tone_error: Worst in-band tone error over interior reads,
+            dimensionless.
+        sample_gain: Worst absolute weight sum carrying a stored-sample error
+            into a read, dimensionless.
+        direct: Filter matrix applied to the stored samples, shape (size, size).
+        mirrored: Filter matrix applied to the detector-flipped samples, shape
+            (size, size); None without reflection.
     """
 
     taps: int
@@ -297,13 +356,22 @@ def _design_axis(taps, filter_half_width, band, size, reflected, cells):
     )
 
 
-def sampling_ratios(products, spacing):
+def sampling_ratios(products, spacing) -> Iterator[tuple[int, float]]:
     """Yield (axis, ratio) for every declared minimum wavelength of every product.
 
     The ratio is 2 B h with B = (reference / wavelength) * support extent, the
     quantity admission compares against Nyquist and the kernel margin.
     Non-finite and non-positive minima are skipped; admission refuses those
     through its metadata checks.
+
+    Args:
+        products: Delivery products; supply the reference wavelength, the
+            minimum sampling wavelengths (nm) and the support extents.
+        spacing: Source node pitches (x, y), in lambda/D.
+
+    Yields:
+        Tuples of the axis index (0 for x, 1 for y) and the sampling ratio
+        2 B h, dimensionless.
     """
     reference = float(products.frame.reference_wavelength_nm)
     campaign = float(products.campaign_sampling_min_nm)
@@ -327,6 +395,13 @@ def design_band(products, spacing):
     The value is half the largest sampling ratio 2 B h over products and over
     their declared minimum wavelengths, so the filter is designed for the blue
     edge of the band and covers every longer wavelength.
+
+    Args:
+        products: Delivery products, as for ``sampling_ratios``.
+        spacing: Source node pitches (x, y), in lambda/D.
+
+    Returns:
+        Tuple of the band edges (x, y), in cycles per node.
     """
     edges = [0.0, 0.0]
     for axis, ratio in sampling_ratios(products, spacing):
@@ -340,6 +415,13 @@ def served_cells(domain, lattice):
     One extra cell on each side absorbs coordinate rounding. Coverage, not this
     range, decides which reads are served; the range only keeps unreachable
     table ends out of the recorded design figures.
+
+    Args:
+        domain: Permission domain whose bounding box is spanned.
+        lattice: Source pixel grid.
+
+    Returns:
+        Tuple of two (first, last) signed cell index pairs, for x and y.
     """
     origin = origin_xy(lattice).tolist()
     spacing = spacing_xy(lattice).tolist()
@@ -358,7 +440,19 @@ def served_cells(domain, lattice):
 
 
 def design_grid(profile, products, lattice, reflected, domain=None):
-    """Return the (x, y) AxisDesign pair for an admitted lattice and profile."""
+    """Return the (x, y) AxisDesign pair for an admitted lattice and profile.
+
+    Args:
+        profile: Prefiltered kernel profile giving taps and filter half-width.
+        products: Delivery products, as for ``sampling_ratios``.
+        lattice: Source pixel grid.
+        reflected: Whether the stored nodes are one reflected quadrant.
+        domain: Optional permission domain; if given, it narrows the reads
+            the recorded figures cover. None means every covered read.
+
+    Returns:
+        Tuple of the x and y AxisDesign.
+    """
     spacing = spacing_xy(lattice).tolist()
     band = design_band(products, spacing)
     sy, sx = lattice.shape
@@ -377,7 +471,15 @@ def design_grid(profile, products, lattice, reflected, domain=None):
 
 
 def design_record(designs):
-    """Flatten an (x, y) design pair into the (key, value) pairs of a receipt."""
+    """Flatten an (x, y) design pair into the (key, value) pairs of a receipt.
+
+    Args:
+        designs: The (x, y) pair of AxisDesign.
+
+    Returns:
+        Tuple of (key, value) pairs of the design figures, with the two-axis
+        tone error e_x + e_y + e_x * e_y.
+    """
     x, y = designs
     two_axis = x.tone_error + y.tone_error + x.tone_error * y.tone_error
     return (
@@ -399,7 +501,16 @@ def design_record(designs):
 
 
 def build_chunk_rows(nodes, shape_yx):
-    """Detector rows filtered per chunk under the float64 working-memory target."""
+    """Detector rows filtered per chunk under the float64 working-memory target.
+
+    Args:
+        nodes: Number of stored source nodes (rows times columns).
+        shape_yx: Detector shape as (rows, columns), in pixels.
+
+    Returns:
+        Number of detector rows per chunk, at least 1 and at most the detector
+        row count.
+    """
     row_bytes = BUILD_SAMPLE_BYTES * nodes * shape_yx[1]
     return max(1, min(shape_yx[0], BUILD_CHUNK_BYTES // row_bytes))
 
@@ -432,6 +543,14 @@ def build_coefficients(intensity, designs):
     the float64 working set stays near a fixed size. With reflection, samples at
     negative node indices are the detector-flipped stored images, which lets the
     filter run across both mirror axes without an edge.
+
+    Args:
+        intensity: Stored samples, shape (P, sy, sx, py, px): product, source
+            row, source column, detector row, detector column.
+        designs: The (x, y) pair of AxisDesign whose filters are applied.
+
+    Returns:
+        Coefficients with the shape and dtype of ``intensity``.
     """
     _require_precision()
     design_x, design_y = designs

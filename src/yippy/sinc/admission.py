@@ -17,6 +17,23 @@ def offset_evidence(offsets, origin, spacing, indices, original_dtype=None):
     The tolerance is evaluated in the original float32/64 coordinate precision
     and must be strictly below 1e-4 of a pitch. Separate binary64 operations
     define canonical coordinates, without fused multiply-add.
+
+    Args:
+        offsets: Delivered node offsets, shape (n_nodes, 2), in the source
+            coordinate unit.
+        origin: Declared coordinate (x, y) of the first node.
+        spacing: Declared node pitches (x, y).
+        indices: Integer node indices (x, y), shape (n_nodes, 2).
+        original_dtype: Precision the offsets were stored in. If None, the
+            dtype of ``offsets`` is used. Must be float32 or float64.
+
+    Returns:
+        Tuple of the overall validity flag, the per-axis tolerances (tuple of
+        two floats, same unit as offsets) and the per-axis worst residuals
+        between delivered and canonical coordinates (tuple of two floats).
+
+    Raises:
+        TypeError: If the original precision is not float32 or float64.
     """
     offsets = np.asarray(offsets)
     dtype = offsets.dtype if original_dtype is None else np.dtype(original_dtype)
@@ -42,14 +59,35 @@ def offset_evidence(offsets, origin, spacing, indices, original_dtype=None):
 
 
 def sampling_ratio(reference_nm, minimum_nm, support_extent, spacing_lod):
-    """Compute 2 B h with separate binary64 wavelength and bandwidth rounding."""
+    """Compute 2 B h with separate binary64 wavelength and bandwidth rounding.
+
+    Args:
+        reference_nm: Reference wavelength, in nm.
+        minimum_nm: Shortest wavelength in the band, in nm.
+        support_extent: Support width of the product along one axis, in
+            cycles per (lambda/D) at the reference wavelength.
+        spacing_lod: Node pitch along the same axis, in lambda/D.
+
+    Returns:
+        Sampling ratio 2 B h, dimensionless; values below 1 satisfy Nyquist.
+    """
     sigma = float(reference_nm) / float(minimum_nm)
     bandwidth = sigma * float(support_extent)
     return (2.0 * bandwidth) * float(spacing_lod)
 
 
 def sampling_reasons(ratios, profile=None):
-    """Return literal Nyquist and profile-margin failures, without tolerance."""
+    """Return literal Nyquist and profile-margin failures, without tolerance.
+
+    Args:
+        ratios: Sampling ratios (dimensionless), one per axis.
+        profile: Kernel profile supplying the margin limit. If None, the
+            default raw profile is used.
+
+    Returns:
+        Reason flags with the Nyquist and kernel-margin failure bits set where
+        any ratio fails; empty when all pass.
+    """
     profile = KernelProfile() if profile is None else profile
     reasons = Reason(0)
     for ratio in ratios:
@@ -66,6 +104,14 @@ def select_profile(ratios, *, taps=None):
     None uses the default prefilter tap count, falling back to raw for bands
     above the prefilter margin. An explicit 5..10 tap count requests that
     prefiltered profile; admission then reports any margin failure.
+
+    Args:
+        ratios: Sampling ratios (dimensionless), one per axis.
+        taps: Prefilter tap count, 5 to 10, or None for the default behavior
+            described above.
+
+    Returns:
+        The kernel profile to use, prefiltered or raw.
     """
     candidate = (
         PrefilteredKernelProfile()
@@ -80,7 +126,25 @@ def select_profile(ratios, *, taps=None):
 
 
 def plan_spacing(reference_nm, minimum_nm, support_extent, decimals=6, *, profile=None):
-    """Largest decimal-rounded isotropic spacing allowed by the profile margin."""
+    """Largest decimal-rounded isotropic spacing allowed by the profile margin.
+
+    Args:
+        reference_nm: Reference wavelength, in nm.
+        minimum_nm: Shortest wavelength in the band, in nm; must satisfy
+            0 < minimum_nm <= reference_nm.
+        support_extent: Support widths along the two axes; all must be
+            positive and finite. The longest one sets the spacing.
+        decimals: Number of decimal places the spacing is rounded down to.
+        profile: Kernel profile supplying the margin limit. If None, the
+            default raw profile is used.
+
+    Returns:
+        Node pitch in lambda/D.
+
+    Raises:
+        ValueError: If the wavelengths or support widths are invalid, or the
+            spacing rounds to zero.
+    """
     profile = KernelProfile() if profile is None else profile
     if not (
         math.isfinite(reference_nm)
@@ -116,7 +180,22 @@ def judge_checks(
     acceptance_level,
     mirror_tolerance=MIRROR_TOLERANCE,
 ):
-    """Return empirical-check failures; these residuals are not image bounds."""
+    """Return empirical-check failures; these residuals are not image bounds.
+
+    Args:
+        interior: Worst relative interior residual per check.
+        mirror: Worst relative mirror residual per check.
+        axis: Worst relative axis residual per axis.
+        exact: Flags, one per axis, marking axes whose residual is exactly
+            satisfied by construction and so is not tested.
+        reflected: Whether the product is a reflected quadrant, which enables
+            the mirror and axis tests.
+        acceptance_level: Largest allowed interior residual.
+        mirror_tolerance: Largest allowed mirror and axis residual.
+
+    Returns:
+        Tuple of failure messages; empty when every check passes.
+    """
     failures = []
     if not interior:
         failures.append("no interior checks were compared")
@@ -147,7 +226,17 @@ def judge_checks(
 
 
 def lattice_reasons(origin, spacing, basis=None):
-    """Check canonical source geometry and the kernel's supported numeric range."""
+    """Check canonical source geometry and the kernel's supported numeric range.
+
+    Args:
+        origin: Coordinate (x, y) of the first node, in lambda/D.
+        spacing: Node pitches (x, y), in lambda/D.
+        basis: Optional 2 x 2 grid basis; off-diagonal terms mark a rotated or
+            sheared grid. If None, no basis check is made.
+
+    Returns:
+        Reason flags for nonuniform or unsupported layout; empty when valid.
+    """
     from yippy.sinc.domain import normal_or_zero
 
     reasons = Reason(0)
@@ -174,7 +263,23 @@ def validate_declarations(
     reflection_kind,
     reflected,
 ):
-    """Reject malformed physical declarations before optional admission gates."""
+    """Reject malformed physical declarations before optional admission gates.
+
+    Args:
+        normalization: Mapping whose ``kind`` is ``incident_photon`` or
+            ``unocculted_peak``.
+        reference_nm: Reference wavelength, in nm; must be positive and finite.
+        diameter_m: Telescope aperture diameter, in m; must be positive and
+            finite.
+        support: Optional support extents (two finite positive values).
+        premises: Optional mapping of keyed evidence records for physical
+            premises.
+        reflection_kind: Declared quadrant reflection kind, or None.
+        reflected: Whether the product is stored as a reflected quadrant.
+
+    Raises:
+        ValueError: If any declaration is malformed, conflicting or unverified.
+    """
     norm = normalization
     if not isinstance(norm, dict) or norm.get("kind") not in (
         "incident_photon",
@@ -203,7 +308,19 @@ def validate_declarations(
 
 
 def spectral_reasons(kind, wavelength_nm, limits_nm, minimum_nm, campaign_nm=math.nan):
-    """Validate one product's spectral support and sampling declarations."""
+    """Validate one product's spectral support and sampling declarations.
+
+    Args:
+        kind: Spectral kind, ``monochromatic`` or ``band_mean``.
+        wavelength_nm: Central wavelength, in nm.
+        limits_nm: Lower and upper wavelength limits of the product, in nm.
+        minimum_nm: Shortest wavelength used for sampling checks, in nm.
+        campaign_nm: Campaign minimum wavelength, in nm; NaN means none was
+            declared.
+
+    Returns:
+        Reason flags for missing or conflicting metadata; empty when valid.
+    """
     reasons = Reason(0)
     if not math.isfinite(minimum_nm) or minimum_nm <= 0:
         reasons |= Reason.METADATA_MISSING
@@ -228,7 +345,14 @@ def spectral_reasons(kind, wavelength_nm, limits_nm, minimum_nm, campaign_nm=mat
 
 
 def valid_intensity(array):
-    """Check finite nonnegative native samples, including subnormal sign bits."""
+    """Check finite nonnegative native samples, including subnormal sign bits.
+
+    Args:
+        array: Intensity samples in their native float32 or float64 dtype.
+
+    Returns:
+        True if every sample is finite and not negative.
+    """
     array = np.asarray(array)
     integer = np.int32 if array.dtype.itemsize == 4 else np.int64
     bits = array.view(integer)
@@ -237,7 +361,16 @@ def valid_intensity(array):
 
 
 def index_reasons(indices_xy, shape_yx):
-    """Check a complete rectangle without allocating its declared occupancy grid."""
+    """Check a complete rectangle without allocating its declared occupancy grid.
+
+    Args:
+        indices_xy: Integer node indices (x, y), shape (n_nodes, 2).
+        shape_yx: Declared grid shape as (rows, columns).
+
+    Returns:
+        Reason flags for duplicate or incomplete indices; empty when the
+        indices fill the rectangle exactly once.
+    """
     indices = np.asarray(indices_xy)
     shape_xy = np.asarray(shape_yx[::-1])
     reasons = Reason(0)

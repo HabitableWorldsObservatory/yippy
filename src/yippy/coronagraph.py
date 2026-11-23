@@ -65,6 +65,16 @@ class Coronagraph(AbstractTableCoronagraph):
     characterization record for each aperture rule is prepared at construction,
     before JIT queries.
     The default photometric rule is a circle of radius 0.7 lambda/D.
+
+    Attributes:
+        grid: Native pixel grid of the off-axis PSFs, in lambda/D.
+        stellar_grid: Native pixel grid of the stellar intensity maps, in lambda/D.
+        sky_trans: Sky transmission image on its native grid.
+        header: Parsed YIP header metadata.
+        interpolation_info: Routing and provenance of the off-axis interpolation.
+        bandpass: Spectral band recorded by the YIP in nm, or None when it holds a
+            single wavelength.
+        uniform_sky_profile: Radial profile of the uniform-sky response.
     """
 
     grid: PixelGrid
@@ -102,7 +112,24 @@ class Coronagraph(AbstractTableCoronagraph):
         interpolation="blend",
         sinc_options: SincOptions | None = None,
     ):
-        """Load host products and freeze their tables and prepared aperture rules."""
+        """Load host products and freeze their tables and prepared aperture rules.
+
+        Args:
+            package: Open YIP package supplying the native products.
+            x_symmetric: Whether the response is mirror symmetric about the x axis.
+            y_symmetric: Whether the response is mirror symmetric about the y axis.
+            use_quarter_psf_datacube: Whether a generated PSF datacube stores only the
+                positive quarter of source offsets.
+            downsample_shape: Optional (ny, nx) target shape for the stored PSFs; None
+                keeps the native shape.
+            rules: Aperture rules to prepare a record for; the first is the
+                coronagraph's own rule. Duplicates are dropped and at least one is
+                required.
+            leakage_rule: Name of the leakage rule, or None for the product default.
+            interpolation: Interpolation mode requested for off-axis reads, for example
+                ``"blend"`` or ``"auto"``.
+            sinc_options: Optional sinc construction controls; None uses defaults.
+        """
         rules = tuple(dict.fromkeys(rules))
         if not rules:
             raise ValueError("rules must contain at least one aperture rule")
@@ -170,6 +197,14 @@ class Coronagraph(AbstractTableCoronagraph):
         ``aperture_mean`` for a 1D product (the aperture at +x, equal to every
         angle there). The leakage at a planet's own angle is the image or
         aperture-record route of ``coronagraphoto``.
+
+        Args:
+            rule: Aperture rule of the record to select; it must have been prepared.
+            leakage_rule: Leakage rule of the record; None uses the coronagraph's own.
+
+        Returns:
+            The prepared performance record for the rule and leakage rule, with every
+            field a function of separation.
         """
         leakage_rule = self.leakage_rule if leakage_rule is None else leakage_rule
         record = self._find_record(rule, leakage_rule)
@@ -198,7 +233,16 @@ class Coronagraph(AbstractTableCoronagraph):
         )
 
     def uniform_sky_response(self, separation_lod):
-        """Annular mean of the uniform-sky map at separations in lambda/D."""
+        """Annular mean of the uniform-sky map at separations in lambda/D.
+
+        Args:
+            separation_lod: Separations in lambda/D of this coronagraph's frame; any
+                array shape.
+
+        Returns:
+            Annular mean of the uniform-sky map at each separation, with the shape of
+            ``separation_lod``.
+        """
         profile = self.uniform_sky_profile
         frame = self.frame
         if frame != profile.frame:
@@ -220,7 +264,15 @@ class Coronagraph(AbstractTableCoronagraph):
         )
 
     def at_wavelength(self, wavelength_nm) -> ProductGrids:
-        """Return the three recorded native grids for this fixed YIP product."""
+        """Return the three recorded native grids for this fixed YIP product.
+
+        Args:
+            wavelength_nm: Wavelength in nm. It is not used: the product is fixed and
+                its grids do not depend on wavelength.
+
+        Returns:
+            The native image, stellar and sky-transmission grids of the product.
+        """
         return ProductGrids(self.grid, self.stellar_grid, self.sky_trans.grid)
 
     def _native_stellar_map(self, stellar_diameter_lod):
@@ -268,6 +320,14 @@ class Coronagraph(AbstractTableCoronagraph):
         Every table and field except the prepared records is kept, so a
         modified module keeps its modifications. Preparation runs on the host,
         outside JAX transformations. ``leakage_rule`` defaults to the current one.
+
+        Args:
+            rules: Aperture rules to prepare; the first is the coronagraph's own rule.
+                Duplicates are dropped and at least one is required.
+            leakage_rule: Leakage rule name; None keeps the current one.
+
+        Returns:
+            A copy of this coronagraph whose prepared records are those of ``rules``.
         """
         rules = tuple(dict.fromkeys(rules))
         if not rules:
@@ -346,6 +406,13 @@ class Coronagraph(AbstractTableCoronagraph):
         estimate comes from shapes and node offsets only. A prefiltered
         delivery reports the upper bound of its coefficient table; its own
         memory budget governs the build.
+
+        Args:
+            mask: Optional boolean mask on ``scene_grid`` restricting the sources read,
+                as for ``with_scene_operator``.
+
+        Returns:
+            Dict with the bytes ``resident``, ``scratch`` and ``total``.
         """
         backend = self._offaxis_backend
         itemsize = jnp.dtype(float_dtype()).itemsize
@@ -398,6 +465,9 @@ class Coronagraph(AbstractTableCoronagraph):
                 only the sources inside it and reports the rest uncovered.
                 Combine masked operators with ``SceneCoronagraph.with_operators``.
 
+        Returns:
+            A ``SceneCoronagraph`` holding the prepared scene operator.
+
         Raises:
             hwoutils.memory.MemoryLimit: The estimate exceeds ``max_bytes``.
         """
@@ -430,7 +500,12 @@ class Coronagraph(AbstractTableCoronagraph):
         return SceneCoronagraph(self, (operator,))
 
     def __repr__(self):
-        """Summarize the native grid and prepared rules."""
+        """Summarize the native grid and prepared rules.
+
+        Returns:
+            Text naming the YIP folder, the native grid shape and the number of prepared
+            rules.
+        """
         return (
             f"Coronagraph({self.package.source.path.name!r}, grid={self.grid.shape}, "
             f"rules={len(self._records)})"
@@ -443,6 +518,9 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
     The rendered image is the sum of the operators' images, so operators should
     cover disjoint sources. It is valid when every lit source cell is covered by
     some operator; a lit cell no operator covers contributes zero.
+
+    Attributes:
+        operators: Scene operators whose images are summed.
     """
 
     operators: tuple[AbstractSceneOperator, ...]
@@ -469,7 +547,14 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         return self._source_grid
 
     def with_operators(self, *operators):
-        """Return this model with more scene operators added to the sum."""
+        """Return this model with more scene operators added to the sum.
+
+        Args:
+            *operators: Scene operators to add to the sum.
+
+        Returns:
+            A new ``SceneCoronagraph`` with the added operators.
+        """
         return SceneCoronagraph(self, (*self.operators, *operators))
 
     def render_scene(self, scene, wavelength_nm, *, grid):
@@ -478,6 +563,16 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         ``scene`` is a cell-integral image, on ``scene_grid`` or resampled onto
         it. The result is finite; its ``valid`` is False when a lit cell is
         nonfinite or covered by no operator.
+
+        Args:
+            scene: Cell-integral two-dimensional image of the source flux, on
+                ``scene_grid`` or resampled onto it.
+            wavelength_nm: Wavelength in nm. It is not used by this fixed product.
+            grid: Detector grid onto which the summed image is sampled.
+
+        Returns:
+            The finite image on ``grid`` and a validity flag that is False when a lit
+            cell is nonfinite or covered by no operator.
         """
         if scene.measure != Measure.integral() or scene.data.ndim != 2:
             raise ValueError("scene must be a two-dimensional cell-integral Image")

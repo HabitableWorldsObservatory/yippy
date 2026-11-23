@@ -21,13 +21,24 @@ class _DenseSceneOperator(AbstractSceneOperator):
     One PSF per source position: the route for a sinc delivery that falls back to
     blend per source, and the reference the blend operator is tested against.
     A source the delivery refused is not covered and renders nothing.
+
+    Attributes:
+        psfs: Native PSF of each source position [sy, sx, y, x]; zero where the source
+            is not valid.
+        valid: Boolean [sy, sx] mask of the source positions that hold a finite PSF.
     """
 
     psfs: jax.Array
     valid: jax.Array
 
     def __init__(self, psfs, valid):
-        """Drop refused and nonfinite planes before any flux contraction."""
+        """Drop refused and nonfinite planes before any flux contraction.
+
+        Args:
+            psfs: PSFs [sy, sx, y, x], one per source position (full grid or positive
+                quadrant).
+            valid: Boolean [sy, sx] admission mask of the source positions.
+        """
         psfs, valid = jnp.asarray(psfs), jnp.asarray(valid)
         if psfs.ndim != 4 or valid.shape != psfs.shape[:2] or valid.dtype != bool:
             raise ValueError("expected PSFs [sy,sx,y,x] and boolean validity [sy,sx]")
@@ -35,7 +46,16 @@ class _DenseSceneOperator(AbstractSceneOperator):
         self.psfs = jnp.where(self.valid[..., None, None], psfs, 0.0)
 
     def render(self, flux, grid):
-        """Return the finite native detector array and the covered source cells."""
+        """Return the finite native detector array and the covered source cells.
+
+        Args:
+            flux: Source flux [sy, sx] on ``grid``; a nonfinite value counts as zero.
+            grid: The source grid of ``flux``.
+
+        Returns:
+            ``(image, covered)``: the finite native detector array and the boolean [sy,
+            sx] mask of the source cells covered.
+        """
         if flux.shape != grid.shape:
             raise ValueError("source flux must match the native grid")
         flux = jnp.where(jnp.isfinite(flux), flux, 0.0)
@@ -73,20 +93,38 @@ class MaskedSceneOperator(AbstractSceneOperator):
     Prefer a native ``mask`` where an operator has one (``BlendSceneOperator``
     drops the unread sources from its table); this wrapper restricts an operator
     that has none and holds the same arrays as the operator it wraps.
+
+    Attributes:
+        operator: The wrapped scene operator.
+        mask: Boolean [sy, sx] mask of the source cells that are rendered.
     """
 
     operator: AbstractSceneOperator
     mask: jax.Array
 
     def __init__(self, operator, mask):
-        """Wrap ``operator``; ``mask`` is a boolean [sy, sx] on its source grid."""
+        """Wrap ``operator``; ``mask`` is a boolean [sy, sx] on its source grid.
+
+        Args:
+            operator: Scene operator to restrict.
+            mask: Boolean [sy, sx] mask on the source grid of ``operator``.
+        """
         mask = jnp.asarray(mask)
         if mask.ndim != 2 or mask.dtype != bool:
             raise ValueError("mask must be a boolean [sy, sx] array")
         self.operator, self.mask = operator, mask
 
     def render(self, flux, grid):
-        """Return the image of the masked sources and the covered cells."""
+        """Return the image of the masked sources and the covered cells.
+
+        Args:
+            flux: Source flux [sy, sx], matching the shape of the mask.
+            grid: The source grid of ``flux``, passed to the wrapped operator.
+
+        Returns:
+            ``(image, covered)``: the image of the masked sources and the boolean [sy,
+            sx] mask of the covered cells, which lie inside the mask.
+        """
         if flux.shape != self.mask.shape:
             raise ValueError("source flux must match the mask")
         image, covered = self.operator.render(jnp.where(self.mask, flux, 0.0), grid)
@@ -105,7 +143,24 @@ DENSE_BATCH = 128
 
 @dataclass(frozen=True)
 class _BlendPlan:
-    """Host-side regrouping of every source read by stored PSF node."""
+    """Host-side regrouping of every source read by stored PSF node.
+
+    Attributes:
+        node: Stored PSF index of each term [term].
+        frac_yx: Sub-pixel (y, x) shift of the stored PSF of each term, in pixels [term,
+            2].
+        source: Flat source index of each read [term, S]; 0 on padding.
+        weight: Blend weight of each read [term, S]; 0 on padding.
+        reflection: Reflection class of the source of each read [term, S].
+        shift_yx: Integer (y, x) displacement of each read modulo ``n_fft``, in pixels
+            [term, S, 2].
+        flips: Tuple of (flip_x, flip_y) pairs, one per reflection class.
+        n_fft: Side of the square FFT plane, in pixels.
+        shape: Source raster shape (ny, nx).
+        out_shape: Detector array shape (y, x) of one stored PSF.
+        admitted: Boolean [ny, nx] mask of the sources the operator reads.
+        itemsize: Bytes per element of the table dtype.
+    """
 
     node: np.ndarray  # [term] stored PSF index
     frac_yx: np.ndarray  # [term, 2] sub-pixel shift of the stored PSF
@@ -121,7 +176,11 @@ class _BlendPlan:
     itemsize: int
 
     def resident(self):
-        """Bytes of every array the operator holds."""
+        """Bytes of every array the operator holds.
+
+        Returns:
+            Bytes of every array the operator holds.
+        """
         terms, per_term = self.source.shape
         half = self.n_fft // 2 + 1
         table = terms * self.n_fft * half * 2 * self.itemsize
@@ -129,7 +188,14 @@ class _BlendPlan:
         return table + entries + self.shape[0] * self.shape[1]
 
     def scratch(self, npix):
-        """Peak transient bytes of a build or a render, whichever is larger."""
+        """Peak transient bytes of a build or a render, whichever is larger.
+
+        Args:
+            npix: Side of a stored PSF, in pixels.
+
+        Returns:
+            Peak transient bytes of a build or a render, whichever is larger.
+        """
         padded = npix + 2 * blend_pad(npix)
         build = _PRESHIFT_CHUNK * padded * padded * self.itemsize * 4
         planes = len(self.flips) * self.n_fft * self.n_fft * self.itemsize
@@ -278,6 +344,19 @@ class BlendSceneOperator(AbstractSceneOperator):
     its remainder, times the map of source flux weighted at each whole-pixel
     displacement. The table holds one spectrum per stored PSF (not one PSF per
     source), and the render is exactly linear in the source flux.
+
+    Attributes:
+        table: Complex rfft2 of each shifted stored PSF [term, n_fft, n_fft // 2 + 1].
+        source: Flat index into the source raster of each read [term, S], int32.
+        weight: Blend weight of each read [term, S]; zero on padding.
+        reflection: Reflection class of the source of each read [term, S], int32.
+        shift_yx: Whole-pixel (y, x) displacement of each read modulo ``n_fft`` [term,
+            S, 2], int32.
+        covered: Boolean [sy, sx] mask of the sources the operator reads.
+        n_fft: Side of the square FFT plane, in pixels.
+        flips: Tuple of (flip_x, flip_y) pairs, one per reflection class.
+        shape: Source raster shape (sy, sx).
+        out_shape: Detector array shape (ny, nx).
     """
 
     table: jax.Array  # [term, n_fft, n_fft // 2 + 1] complex rfft2 of shifted PSFs
@@ -307,6 +386,10 @@ class BlendSceneOperator(AbstractSceneOperator):
                 always the stored PSF grid.
             mask: Optional boolean [sy, sx] mask of the sources to read; the
                 default reads every source of the grid.
+
+        Returns:
+            The operator holding one spectrum per stored PSF and the regrouped reads of
+            the covered sources.
         """
         dtype = float_dtype()
         valid = np.ones(grid.shape, bool) if mask is None else np.asarray(mask, bool)
@@ -350,7 +433,18 @@ class BlendSceneOperator(AbstractSceneOperator):
 
     @staticmethod
     def size_bytes(backend, grid, mask=None):
-        """Resident, scratch and total bytes of the operator, from shapes alone."""
+        """Resident, scratch and total bytes of the operator, from shapes alone.
+
+        Args:
+            backend: The blend backend holding the stored PSFs and offsets.
+            grid: Source grid, as for ``from_backend``.
+            mask: Optional boolean [sy, sx] mask of the sources to read; the default
+                reads every source.
+
+        Returns:
+            Dict with the bytes ``resident`` in the operator, the ``scratch`` needed to
+            build or render, and their ``total``.
+        """
         itemsize = jnp.dtype(float_dtype()).itemsize
         valid = np.ones(grid.shape, bool) if mask is None else mask
         plan = _blend_plan(backend, grid, valid, itemsize)
@@ -364,7 +458,17 @@ class BlendSceneOperator(AbstractSceneOperator):
         return sum(leaf.nbytes for leaf in jax.tree.leaves(self))
 
     def render(self, flux, grid):
-        """Return the finite native detector array and the covered source cells."""
+        """Return the finite native detector array and the covered source cells.
+
+        Args:
+            flux: Source flux [sy, sx] on ``grid``; a nonfinite value counts as zero.
+            grid: The source grid of ``flux``; its shape must equal the operator's
+                source raster.
+
+        Returns:
+            ``(image, covered)``: the finite native detector array and the boolean [sy,
+            sx] mask of the source cells covered.
+        """
         if flux.shape != grid.shape or tuple(grid.shape) != self.shape:
             raise ValueError("source flux must match the source grid")
         ny, nx = self.out_shape

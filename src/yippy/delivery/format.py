@@ -62,7 +62,14 @@ _PREMISES = (
 
 
 def file_sha256(path):
-    """Hash a file in bounded blocks without retaining a second cube."""
+    """Hash a file in bounded blocks without retaining a second cube.
+
+    Args:
+        path: File to hash.
+
+    Returns:
+        Hex SHA-256 digest of the file.
+    """
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -72,7 +79,32 @@ def file_sha256(path):
 
 @dataclass(frozen=True)
 class Delivery:
-    """Validated host input, including original metadata and native arrays."""
+    """Validated host input, including original metadata and native arrays.
+
+    Attributes:
+        root: Delivery directory.
+        manifest: Parsed versioned manifest.
+        manifest_sha256: SHA-256 hex digest of the manifest file.
+        plane: Manifest entry of the selected monochromatic plane.
+        header: Header metadata of the selected PSF cube, with the manifest geometry
+            applied.
+        grid: Native detector pixel grid.
+        nodes: Stored PSF cube [source, y, x], scaled to the sample convention of the
+            grid.
+        offsets: Source offsets of the stored PSFs [source, 2] as (x, y), in lambda0/D.
+        indices: Integer lattice indices (ix, iy) of each stored PSF [source, 2],
+            relative to the lower corner.
+        origin_lod: Canonical lattice origin (x, y) in lambda0/D.
+        shape_yx: Lattice shape (ny, nx) in nodes.
+        tolerance_lod: Four-ULP offset tolerance per axis (x, y), in lambda0/D.
+        coordinate_residual_lod: Worst residual between delivered and canonical
+            coordinates per axis (x, y), in lambda0/D.
+        measure: Measure of the stored samples.
+        conversion: Factor that turns stored intensity into photon fractions per pixel.
+        independent_images: Validated independent check images keyed by (PSF path, PSF
+            digest, image index).
+        missing_metadata: Names of the optional declarations the manifest lacks.
+    """
 
     root: Path
     manifest: dict
@@ -93,7 +125,15 @@ class Delivery:
     missing_metadata: tuple[str, ...]
 
     def read_images(self, records):
-        """Read independent images from exact file/index pairs in record order."""
+        """Read independent images from exact file/index pairs in record order.
+
+        Args:
+            records: Manifest check records, each naming ``psf_path``, ``psf_sha256``
+                and ``image_index``.
+
+        Returns:
+            The independent images stacked in record order, shape [record, y, x].
+        """
         images = []
         for record in records:
             key = (record["psf_path"], record["psf_sha256"], record["image_index"])
@@ -106,7 +146,14 @@ class Delivery:
 
 
 def detect_delivery(path):
-    """Recognize a manifest before invoking any legacy layout inference."""
+    """Recognize a manifest before invoking any legacy layout inference.
+
+    Args:
+        path: Package directory to inspect.
+
+    Returns:
+        The parsed manifest, or None when the directory holds no ``sinc-delivery.json``.
+    """
     manifest_path = Path(path) / "sinc-delivery.json"
     if not manifest_path.exists():
         return None
@@ -193,7 +240,15 @@ def _header_checks(header, manifest, plane, tolerance_lod):
 
 
 def select_plane(manifest, selected):
-    """Resolve exactly one named monochromatic plane in a versioned delivery."""
+    """Resolve exactly one named monochromatic plane in a versioned delivery.
+
+    Args:
+        manifest: Recognized versioned manifest.
+        selected: Plane ID to select; None selects the only plane.
+
+    Returns:
+        The manifest entry of the selected plane.
+    """
     planes = manifest["planes"]
     ids = [p["id"] for p in planes]
     if (
@@ -212,7 +267,17 @@ def select_plane(manifest, selected):
 
 
 def delivery_header(header, manifest, plane):
-    """Resolve the selected plane's geometry in the manifest reference frame."""
+    """Resolve the selected plane's geometry in the manifest reference frame.
+
+    Args:
+        header: FITS header of the PSF cube.
+        manifest: Recognized versioned manifest supplying the reference geometry.
+        plane: Manifest entry of the selected plane, supplying the wavelength.
+
+    Returns:
+        Header metadata whose pixel scale, wavelengths, diameter and sample kind come
+        from the manifest.
+    """
     return replace(
         HeaderData.from_fits_header(header),
         sample_kind=manifest["sample_kind"],
@@ -484,7 +549,16 @@ def load_delivery(root, manifest, options, *, package=None):
 
 
 def admit_delivery(delivery, options):
-    """Map validated delivery declarations to the installed yippy.sinc API."""
+    """Map validated delivery declarations to the installed yippy.sinc API.
+
+    Args:
+        delivery: Validated delivery.
+        options: SincOptions of the request, supplying the domain restriction and the
+            tap count.
+
+    Returns:
+        The admission result, the served domain and the memory budget, as a tuple.
+    """
     d, p = delivery.manifest, delivery.plane
     f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
     premises = [d.get("premises", {}).get(key, {}) for key in _PREMISES]
@@ -793,7 +867,17 @@ def _validate_check_positions(manifest, origin, spacing, size):
 
 
 def delivery_ratios(delivery, *, campaign_only=False):
-    """Translate manifest units for the engine's sampling-ratio calculation."""
+    """Translate manifest units for the engine's sampling-ratio calculation.
+
+    Args:
+        delivery: Validated delivery.
+        campaign_only: Whether to use only the campaign sampling minimum and not the
+            plane minimum.
+
+    Returns:
+        Tuple of sampling ratios per wavelength minimum and axis, empty when the
+        manifest declares no support extent.
+    """
     d, p = delivery.manifest, delivery.plane
     minima = [d["spectral_sampling"].get("campaign_sampling_min_m")]
     if not campaign_only:
@@ -810,17 +894,41 @@ def delivery_ratios(delivery, *, campaign_only=False):
 
 
 def campaign_sampling_failed(delivery):
-    """Ask the engine whether the explicit campaign claim meets admission."""
+    """Ask the engine whether the explicit campaign claim meets admission.
+
+    Args:
+        delivery: Validated delivery.
+
+    Returns:
+        True when the explicit campaign sampling claim fails admission.
+    """
     return bool(sampling_reasons(delivery_ratios(delivery, campaign_only=True)))
 
 
 def delivery_profile(delivery, options):
-    """Pass the declared band and requested tap count to engine selection."""
+    """Pass the declared band and requested tap count to engine selection.
+
+    Args:
+        delivery: Validated delivery.
+        options: SincOptions supplying the requested tap count.
+
+    Returns:
+        The kernel profile selected for the declared band and tap count.
+    """
     return select_profile(delivery_ratios(delivery), taps=options.taps)
 
 
 def delivery_memory(delivery, supplied=None, *, profile=None):
-    """Pass table sizes and yippy's output tag allocation to the engine."""
+    """Pass table sizes and yippy's output tag allocation to the engine.
+
+    Args:
+        delivery: Validated delivery whose table sizes are budgeted.
+        supplied: Explicit memory budget; None uses the engine estimate.
+        profile: Kernel profile that sets the resident table size.
+
+    Returns:
+        The memory budget for the table of the delivery.
+    """
     return MemoryBudget.for_table(
         delivery.nodes.nbytes,
         delivery.nodes.shape[1:],

@@ -51,15 +51,14 @@ class OffJAX(OffAx):
     This class inherits from OffAx and uses JAX for optimized computation.
     Memory-efficient: stores PSFs in flat array with index mapping.
 
-    Attributes:
-        pixel_scale_arcsec (Quantity):
-            Pixel scale of the PSF data in lambda/D.
-        grid (PixelGrid):
-            Pixel-center geometry in the package reference frame.
-        flat_psfs (jnp.ndarray):
-            Flat array of PSF data with shape (N_psfs, H, W), cast as JAX array.
-        offset_to_flat_idx (jnp.ndarray):
-            2D index mapping from (x_idx, y_idx) -> flat_psfs index.
+    Instance data (set in ``__init__``, so not class attributes):
+
+    - ``pixel_scale_arcsec``: pixel scale of the PSF data in lambda/D.
+    - ``grid``: pixel-center geometry in the package reference frame.
+    - ``flat_psfs``: flat array of PSF data with shape (N_psfs, H, W), cast as
+      a JAX array.
+    - ``offset_to_flat_idx``: 2D index mapping from (x_idx, y_idx) to the
+      ``flat_psfs`` index.
     """
 
     def __init__(
@@ -73,7 +72,20 @@ class OffJAX(OffAx):
         *,
         sample_kind="point",
     ) -> None:
-        """Prepare JAX interpolation arrays from the native samples."""
+        """Prepare JAX interpolation arrays from the native samples.
+
+        Args:
+            psfs: Shipped off-axis PSF samples, one native image per source
+                offset.
+            offsets: Source offsets (x, y) in lambda/D, one row per PSF.
+            grid: Pixel-center geometry of the native images in the package
+                reference frame.
+            x_symmetric: Whether the response is mirror symmetric about the x axis.
+            y_symmetric: Whether the response is mirror symmetric about the y axis.
+            downsample_shape: Optional (ny, nx) target shape for the stored PSFs.
+            sample_kind: How stored pixel values sample the image: ``"point"``,
+                ``"integral"`` or ``"mean"``.
+        """
         super().__init__(
             psfs,
             offsets,
@@ -228,6 +240,14 @@ class OffJAX(OffAx):
         for a two-dimensional table and the disk of the outermost node for a
         radially symmetric one. A position within a rounding tolerance of the
         edge is inside.
+
+        Args:
+            x: x positions in lambda/D; any array shape.
+            y: y positions in lambda/D, broadcastable with ``x``.
+
+        Returns:
+            Boolean array with the broadcast shape of ``x`` and ``y``; True
+            where the position is inside the hull.
         """
         x, y = jnp.asarray(x), jnp.asarray(y)
         radius = self.source_radius_lod
@@ -241,7 +261,15 @@ class OffJAX(OffAx):
         )
 
     def create_psf(self, x, y) -> Image:
-        """Return one native source flux fraction image."""
+        """Return one native source flux fraction image.
+
+        Args:
+            x: Source x position in lambda/D.
+            y: Source y position in lambda/D.
+
+        Returns:
+            Native unocculted source flux fraction image at the position.
+        """
         return fraction_image(
             self._create_psf(x, y),
             self.grid,
@@ -250,7 +278,16 @@ class OffJAX(OffAx):
         )
 
     def create_psfs(self, x, y) -> Image:
-        """Return native source flux fractions with leading axis source."""
+        """Return native source flux fractions with leading axis source.
+
+        Args:
+            x: Source x positions in lambda/D, shape (N,).
+            y: Source y positions in lambda/D, shape (N,).
+
+        Returns:
+            Native source flux fraction images with leading axis ``source``
+            of length N.
+        """
         return fraction_image(
             self._create_psfs(x, y),
             self.grid,
@@ -263,6 +300,14 @@ class OffJAX(OffAx):
 
         Requires that ``hwoutils.set_host_device_count(N)`` was called at
         program startup to expose *N* CPU devices to JAX.
+
+        Args:
+            x_vals: Source x positions in lambda/D, shape (N,).
+            y_vals: Source y positions in lambda/D, shape (N,).
+
+        Returns:
+            Native source flux fraction images with leading axis ``source``
+            of length N, computed across the available devices.
         """
         n_devices = jax.device_count()
         D = n_devices

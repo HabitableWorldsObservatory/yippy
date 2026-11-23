@@ -100,7 +100,13 @@ def plot_stencil_2d(
     count = at(state["query"])[0].shape[1] ** 2
 
     def tap_table():
-        """Return positions, weights, validity and count rank of every tap."""
+        """Return positions, weights, validity and count rank of every tap.
+
+        Returns:
+            A tuple ``(xy, weights, valid, rank)``: tap positions, shape
+            (taps squared, 2); product weights; validity flags; and the
+            display rank of each tap.
+        """
         nodes, weight, ok = at(state["query"])
         tx, ty = np.meshgrid(nodes[0], nodes[1])
         weights = (weight[1][:, None] * weight[0][None, :]).ravel()

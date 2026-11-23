@@ -18,6 +18,11 @@ class AbstractKernelProfile(eqx.Module):
     A read at query phase t = (q - origin) / spacing uses the ``taps`` consecutive
     nodes that start at ``stencil_start``. Coverage additionally requires ``halo``
     stored nodes beyond the first and the last tap.
+
+    Attributes:
+        name: Profile name, part of the arithmetic identity.
+        floor_rule: Name of the floor rule used to select the first tap.
+        taps: Taps per source axis in one read.
     """
 
     name: eqx.AbstractVar[str]
@@ -42,11 +47,28 @@ class AbstractKernelProfile(eqx.Module):
 
     @abstractmethod
     def stencil_start(self, query, origin, spacing):
-        """Return the float first tap index of a prevalidated query, per axis."""
+        """Return the float first tap index of a prevalidated query, per axis.
+
+        Args:
+            query: Query coordinates, one per axis, in the unit of ``origin``.
+            origin: Coordinate of node zero, per axis.
+            spacing: Node spacing, per axis, in the unit of ``origin``.
+
+        Returns:
+            Float index of the first tap, per axis.
+        """
 
     @abstractmethod
     def minimum_size(self, reflected: bool) -> int:
-        """Smallest stored node count per axis that can serve any read."""
+        """Smallest stored node count per axis that can serve any read.
+
+        Args:
+            reflected: Whether the table is stored for non-negative positions
+                only and read by reflection.
+
+        Returns:
+            The smallest stored node count per axis.
+        """
 
     @property
     def coverage_margins(self):
@@ -71,6 +93,11 @@ class KernelProfile(AbstractKernelProfile):
     Squared radius limits and boundary-scale coordinates neither underflow nor
     overflow; negligible coordinate squares may round to zero without changing
     membership. Queries far outside the lattice fail coverage before gathering.
+
+    Attributes:
+        name: Profile name; only ``kaiser_w16_beta12_raw_v1`` is supported.
+        floor_rule: Floor rule name; only ``exact_quotient_floor_v1`` is
+            supported.
     """
 
     name: str = eqx.field(static=True, default="kaiser_w16_beta12_raw_v1")
@@ -105,11 +132,29 @@ class KernelProfile(AbstractKernelProfile):
         return 0.76
 
     def stencil_start(self, query, origin, spacing):
-        """Return the float first tap index, 15 nodes below the exact floor."""
+        """Return the float first tap index, 15 nodes below the exact floor.
+
+        Args:
+            query: Query coordinates, one per axis, in the unit of ``origin``.
+            origin: Coordinate of node zero, per axis.
+            spacing: Node spacing, per axis, in the unit of ``origin``.
+
+        Returns:
+            Float index of the first tap, per axis.
+        """
         return exact_quotient_floor_v1(query, origin, spacing) - 15.0
 
     def minimum_size(self, reflected):
-        """Smallest stored node count per axis that can serve any read."""
+        """Smallest stored node count per axis that can serve any read.
+
+        Args:
+            reflected: Whether the table is stored for non-negative positions
+                only and read by reflection.
+
+        Returns:
+            The smallest stored node count per axis: 17 with reflection, else
+            32.
+        """
         return 17 if reflected else 32
 
 
@@ -124,6 +169,12 @@ class PrefilteredKernelProfile(AbstractKernelProfile):
     Odd tap counts center the stencil on the nearest node (halves round up), even
     counts on the cell that holds the query. The filter half-width (12 nodes at
     7 taps, 16 otherwise) and the halo are fixed for this profile name.
+
+    Attributes:
+        name: Profile name; only ``kaiser_bessel_prefiltered_v1`` is supported.
+        floor_rule: Floor rule name; only ``exact_quotient_floor_v1`` is
+            supported.
+        taps: Taps per source axis in one read, an integer from 5 to 10.
     """
 
     name: str = eqx.field(static=True, default="kaiser_bessel_prefiltered_v1")
@@ -164,7 +215,16 @@ class PrefilteredKernelProfile(AbstractKernelProfile):
         return 0.64
 
     def stencil_start(self, query, origin, spacing):
-        """Return the float first tap index from exact floor and half-cell tests."""
+        """Return the float first tap index from exact floor and half-cell tests.
+
+        Args:
+            query: Query coordinates, one per axis, in the unit of ``origin``.
+            origin: Coordinate of node zero, per axis.
+            spacing: Node spacing, per axis, in the unit of ``origin``.
+
+        Returns:
+            Float index of the first tap, per axis.
+        """
         floor = exact_quotient_floor_v1(query, origin, spacing)
         if self.taps % 2 == 0:
             return floor - (self.taps // 2 - 1)
@@ -175,13 +235,27 @@ class PrefilteredKernelProfile(AbstractKernelProfile):
 
         Every coefficient node needs the full filter half-width on at least one
         side, so the signed table spans at least 2 * filter_half_width + 1 nodes.
+
+        Args:
+            reflected: Whether the table is stored for non-negative positions
+                only and read by reflection.
+
+        Returns:
+            The smallest stored node count per axis.
         """
         signed = max(2 * self.filter_half_width + 1, self.taps + 2 * self.halo)
         return (signed + 2) // 2 if reflected else signed
 
 
 def flush_subnormal(value):
-    """Replace binary64 subnormals by signed zero using integer bits."""
+    """Replace binary64 subnormals by signed zero using integer bits.
+
+    Args:
+        value: Binary64 array.
+
+    Returns:
+        The array with each subnormal replaced by a zero of the same sign.
+    """
     bits = jax.lax.bitcast_convert_type(value, jnp.int64)
     exponent = (bits >> 52) & 0x7FF
     zero = jax.lax.bitcast_convert_type(bits & jnp.int64(-(2**63)), jnp.float64)
@@ -194,6 +268,15 @@ def exact_quotient_floor_v1(query, origin, spacing):
     Query subnormals become signed zero before the single subtraction d=q-o.
     Callers must check the resulting float index range before integer conversion.
     The remainder determines the side of a cell edge without reciprocal rounding.
+
+    Args:
+        query: Query coordinates, in the unit of ``origin``.
+        origin: Coordinate of node zero.
+        spacing: Node spacing, in the unit of ``origin``.
+
+    Returns:
+        Float array, shaped like ``query``, of the integer floor of
+        (query - origin) / spacing.
     """
     # For nonzero origins >=1e-6, adjacent cancellation is >=2**-73;
     # with zero origin, flushed nonzero q is normal. If |d| < h, r=d;
@@ -211,6 +294,14 @@ def upper_half_cell(query, origin, spacing):
     fmod is exact and doubling is exact, so the comparison has no rounding. For
     negative differences the remainder lies in (-h, 0] and the fraction is
     (r + h) / h unless r is zero.
+
+    Args:
+        query: Query coordinates, in the unit of ``origin``.
+        origin: Coordinate of node zero.
+        spacing: Node spacing, in the unit of ``origin``.
+
+    Returns:
+        Float array, shaped like ``query``, of 1.0 or 0.0.
     """
     difference = flush_subnormal(query) - origin
     remainder = jnp.fmod(difference, spacing)
@@ -222,7 +313,15 @@ def upper_half_cell(query, origin, spacing):
 
 
 def weights(argument):
-    """Evaluate raw Kaiser-sinc weights, with safe inactive derivative lanes."""
+    """Evaluate raw Kaiser-sinc weights, with safe inactive derivative lanes.
+
+    Args:
+        argument: Distance from the query to each tap, in nodes. The weight is
+            zero where the magnitude is 16 or more.
+
+    Returns:
+        Weights, shaped like ``argument``.
+    """
     active = jnp.abs(argument) < 16.0
     inside = jnp.where(active, 1.0 - (argument / 16.0) ** 2, 1.0)
     window = jnp.i0(12.0 * jnp.sqrt(inside)) / jnp.i0(jnp.float64(12.0))
@@ -230,7 +329,17 @@ def weights(argument):
 
 
 def stencil(query, origin, spacing):
-    """Return signed int64 taps and float64 weights for a prevalidated query."""
+    """Return signed int64 taps and float64 weights for a prevalidated query.
+
+    Args:
+        query: Query coordinates, one per axis, in the unit of ``origin``.
+        origin: Coordinate of node zero, per axis.
+        spacing: Node spacing, per axis, in the unit of ``origin``.
+
+    Returns:
+        A tuple ``(taps, weights)``, each of shape (n_axes, 32): the node
+        indices and the one-dimensional weights.
+    """
     query = flush_subnormal(query)
     floor = exact_quotient_floor_v1(query, origin, spacing).astype(jnp.int64)
     taps = floor[:, None] + jnp.arange(-15, 17, dtype=jnp.int64)
@@ -248,6 +357,14 @@ def bump(argument, taps, beta):
     coefficients, never to raw samples, and do not reproduce a stored sample
     exactly. Inactive lanes are sanitized before the square root so derivatives
     stay finite.
+
+    Args:
+        argument: Distance from the query to each tap, in nodes.
+        taps: Support of the bump, in nodes.
+        beta: Kaiser-Bessel shape parameter; broadcastable against ``argument``.
+
+    Returns:
+        Bump values, shaped like ``argument``, equal to 1 at the center.
     """
     half = taps / 2.0
     active = jnp.abs(argument) < half
@@ -260,6 +377,18 @@ def bump_stencil(query, origin, spacing, profile, beta, scale):
 
     ``beta`` and ``scale`` are the per-axis shape and normalization of the design
     that built the coefficients; the weights are bump / scale.
+
+    Args:
+        query: Query coordinates, one per axis, in the unit of ``origin``.
+        origin: Coordinate of node zero, per axis.
+        spacing: Node spacing, per axis, in the unit of ``origin``.
+        profile: The prefiltered kernel profile that selects the taps.
+        beta: Per-axis Kaiser-Bessel shape parameter, shape (n_axes,).
+        scale: Per-axis normalization, shape (n_axes,).
+
+    Returns:
+        A tuple ``(taps, weights)``, each of shape (n_axes, profile.taps): the
+        node indices and the bump weights divided by ``scale``.
     """
     query = flush_subnormal(query)
     start = profile.stencil_start(query, origin, spacing).astype(jnp.int64)
@@ -277,6 +406,11 @@ class Stencil(eqx.Module):
     weights the node pair (i, j) by ``weights[0, i] * weights[1, j]``), and
     ``valid`` marks nodes a table can serve: inside the stored extent, or with
     reflection inside it after taking the absolute index.
+
+    Attributes:
+        nodes: Signed int64 node indices, shape (2, taps).
+        weights: Float64 one-dimensional weights, shape (2, taps).
+        valid: Boolean mask of nodes a table can serve, shape (2, taps).
     """
 
     nodes: jax.Array
@@ -300,6 +434,24 @@ def read_stencil(
     contract their tables with it and plots draw it. ``size`` is the stored
     node count per axis (x first); None marks every node valid. A prefiltered
     profile also needs the ``beta`` and ``scale`` of its designed band.
+
+    Args:
+        profile: The kernel profile that selects the taps and weights.
+        query: Query coordinates, one per axis (x first), in the unit of
+            ``origin``.
+        origin: Coordinate of node zero, per axis.
+        spacing: Node spacing, per axis, in the unit of ``origin``.
+        size: Stored node count per axis (x first). None marks every node
+            valid.
+        reflected: Whether the table is read by reflection, so a node index is
+            validated by its absolute value.
+        beta: Per-axis Kaiser-Bessel shape parameter of a prefiltered profile;
+            required for one and ignored otherwise.
+        scale: Per-axis normalization of a prefiltered profile; required for
+            one and ignored otherwise.
+
+    Returns:
+        The ``Stencil`` of nodes, weights and validity for the read.
     """
     if isinstance(profile, PrefilteredKernelProfile):
         if beta is None or scale is None:

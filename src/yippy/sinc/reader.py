@@ -53,7 +53,14 @@ def _default_budget():
 
 
 class ReadPolicy(eqx.Module):
-    """Sampling permits unknown errors; bounded always refuses in this version."""
+    """Sampling permits unknown errors; bounded always refuses in this version.
+
+    Attributes:
+        mode: Policy mode, "sampling" or "bounded".
+        max_abs_error: Largest accepted absolute error, in delivered sample
+            units, as a float64 scalar. Must be infinite for "sampling" and
+            finite and nonnegative for "bounded". Defaults to infinity.
+    """
 
     mode: str = eqx.field(static=True, default="sampling")
     max_abs_error: F64 = eqx.field(
@@ -74,7 +81,13 @@ class ReadPolicy(eqx.Module):
 
 
 class Tiling(eqx.Module):
-    """Positive static query chunk and flattened detector tile sizes."""
+    """Positive static query chunk and flattened detector tile sizes.
+
+    Attributes:
+        query_chunk: Number of queries read per serial chunk. Defaults to 1.
+        pixel_tile: Number of flattened detector pixels per tile in a raw
+            read. Defaults to 256.
+    """
 
     query_chunk: int = eqx.field(static=True, default=1)
     pixel_tile: int = eqx.field(static=True, default=256)
@@ -89,7 +102,14 @@ class Tiling(eqx.Module):
 
 
 class MemoryBudget(eqx.Module):
-    """Explicit byte ceilings; no machine-RAM assumptions or out-of-core mode."""
+    """Explicit byte ceilings; no machine-RAM assumptions or out-of-core mode.
+
+    Attributes:
+        max_resident_bytes: Ceiling on the resident table estimate, in bytes.
+        max_output_bytes: Ceiling on the result estimate, in bytes.
+        max_scratch_bytes: Ceiling on the scratch estimate, in bytes.
+        max_total_bytes: Ceiling on the total estimate, in bytes.
+    """
 
     max_resident_bytes: int = eqx.field(static=True)
     max_output_bytes: int = eqx.field(static=True)
@@ -109,7 +129,12 @@ class MemoryBudget(eqx.Module):
             raise ValueError("Memory budgets must be positive integer byte limits")
 
     def check(self, estimates):
-        """Raise MemoryLimit when any logical allocation exceeds its ceiling."""
+        """Raise MemoryLimit when any logical allocation exceeds its ceiling.
+
+        Args:
+            estimates: Mapping with the keys "resident", "output", "scratch" and
+                "total", in bytes, as returned by ``estimate_memory``.
+        """
         for key in ("resident", "output", "scratch", "total"):
             if estimates[key] > getattr(self, f"max_{key}_bytes"):
                 raise MemoryLimit(
@@ -128,7 +153,24 @@ class MemoryBudget(eqx.Module):
         extra_output_bytes=0,
         extra_resident_bytes=0,
     ):
-        """Check admission memory or size a budget for admission and batched reads."""
+        """Check admission memory or size a budget for admission and batched reads.
+
+        Args:
+            resident_bytes: Size of the stored samples, in bytes.
+            shape_yx: Detector shape as (rows, columns), in pixels.
+            profile: Kernel profile; None means the raw profile.
+            supplied: Budget to check against the admission estimate. When
+                given, it is returned unchanged if it passes.
+            queries: Number of queries in the batched read the budget must
+                also cover.
+            extra_output_bytes: Bytes added to the output and total ceilings.
+            extra_resident_bytes: Bytes added to the resident and total
+                estimates.
+
+        Returns:
+            ``supplied`` when it is given, else a new budget whose ceilings are
+            the larger of the admission and batched-read estimates.
+        """
         admission = estimate_memory(
             resident_bytes, shape_yx, Tiling(), 1, admission=True, profile=profile
         )
@@ -173,6 +215,19 @@ def estimate_memory(
     Occupancy is allocated only when the declared cell count equals node count.
     Read scratch includes the tile, contractions, padded output carry, and one
     serial query chunk. Compiler workspace and caller-owned tables are external.
+
+    Args:
+        resident_bytes: Size of the stored samples, in bytes.
+        shape_yx: Detector shape as (rows, columns), in pixels.
+        tiling: Query chunk and pixel tile sizes.
+        queries: Number of queries whose results are held at once.
+        admission: Whether to include the admission-time staging and source
+            checking allocations.
+        profile: Kernel profile; None means the raw profile.
+
+    Returns:
+        A dict of byte estimates with the keys "resident", "output", "scratch",
+        "staging" and "total".
     """
     pixels = math.prod(shape_yx)
     tile = min(tiling.pixel_tile, pixels)
@@ -209,7 +264,23 @@ def estimate_memory(
 
 
 class ImageRead(eqx.Module):
-    """Image and numerical diagnostics; bounds use delivered sample units."""
+    """Image and numerical diagnostics; bounds use delivered sample units.
+
+    Attributes:
+        intensity: Float64 image, shape (rows, columns), in delivered sample
+            units. NaN where the read was refused.
+        accepted: Whether the read was accepted, a scalar.
+        sampling_ok: Whether the query passed every sampling check, a scalar.
+        status: Int32 scalar status code from ``Status``.
+        reason_bits: Uint32 scalar bit mask of ``Reason`` flags.
+        bound_available: Whether an error bound is available, a scalar.
+        bound_kind: Int32 scalar kind code from ``BoundKind``.
+        abs_error_bound: Float64 scalar absolute error bound, in delivered
+            sample units; infinity when unknown.
+        empirical_max_abs: Float64 scalar empirical maximum absolute error of
+            the grid checks, in delivered sample units.
+        ledger: Per-source evidence ledger of the read.
+    """
 
     intensity: F64
     accepted: Boolean
@@ -238,14 +309,28 @@ class ImageRead(eqx.Module):
 
 
 class AbstractImageReader(eqx.Module):
-    """Nominal fixed-detector image reader without a storage-layout contract."""
+    """Nominal fixed-detector image reader without a storage-layout contract.
+
+    Attributes:
+        products: Physical metadata of the delivered products.
+        memory: Byte ceilings the reader checks its estimates against.
+    """
 
     products: eqx.AbstractVar[Products]
     memory: eqx.AbstractVar[MemoryBudget]
 
     @abstractmethod
     def read(self, source_xy_lod: F64, product_index: I32) -> ImageRead:
-        """Read one source [2] and int32 product [], returning delivered units."""
+        """Read one source [2] and int32 product [], returning delivered units.
+
+        Args:
+            source_xy_lod: Float64 source position (x, y), shape (2,), in
+                lambda/D.
+            product_index: Int32 scalar index of the product to read.
+
+        Returns:
+            The ``ImageRead`` of the source for that product.
+        """
 
 
 def _bind_evidence(grid, domain, profile):
@@ -272,6 +357,15 @@ class AbstractGridReader(AbstractImageReader):
     A concrete reader supplies ``_image``, the contraction of its own table at a
     prevalidated query. Status, reasons and the all-unknown ledger are the same
     for every profile: no profile turns a delivered grid into a bounded read.
+
+    Attributes:
+        grid: The admitted sampled grid the reader reads.
+        domain: Region of source positions the reader accepts.
+        profile: Kernel profile that selects taps and weights.
+        policy: Read policy.
+        errors: Unknown-error model that builds the evidence ledger.
+        tiling: Query chunk and pixel tile sizes.
+        memory: Byte ceilings the reader checks its estimates against.
     """
 
     # What the bound grid's intensity holds once the reader is built.
@@ -298,6 +392,12 @@ class AbstractGridReader(AbstractImageReader):
 
         Nodes are signed indices, so a reflected quadrant table shows negative
         nodes; ``valid`` marks the nodes the table serves.
+
+        Args:
+            query: Float64 source position (x, y), shape (2,), in lambda/D.
+
+        Returns:
+            The ``Stencil`` of nodes, weights and validity for the query.
         """
         beta, scale = self._design()
         return read_stencil(
@@ -325,7 +425,14 @@ class AbstractGridReader(AbstractImageReader):
         self.memory.check(self.memory_estimate(1))
 
     def memory_estimate(self, queries):
-        """Estimate this reader's allocations for ``queries`` serial reads."""
+        """Estimate this reader's allocations for ``queries`` serial reads.
+
+        Args:
+            queries: Number of queries whose results are held at once.
+
+        Returns:
+            A dict of byte estimates, as returned by ``estimate_memory``.
+        """
         return estimate_memory(
             self.grid.intensity.nbytes,
             self.products.pixels.shape,
@@ -367,6 +474,14 @@ class AbstractGridReader(AbstractImageReader):
         Coordinates and weights use binary64. Exact quotient floors determine
         every tap, including zero-weight endpoints. Bounded policy leaves
         sampling_ok independent of its unknown-bound refusal.
+
+        Args:
+            source_xy_lod: Float64 source position (x, y), shape (2,), in
+                lambda/D.
+            product_index: Int32 scalar index of the product to read.
+
+        Returns:
+            The ``ImageRead`` of the source for that product.
         """
         _require_precision()
         query, product = jnp.asarray(source_xy_lod), jnp.asarray(product_index)
@@ -401,7 +516,17 @@ class AbstractGridReader(AbstractImageReader):
 
 
 class Interpolator(AbstractGridReader):
-    """Resident raw Kaiser-sinc reader with internally bound unknown evidence."""
+    """Resident raw Kaiser-sinc reader with internally bound unknown evidence.
+
+    Attributes:
+        grid: The admitted sampled grid the reader reads.
+        domain: Region of source positions the reader accepts.
+        profile: The raw kernel profile.
+        policy: Read policy.
+        errors: Unknown-error model that builds the evidence ledger.
+        tiling: Query chunk and pixel tile sizes.
+        memory: Byte ceilings the reader checks its estimates against.
+    """
 
     grid: SampledGrid
     domain: Domain
@@ -413,7 +538,16 @@ class Interpolator(AbstractGridReader):
     _safe_query: F64
 
     def __init__(self, grid, domain, profile, policy, tiling, memory):
-        """Bind an admitted grid and a nonempty covered domain on the host."""
+        """Bind an admitted grid and a nonempty covered domain on the host.
+
+        Args:
+            grid: The admitted sampled grid to read.
+            domain: Region of source positions the reader accepts.
+            profile: Kernel profile of the grid.
+            policy: Read policy.
+            tiling: Query chunk and pixel tile sizes.
+            memory: Byte ceilings the reader checks its estimates against.
+        """
         _require_precision()
         if not isinstance(profile, KernelProfile):
             raise TypeError("Interpolator reads with the raw KernelProfile")
@@ -495,6 +629,18 @@ class PrefilteredReader(AbstractGridReader):
     receipt's ``kernel_design``, evaluated for this reader's domain. They
     describe the kernel on the declared band. Reads carry the same unknown
     error bound as raw reads.
+
+    Attributes:
+        grid: The admitted grid, carrying the coefficient table as its
+            ``intensity``.
+        domain: Region of source positions the reader accepts.
+        profile: The prefiltered kernel profile.
+        policy: Read policy.
+        errors: Unknown-error model that builds the evidence ledger.
+        tiling: Query chunk and pixel tile sizes.
+        memory: Byte ceilings the reader checks its estimates against.
+        design: Ordered (key, value) pairs describing the kernel design on the
+            declared band.
     """
 
     grid: SampledGrid
@@ -511,7 +657,16 @@ class PrefilteredReader(AbstractGridReader):
     _gain_xy: F64
 
     def __init__(self, grid, domain, profile, policy, tiling, memory):
-        """Bind an admitted grid and build its coefficient table on the host."""
+        """Bind an admitted grid and build its coefficient table on the host.
+
+        Args:
+            grid: The admitted sampled grid to read.
+            domain: Region of source positions the reader accepts.
+            profile: Kernel profile of the grid.
+            policy: Read policy.
+            tiling: Query chunk and pixel tile sizes.
+            memory: Byte ceilings the reader checks its estimates against.
+        """
         _require_precision()
         if not isinstance(profile, PrefilteredKernelProfile):
             raise TypeError("PrefilteredReader needs a PrefilteredKernelProfile")
@@ -584,6 +739,14 @@ def read_batch(
     Every array leaf gains Q; static metadata remains unbatched. Q=0 allocates
     empty leaves from an abstract shape trace without executing a read. Additional
     outer vmap dimensions require separate caller memory accounting.
+
+    Args:
+        reader: The reader to call for each query.
+        source_xy_lod: Float64 source positions, shape (Q, 2), in lambda/D.
+        product_index: Int32 product indices, shape (Q,).
+
+    Returns:
+        An ``ImageRead`` whose array leaves have a leading axis of length Q.
     """
     _require_precision()
     queries, products = jnp.asarray(source_xy_lod), jnp.asarray(product_index)
@@ -644,7 +807,14 @@ def read_batch(
 
 
 def require_read(result: ImageRead) -> ImageRead:
-    """Return an eager result or raise with every refused flattened query index."""
+    """Return an eager result or raise with every refused flattened query index.
+
+    Args:
+        result: A concrete (not traced) read result, scalar or batched.
+
+    Returns:
+        ``result``, unchanged, when every query was accepted.
+    """
     accepted = result.accepted.reshape(-1).tolist()
     statuses = result.status.reshape(-1).tolist()
     reasons = result.reason_bits.reshape(-1).tolist()
@@ -657,7 +827,21 @@ def require_read(result: ImageRead) -> ImageRead:
 
 
 def make_reader(grid, domain, *, profile, policy=None, tiling=None, memory):
-    """Construct the reader for the profile selected when the grid was admitted."""
+    """Construct the reader for the profile selected when the grid was admitted.
+
+    Args:
+        grid: The admitted sampled grid to read.
+        domain: Region of source positions the reader accepts.
+        profile: Kernel profile; a prefiltered profile selects the prefiltered
+            reader, any other the raw interpolator.
+        policy: Read policy. None means the default ``ReadPolicy``.
+        tiling: Query chunk and pixel tile sizes. None means the default
+            ``Tiling``.
+        memory: Byte ceilings the reader checks its estimates against.
+
+    Returns:
+        The reader for the profile.
+    """
     reader = (
         PrefilteredReader
         if isinstance(profile, PrefilteredKernelProfile)

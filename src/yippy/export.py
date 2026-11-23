@@ -31,6 +31,19 @@ def export_exosims(
     separation and aperture area. The EXOSIMS core-mean-intensity file retains
     per-stellar-pixel flux fractions; LEAKRULE identifies the averaging rule.
     Array extent is not an outer working angle and is not exported as one.
+
+    Args:
+        coro: Coronagraph whose first prepared record is exported.
+        units: Angle units of the files, ``"LAMBDA/D"`` or ``"arcsec"``
+            (case-insensitive).
+        separations_lod: Separations in lambda/D at which to evaluate; None uses the
+            knots of the record.
+        output_dir: Directory to write into; None uses the ``exosims`` folder of the
+            package.
+
+    Returns:
+        The ``specs.json`` content: pupil diameter in m, obscuration fraction and the
+        starlight suppression system entry.
     """
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
         raise ValueError("units must be 'LAMBDA/D' or 'arcsec'")
@@ -147,6 +160,21 @@ def export_ayo_csv(
     Separations are in lambda/D. A contrast floor applies only when explicitly
     requested and does not change the performance record. Seventeen significant
     digits preserve float64 values through a CSV round trip.
+
+    Args:
+        coro: Coronagraph whose first prepared record is exported.
+        output_path: Path of the CSV file to write.
+        ppf: Post-processing factor by which the noise-floor column divides the
+            contrast.
+        separation_min_lod: First separation of the default grid, in lambda/D.
+        separation_max_lod: Last separation of the default grid, in lambda/D.
+        separation_step_lod: Spacing of the default grid, in lambda/D.
+        contrast_floor: Optional lower bound applied to the contrast column; None
+            applies none.
+        separations_lod: Explicit separations in lambda/D; None uses the default grid.
+
+    Returns:
+        The path of the CSV file.
     """
     output_path = Path(output_path)
     separations = np.asarray(

@@ -26,22 +26,24 @@ def create_shift_mask(psf, shift_x, shift_y, x_grid, y_grid, fill_val=1):
     performance under JIT.
 
     Args:
-        psf (jax.numpy.ndarray):
-            The PSF image to shift.
-        shift_x (float):
-            The shift in the x direction.
-        shift_y (float):
-            The shift in the y direction.
-        x_grid (jax.numpy.ndarray):
-            The x-coordinate grid.
-        y_grid (jax.numpy.ndarray):
-            The y-coordinate grid.
-        fill_val (float, optional):
-            The value to fill the mask with.
+        psf:
+            The PSF image to shift, shape (height, width). Only its shape and
+            dtype are used.
+        shift_x:
+            The shift in the x direction, in pixels.
+        shift_y:
+            The shift in the y direction, in pixels.
+        x_grid:
+            The x pixel-index grid, broadcastable against the PSF shape.
+        y_grid:
+            The y pixel-index grid, broadcastable against the PSF shape.
+        fill_val:
+            The value of the valid pixels in the mask. Defaults to 1.
 
     Returns:
-        jax.numpy.ndarray:
-            The mask to identify valid pixels to average.
+        The mask, shape of the broadcast grids, with the PSF dtype. Valid
+        pixels hold ``fill_val`` and pixels shifted in from outside the image
+        hold zero.
     """
     height, width = psf.shape
 
@@ -75,15 +77,17 @@ def get_near_inds_offsets_1D(
     """Computes the nearest indices and offsets for the given _x position in 1D.
 
     Args:
-        x_offsets (jnp.ndarray): 1D array of x offsets, sorted in ascending order.
-        y_offsets (jnp.ndarray): 1D array of y offsets.
-        _x (float): The x-coordinate for which to find nearby offsets.
+        x_offsets: 1D array of x offsets, sorted in ascending order.
+        y_offsets: 1D array of y offsets. Only the first entry is used.
+        _x: The x-coordinate for which to find nearby offsets, in the same
+            unit as ``x_offsets``.
+        _y: The y-coordinate. Unused in 1D.
 
     Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]:
-            - near_inds: Array of shape (2,) containing the indices of the two
-              surrounding points.
-            - near_offsets: Array of shape (2,) containing the corresponding x offsets.
+        A tuple ``(near_inds, near_offsets)``. ``near_inds`` has shape (2, 2)
+        and holds the (x index, y index) pairs of the two surrounding points.
+        ``near_offsets`` has shape (2, 2) and holds the corresponding
+        (x, y) offsets.
     """
     # Find insertion index for _x
     _x_ind = jnp.searchsorted(x_offsets, _x, side="left")
@@ -119,7 +123,26 @@ def create_avg_psf_1D(
     y_phasor: jnp.ndarray,
     reshaped_psfs: jnp.ndarray,
 ):
-    """Creates and returns the PSF at the specified off-axis position using JAX."""
+    """Creates and returns the PSF at the specified off-axis position using JAX.
+
+    Args:
+        x: X position of the source, in the same unit as ``x_offsets``.
+        y: Y position of the source, in the same unit as ``y_offsets``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the offsets per pixel.
+        x_offsets: Sorted 1D array of tabulated x offsets.
+        y_offsets: Sorted 1D array of tabulated y offsets.
+        x_grid: The x pixel-index grid used to mask the shifted PSFs.
+        y_grid: The y pixel-index grid used to mask the shifted PSFs.
+        x_phasor: Precomputed phasor components for the x Fourier shift.
+        y_phasor: Precomputed phasor components for the y Fourier shift.
+        reshaped_psfs: Tabulated PSFs, shape (n_x_offsets, n_y_offsets, height,
+            width).
+
+    Returns:
+        The PSF at the requested position, shape (height, width): the
+        Gaussian-weighted average of the shifted neighboring PSFs, normalized
+        by the weight mask.
+    """
     # The core logic is similar to OffAx, but uses JAX operations
     _x, _y = convert_xy_1D(x, y)
 
@@ -179,7 +202,26 @@ def create_avg_psf_2DQ(
     y_phasor: jnp.ndarray,
     reshaped_psfs: jnp.ndarray,
 ):
-    """Creates and returns the PSF at the specified off-axis position using JAX."""
+    """Creates and returns the PSF at the specified off-axis position using JAX.
+
+    Args:
+        x: X position of the source, in the same unit as ``x_offsets``.
+        y: Y position of the source, in the same unit as ``y_offsets``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the offsets per pixel.
+        x_offsets: Sorted 1D array of tabulated x offsets.
+        y_offsets: Sorted 1D array of tabulated y offsets.
+        x_grid: The x pixel-index grid used to mask the shifted PSFs.
+        y_grid: The y pixel-index grid used to mask the shifted PSFs.
+        x_phasor: Precomputed phasor components for the x Fourier shift.
+        y_phasor: Precomputed phasor components for the y Fourier shift.
+        reshaped_psfs: Tabulated PSFs, shape (n_x_offsets, n_y_offsets, height,
+            width).
+
+    Returns:
+        The PSF at the requested position, shape (height, width): the
+        Gaussian-weighted average of the shifted neighboring PSFs, normalized
+        by the weight mask.
+    """
     # The core logic is similar to OffAx, but uses JAX operations
     _x, _y = convert_xy_2DQ(x, y)
 
@@ -252,17 +294,18 @@ def get_near_inds_offsets_2D(
     """Computes the nearest indices and offsets for the given (_x, _y) position in 2D.
 
     Args:
-        x_offsets (jnp.ndarray): 1D array of x offsets, sorted in ascending order.
-        y_offsets (jnp.ndarray): 1D array of y offsets, sorted in ascending order.
-        _x (float): The x-coordinate for which to find nearby offsets.
-        _y (float): The y-coordinate for which to find nearby offsets.
+        x_offsets: 1D array of x offsets, sorted in ascending order.
+        y_offsets: 1D array of y offsets, sorted in ascending order.
+        _x: The x-coordinate for which to find nearby offsets, in the same
+            unit as ``x_offsets``.
+        _y: The y-coordinate for which to find nearby offsets, in the same
+            unit as ``y_offsets``.
 
     Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]:
-            - near_inds: Array of shape (4, 2) containing the indices of the
-              four surrounding points.
-            - near_offsets: Array of shape (4, 2) containing the corresponding
-              (x, y) offsets.
+        A tuple ``(near_inds, near_offsets)``. ``near_inds`` has shape (4, 2)
+        and holds the (x index, y index) pairs of the four surrounding points.
+        ``near_offsets`` has shape (4, 2) and holds the corresponding
+        (x, y) offsets.
     """
     # Find insertion indices for _x and _y
     _x_ind = jnp.searchsorted(x_offsets, _x, side="left")
@@ -314,19 +357,18 @@ def shift_and_mask(
     """Shifts the PSF in x and y directions and applies a weight mask.
 
     Args:
-        near_psf (jax.numpy.ndarray): The PSF image to shift.
-        shift_x (float): Shift in the x-direction.
-        shift_y (float): Shift in the y-direction.
-        weight (float): Weight for the PSF.
-        x_grid (jax.numpy.ndarray): The x-coordinate grid.
-        y_grid (jax.numpy.ndarray): The y-coordinate grid.
-        x_phasor (jax.numpy.ndarray): Precomputed components for the Fourier shift.
-        y_phasor (jax.numpy.ndarray): Precomputed components for the Fourier shift.
+        near_psf: The PSF image to shift, shape (height, width).
+        shift_x: Shift in the x-direction, in pixels.
+        shift_y: Shift in the y-direction, in pixels.
+        weight: Weight for the PSF, used as the mask fill value.
+        x_grid: The x pixel-index grid used to build the mask.
+        y_grid: The y pixel-index grid used to build the mask.
+        x_phasor: Precomputed components for the x Fourier shift.
+        y_phasor: Precomputed components for the y Fourier shift.
 
     Returns:
-        Tuple[jax.numpy.ndarray, jax.numpy.ndarray]:
-            - Weighted shifted PSF.
-            - Weight mask.
+        A tuple ``(weighted_psf, weight_mask)``: the shifted PSF multiplied by
+        the mask, and the mask, whose valid pixels hold ``weight``.
     """
     # Shift the PSF in x and y directions
     shifted_psf = fft_shift_x(near_psf, shift_x, x_phasor)
@@ -362,6 +404,15 @@ def clamp_to_radius(x, y, radius):
     where the read and its derivative are finite, instead of extrapolating.
     The caller zeroes the result for a source outside; the gradient of the
     clamped read is finite, so the zero is an exact zero gradient.
+
+    Args:
+        x: X coordinate, in the unit of ``radius``.
+        y: Y coordinate, in the unit of ``radius``.
+        radius: Largest allowed distance from the origin.
+
+    Returns:
+        A tuple ``(x, y)`` of the scaled coordinates, each with the shape of
+        the input.
     """
     r = _safe_hypot(x, y)
     outside = r > radius
@@ -370,45 +421,134 @@ def clamp_to_radius(x, y, radius):
 
 
 def convert_xy_1D(x, y):
-    """Converts x and y to 1D coordinates."""
+    """Converts x and y to 1D coordinates.
+
+    Args:
+        x: X coordinate.
+        y: Y coordinate, in the unit of ``x``.
+
+    Returns:
+        A tuple ``(radius, 0)``: the radial separation of (x, y) with a finite
+        derivative at the origin, and a zero y coordinate.
+    """
     return _safe_hypot(x, y), 0
 
 
 def convert_xy_2DQ(x, y):
-    """Converts x and y to 2D quarter symmetric coordinates."""
+    """Converts x and y to 2D quarter symmetric coordinates.
+
+    Args:
+        x: X coordinate.
+        y: Y coordinate.
+
+    Returns:
+        A tuple ``(abs(x), abs(y))``, the coordinates folded into the first
+        quadrant.
+    """
     return jnp.abs(x), jnp.abs(y)
 
 
 def convert_xy_2D(x, y):
-    """Converts x and y to 2D coordinates."""
+    """Converts x and y to 2D coordinates.
+
+    Args:
+        x: X coordinate.
+        y: Y coordinate.
+
+    Returns:
+        A tuple ``(x, y)``, unchanged.
+    """
     return x, y
 
 
 def basic_shift_val(input_val, converted_val, pixel_scale_arcsec):
-    """Calculates the shift in pixels for a basic shift."""
+    """Calculates the shift in pixels for a basic shift.
+
+    Args:
+        input_val: Requested coordinate.
+        converted_val: Coordinate of the tabulated PSF, in the unit of
+            ``input_val``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+
+    Returns:
+        The shift, in pixels, from the tabulated position to the requested one.
+    """
     return (input_val - converted_val) / pixel_scale_arcsec
 
 
 def sym_shift_val(input_val, converted_val, pixel_scale_arcsec):
-    """Calculates the shift in pixels for a symmetric shift."""
+    """Calculates the shift in pixels for a symmetric shift.
+
+    Args:
+        input_val: Requested coordinate; its sign selects the mirrored side.
+        converted_val: Coordinate of the tabulated PSF on the positive side, in
+            the unit of ``input_val``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+
+    Returns:
+        The shift, in pixels, from the signed tabulated position to the
+        requested one.
+    """
     sign = jnp.where(input_val >= 0, 1.0, -1.0)
     return (input_val - sign * converted_val) / pixel_scale_arcsec
 
 
 def x_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phasor):
-    """Shifts the PSF to the specified x position."""
+    """Shifts the PSF to the specified x position.
+
+    Args:
+        input_val: Requested x coordinate.
+        converted_val: x coordinate of the tabulated PSF, in the unit of
+            ``input_val``.
+        PSF: The tabulated PSF image, shape (height, width).
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+        x_phasor: Precomputed phasor components for the x Fourier shift.
+
+    Returns:
+        The PSF shifted along x, same shape as ``PSF``.
+    """
     shift = basic_shift_val(input_val, converted_val, pixel_scale_arcsec)
     return fft_shift_x(PSF, shift, x_phasor)
 
 
 def y_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phasor):
-    """Shifts the PSF to the specified y position."""
+    """Shifts the PSF to the specified y position.
+
+    Args:
+        input_val: Requested y coordinate.
+        converted_val: y coordinate of the tabulated PSF, in the unit of
+            ``input_val``.
+        PSF: The tabulated PSF image, shape (height, width).
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+        y_phasor: Precomputed phasor components for the y Fourier shift.
+
+    Returns:
+        The PSF shifted along y, same shape as ``PSF``.
+    """
     shift = basic_shift_val(input_val, converted_val, pixel_scale_arcsec)
     return fft_shift_y(PSF, shift, y_phasor)
 
 
 def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phasor):
-    """Shifts the PSF to the specified position assuming symmetry about x=0."""
+    """Shifts the PSF to the specified position assuming symmetry about x=0.
+
+    Args:
+        input_val: Requested x coordinate; a negative value mirrors the PSF.
+        converted_val: x coordinate of the tabulated PSF on the positive side,
+            in the unit of ``input_val``.
+        PSF: The tabulated PSF image, shape (height, width).
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+        x_phasor: Precomputed phasor components for the x Fourier shift.
+
+    Returns:
+        The PSF, mirrored when ``input_val`` is negative and shifted along
+        x, same shape as ``PSF``.
+    """
     # Apply a horizontal flip if the input value is negative
     _PSF = jnp.where(input_val < 0, jnp.fliplr(PSF), PSF)
 
@@ -419,7 +559,21 @@ def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phaso
 
 
 def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phasor):
-    """Shifts the PSF to the specified position assuming symmetry about y=0."""
+    """Shifts the PSF to the specified position assuming symmetry about y=0.
+
+    Args:
+        input_val: Requested y coordinate; a negative value mirrors the PSF.
+        converted_val: y coordinate of the tabulated PSF on the positive side,
+            in the unit of ``input_val``.
+        PSF: The tabulated PSF image, shape (height, width).
+        pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
+            pixel.
+        y_phasor: Precomputed phasor components for the y Fourier shift.
+
+    Returns:
+        The PSF, mirrored when ``input_val`` is negative and shifted along
+        y, same shape as ``PSF``.
+    """
     # Apply a vertical flip if the input value is negative
     _PSF = jnp.where(input_val < 0, jnp.flipud(PSF), PSF)
 
@@ -430,7 +584,15 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
 
 
 def blend_pad(n_pixels):
-    """Zero padding per side that keeps FFT translations from wrapping (even total)."""
+    """Zero padding per side that keeps FFT translations from wrapping (even total).
+
+    Args:
+        n_pixels: Number of pixels along one axis of the PSF.
+
+    Returns:
+        The padding, in pixels, added to each side of that axis, chosen so the
+        padded length is even.
+    """
     n_pad = int(1.5 * n_pixels)
     return n_pad + 1 if (n_pixels + 2 * n_pad) % 2 else n_pad
 
@@ -452,6 +614,24 @@ def separable_read_plan(
     neighbor. A PSF read is the weighted sum of the neighbors, each translated by
     its shift in the canonical quadrant, then reflected for negative coordinates
     when the response is symmetric.
+
+    Args:
+        x: X position of the source, in the same unit as ``x_offsets``.
+        y: Y position of the source, in the same unit as ``y_offsets``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the offsets per pixel.
+        x_offsets: Sorted 1D array of unique tabulated x offsets.
+        y_offsets: Sorted 1D array of unique tabulated y offsets.
+        offset_to_flat_idx: 2D integer array mapping (x index, y index) to the
+            index of the PSF in the flat PSF array.
+        x_symmetric: Whether the response is symmetric about x=0.
+        y_symmetric: Whether the response is symmetric about y=0.
+        input_type: Layout of the tabulated offsets, "1d" or "2dq"; any other
+            value is read with the 2D quarter lookup.
+
+    Returns:
+        A tuple ``(flat_indices, weights, shift_x, shift_y)``, each with one
+        entry per neighbor (2 for "1d", 4 otherwise): the flat PSF indices,
+        the interpolation weights, and the pixel shifts along x and y.
     """
     # Neighbor lookup
     if input_type == "1d":
@@ -558,36 +738,35 @@ def synthesize_psf_separable(
     pupil's diffraction structure, which is fixed on the detector.
 
     Args:
-        x (float):
+        x:
             X coordinate in lambda/D.
-        y (float):
+        y:
             Y coordinate in lambda/D.
-        pixel_scale_arcsec (float):
+        pixel_scale_arcsec:
             Pixel scale in lambda/D per pixel.
-        flat_psfs (jnp.ndarray):
+        flat_psfs:
             Flat array of PSFs with shape (N_psfs, H, W).
-        x_offsets (jnp.ndarray):
+        x_offsets:
             Sorted array of unique x offsets.
-        y_offsets (jnp.ndarray):
+        y_offsets:
             Sorted array of unique y offsets.
-        offset_to_flat_idx (jnp.ndarray):
+        offset_to_flat_idx:
             2D array mapping (x_idx, y_idx) -> flat_psfs index.
-        kx (jnp.ndarray):
+        kx:
             FFT frequencies for x-axis.
-        ky (jnp.ndarray):
+        ky:
             FFT frequencies for y-axis.
-        n_pad (int):
+        n_pad:
             Number of padding pixels.
-        x_symmetric (bool):
+        x_symmetric:
             Whether PSFs are symmetric about x=0.
-        y_symmetric (bool):
+        y_symmetric:
             Whether PSFs are symmetric about y=0.
-        input_type (str):
+        input_type:
             Type of input data ("1d", "2dq", or "2df").
 
     Returns:
-        jnp.ndarray:
-            Synthesized PSF at the requested (x, y) position.
+        Synthesized PSF at the requested (x, y) position, shape (H, W).
     """
     flat_indices, weights, shift_x, shift_y = separable_read_plan(
         x,
@@ -705,6 +884,23 @@ def idw_read_plan(
 
     The weights sum to one and the read is a PSF, not a flux-normalized image:
     its total is the bilinear interpolation of the node totals.
+
+    Args:
+        x: X position of the source, in the same unit as ``flat_x_offsets``.
+        y: Y position of the source, in the same unit as ``flat_y_offsets``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the offsets per pixel.
+        flat_x_offsets: x offsets of all tabulated nodes, one per node.
+        flat_y_offsets: y offsets of all tabulated nodes, one per node.
+        x_symmetric: Whether the response is symmetric about x=0.
+        y_symmetric: Whether the response is symmetric about y=0.
+        input_type: Layout of the tabulated offsets: "2dq" folds the query
+            into the first quadrant, "1d" uses its radial separation, and any
+            other value uses (x, y) unchanged.
+
+    Returns:
+        A tuple ``(indices, weights, shift_x, shift_y)``, each of shape (4,):
+        the node indices, the bilinear weights, and the pixel shifts along x
+        and y.
     """
     # Handle Symmetry (Map to 1st Quadrant if 2DQ)
     if input_type == "2dq":
@@ -771,6 +967,25 @@ def synthesize_psf_idw(
 
     See ``idw_read_plan`` for the weights. The result is a PSF, not a
     flux-normalized image.
+
+    Args:
+        x: X position of the source, in the same unit as ``flat_x_offsets``.
+        y: Y position of the source, in the same unit as ``flat_y_offsets``.
+        pixel_scale_arcsec: Pixel scale, in the unit of the offsets per pixel.
+        flat_psfs: Tabulated PSFs, shape (N_psfs, H, W).
+        flat_x_offsets: x offsets of the nodes, one per PSF.
+        flat_y_offsets: y offsets of the nodes, one per PSF.
+        kx: FFT frequencies along x for the padded real FFT.
+        ky: FFT frequencies along y for the padded FFT.
+        n_pad: Zero padding added to each side of both axes, in pixels.
+        x_symmetric: Whether the response is symmetric about x=0.
+        y_symmetric: Whether the response is symmetric about y=0.
+        input_type: Layout of the tabulated offsets ("1d", "2dq" or other),
+            as in ``idw_read_plan``.
+
+    Returns:
+        The synthesized PSF at (x, y), shape (H, W), clipped to be
+        non-negative.
     """
     inds, weights, shift_x, shift_y = idw_read_plan(
         x,

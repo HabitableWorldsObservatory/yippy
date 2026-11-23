@@ -78,6 +78,19 @@ class SceneRenderer(AbstractSceneOperator):
     Rendering refuses the whole image when any contributing source cannot be
     read. A source contributes when its flux, or its raster value, is nonzero;
     zero-flux entries are padding and may hold any position.
+
+    Attributes:
+        reader: Prefiltered reader whose policy, domain and coverage apply.
+        table: Coefficient images of the stored touched nodes, shape
+            (rows, pixels), in the storage dtype and unflipped.
+        lookup: Row of ``table`` for each signed touched node, shape
+            (rows_y, columns_x); the row count marks an absent node.
+        nodes: Touched signed lattice nodes relative to the touched rectangle,
+            shape (n_nodes, 2) as (row, column).
+        product_index: Index of the one product this renderer serves.
+        margin_nodes: Lattice nodes added around the touched set.
+        accumulate: Contraction arithmetic, "float64" or "storage".
+        scale: Constant multiplied into every rendered image.
     """
 
     reader: PrefilteredReader
@@ -198,6 +211,16 @@ class SceneRenderer(AbstractSceneOperator):
 
         Unsupported centers may stay dark during a render. If no center is
         supported, one covered stencil suffices to represent the all-dark image.
+
+        Args:
+            reader: A PrefilteredReader; its policy, domain and coverage apply.
+            product_index: Python int, the one product this renderer serves.
+            x_lod: Raster pixel-center x coordinates, shape (W,), in lambda/D.
+            y_lod: Raster pixel-center y coordinates, shape (H,), in lambda/D.
+            scale: Constant that ``render`` multiplies into the image.
+
+        Returns:
+            A SceneRenderer covering the readable raster centers.
         """
         x_lod, y_lod = jnp.asarray(x_lod), jnp.asarray(y_lod)
         if x_lod.ndim != 1 or y_lod.ndim != 1 or not x_lod.size or not y_lod.size:
@@ -349,6 +372,15 @@ class SceneRenderer(AbstractSceneOperator):
         covered or outside the touched nodes refuses the whole image. Reads
         jump by the bump's edge value where a stencil switches cell, so
         position gradients are piecewise.
+
+        Args:
+            source_xy_lod: Source coordinates, shape (Q, 2), in lambda/D.
+            flux: Source fluxes, shape (Q,), as a multiplier on the delivered
+                per-unit-flux read.
+
+        Returns:
+            ImageRead with the summed image in delivered units and the
+            acceptance diagnostics.
         """
         _require_precision()
         queries, flux = jnp.asarray(source_xy_lod), jnp.asarray(flux)
@@ -422,6 +454,10 @@ class SceneRenderer(AbstractSceneOperator):
         Args:
             flux: Source flux [H, W] at the pixel centers of ``grid``.
             grid: The source grid whose cell centers locate the sources.
+
+        Returns:
+            Tuple of the image (detector shape, in delivered units times
+            ``scale``) and the boolean readable-cell mask, shape (H, W).
         """
         x, y = grid.coordinates()
         flux = jnp.asarray(flux, jnp.float64)
@@ -443,6 +479,15 @@ class SceneRenderer(AbstractSceneOperator):
         and not in a point read, depending on how the backend compiles each
         path; the image then differs by the bump's edge value, the size of a
         stencil switch.
+
+        Args:
+            scene: Raster of per-pixel source fluxes, shape (H, W).
+            x_lod: Pixel-center x coordinates, shape (W,), in lambda/D.
+            y_lod: Pixel-center y coordinates, shape (H,), in lambda/D.
+
+        Returns:
+            ImageRead with the rendered image in delivered units and the
+            acceptance diagnostics.
         """
         fold = self._fold_raster(scene, x_lod, y_lod)
         lit, finite, usable = fold.lit, fold.finite, fold.usable
@@ -545,7 +590,19 @@ class SceneRenderer(AbstractSceneOperator):
 
 
 class _Fold(NamedTuple):
-    """Node amplitudes of a raster fold and the per-cell flags that gate it."""
+    """Node amplitudes of a raster fold and the per-cell flags that gate it.
+
+    Attributes:
+        amplitudes: Folded node amplitudes, one row per sign group.
+        lit: Cells with nonzero flux.
+        finite: Cells with finite coordinates.
+        usable: Cells that are finite, in the domain, covered and stored.
+        readable: Cells with finite coordinates that are also in the domain,
+            covered and stored.
+        member: Cells inside the permission domain.
+        covered: Cells whose stencil is covered.
+        stored: Cells whose taps all land on stored nodes.
+    """
 
     amplitudes: jax.Array
     lit: jax.Array

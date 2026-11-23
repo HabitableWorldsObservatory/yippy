@@ -14,7 +14,12 @@ class StellarIntens:
     """Diameter interpolator fitted to the native stellar intensity product."""
 
     def __init__(self, package) -> None:
-        """Build the host spline without modifying the measured values."""
+        """Build the host spline without modifying the measured values.
+
+        Args:
+            package: Coronagraph package supplying the stellar intensity maps,
+                their stellar diameters (lambda/D) and the pixel grid.
+        """
         psfs = package.stellar_intensity
         self.grid = package.header.stellar_intensity.pixel_grid()
         self.diams = package.stellar_diameters_lod * lod
@@ -45,12 +50,12 @@ class StellarIntens:
         the logarithm of the intensity to ensure that all computed values are positive.
 
         Args:
-            stellar_diam (Quantity):
+            stellar_diam:
                 The desired stellar diameter for which to retrieve the intensity map, in
                 units of lambda/D.
-            lam (Quantity, optional):
+            lam:
                 Wavelength of observation, required if stellar_diam is in angular units.
-            D (Quantity, optional):
+            D:
                 Diameter of the telescope, required if stellar_diam is in angular units.
 
         Returns:
