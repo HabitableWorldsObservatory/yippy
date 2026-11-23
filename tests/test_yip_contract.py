@@ -17,7 +17,7 @@ import astropy.io.fits as pyfits
 import numpy as np
 import pytest
 from lod_unit import lod
-from optixstuff.grids import Measure, PixelGrid, coverage, reconstruction_margin
+from optixstuff.grids import Measure, PixelGrid
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -271,8 +271,10 @@ def test_public_images_carry_header_grid(syn_coro_1d):
             expected_measure,
             "stellar_flux_fraction",
         )
-        # Stellar halos declare linear (see test_shipped_stellar_map_stays_positive).
-        expected = "linear" if any(image is s for s in stellar) else "band_limited"
+        # Stellar halos declare the cubic spline (see tests/test_stellar_read.py).
+        expected = (
+            "cubic_spline" if any(image is s for s in stellar) else "band_limited"
+        )
         assert image.reconstruction == expected
     np.testing.assert_array_equal(
         coro.sky_trans.data,
@@ -283,13 +285,12 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == (Measure.intensive(), "transmission")
         assert image.reconstruction == "linear"
-    # A coarser detector cannot promise to reconstruct the native bandwidth.
+    # A coarser detector cannot promise to reconstruct the native bandwidth of
+    # a band-limited source; the stellar footprint read keeps its declaration.
     coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
-    for image in (
-        coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse).image,
-        coro.stellar_map(None, 0.1, grid=coarse),
-    ):
-        assert image.reconstruction == "linear"
+    source = coro.source_psfs(None, jnp.array([1.0]), jnp.array([0.0]), grid=coarse)
+    assert source.image.reconstruction == "linear"
+    assert coro.stellar_map(None, 0.1, grid=coarse).reconstruction == "cubic_spline"
     actual = np.asarray(native_source.integrated().data)
     flat_idx = numpy_reader.offset_to_flat_idx[2, 0]
     expected = np.asarray(numpy_reader.flat_psfs[flat_idx], dtype=actual.dtype)
@@ -397,31 +398,6 @@ def test_public_geometric_leakage_change(shipped_coro):
         np.testing.assert_allclose(
             100 * (leakage / native_leakage - 1), change_percent, atol=0.01, rtol=0
         )
-
-
-def test_shipped_stellar_map_stays_positive(shipped_coro):
-    """Fails if the stellar map rings negative in the AAVC dark hole.
-
-    A band-limited interpolant of the eight-decade stellar halo rang along the rows
-    and columns of the bright pixels at the level of the hole floor (about 1e-12),
-    and a consumer that clamps at zero then rendered exact-zero pixels and bands
-    (2 to 11 percent of the hole at detector pitches of 0.45 lambda/D and finer).
-    Every resampled value must be positive on a coarser and a finer grid. The
-    grids reach past the table, where the map is zero, so the check covers the
-    pixels the table supports: their whole footprint inside it, less the
-    reconstruction margin.
-    """
-    frame = shipped_coro.stellar_grid.frame
-    for n, pitch in ((144, 0.4532), (412, 0.1511)):
-        grid = PixelGrid.regular((n, n), pitch, "lod", frame=frame)
-        image = shipped_coro.stellar_map(None, 0.0, grid=grid)
-        supported = coverage(
-            shipped_coro.stellar_grid,
-            grid,
-            reconstruction_margin(image.reconstruction),
-        )
-        assert supported.sum() > 0.8 * supported.size
-        assert np.asarray(image.data)[supported].min() > 0.0
 
 
 def test_shipped_off_axis_psfs_ring_only_at_the_noise_floor(shipped_coro):

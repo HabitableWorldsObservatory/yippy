@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from footprint_truth import assert_stellar_read
 from hwoutils.memory import MemoryLimit
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, PixelGrid, resample
@@ -434,7 +435,16 @@ def test_auto_fallback_and_bounded(tmp_path):
 
 
 def test_table_consumer(admitted):
-    """Fails if the table consumer rescales densities or resamples off its frame."""
+    """Fails if the table consumer rescales densities or resamples off its frame.
+
+    The stellar truth is the SciPy footprint integral of the stored samples,
+    with the pixel geometry typed from the grids (``footprint_truth``),
+    compared to rounding on every pixel. The four-sample table has no pixel
+    two cells inside its edge, so every pixel lies where the spline depends
+    on its end condition; the truth implements the documented restriction of
+    the spline to the table footprint, and the comparison guards scale and
+    frame, not the edge physics.
+    """
     host = _YIPData(admitted.package, interpolation="sinc")
     # The record stores density per (lambda/D)^2: no pitch factor.
     density = host.performance.evaluate("leakage_density_lod2", 0.0, 0.0)
@@ -447,9 +457,11 @@ def test_table_consumer(admitted):
     for pitch in (0.25, 0.4):
         stellar = admitted.stellar_map(None, 0.0)
         grid = PixelGrid.focal(4, pitch, stellar.grid.frame)
-        np.testing.assert_array_equal(
+        assert_stellar_read(
             admitted.stellar_map(500.0, 0.0, grid=grid).data,
-            resample(stellar.integrated(), grid).data,
+            stellar.integrated().data,
+            stellar.grid,
+            grid,
         )
         grid = PixelGrid.focal(4, pitch, admitted.sky_trans.grid.frame)
         np.testing.assert_array_equal(

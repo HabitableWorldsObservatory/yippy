@@ -61,7 +61,11 @@ class StellarIntens:
         Returns:
             Image:
                 Native fraction of unocculted stellar flux, with diameter
-                axes preceding (y, x).
+                axes preceding (y, x). The values are point samples declaring
+                the cubic spline; read them onto a detector with
+                ``yippy.sampling.stellar_on_grid``, which applies the
+                positivity floor that ``optixstuff.coronagraph.on_grid``
+                alone does not.
         """
         data = self._evaluate_array(stellar_diam, lam, D)
         axes = tuple(f"diameter_{i}" for i in range(data.ndim - 2))

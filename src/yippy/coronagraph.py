@@ -32,7 +32,7 @@ from .header import HeaderData
 from .interpolation import SincOptions
 from .logger import logger
 from .performance import resolve_leakage_rule
-from .sampling import STELLAR_RECONSTRUCTION, fraction_image
+from .sampling import STELLAR_RECONSTRUCTION, fraction_image, stellar_on_grid
 from .scene import (
     DENSE_BATCH,
     AbstractSceneOperator,
@@ -286,6 +286,26 @@ class Coronagraph(AbstractTableCoronagraph):
             self._host.stellar_intens.measure,
             reconstruction=STELLAR_RECONSTRUCTION,
         )
+
+    def stellar_map(self, wavelength_nm, stellar_diameter_lod, *, grid=None):
+        """Per-pixel stellar fraction on grid, using the stellar product's frame.
+
+        The native map holds point samples of the intensity. On a grid each
+        pixel is the integral of their cubic spline over the pixel footprint,
+        floored at a tenth of the linear footprint integral so that no pixel
+        is negative or zero; the floor binds only where the spline rings.
+
+        Args:
+            wavelength_nm: Wavelength in nm; ignored by this monochromatic table.
+            stellar_diameter_lod: Angular diameter of the star in lambda/D.
+            grid: Grid the Image is returned on; None keeps the native samples.
+
+        Returns:
+            Stellar flux fraction per pixel, or the native density when ``grid``
+            is None.
+        """
+        image = self._native_stellar_map(stellar_diameter_lod)
+        return image if grid is None else stellar_on_grid(image, grid)
 
     def _native_source_psfs(self, x_lod, y_lod):
         if hasattr(x_lod, "unit") or hasattr(y_lod, "unit"):

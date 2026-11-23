@@ -1,15 +1,55 @@
 """Detector sampling conventions for native FITS images and delivery planes."""
 
+from dataclasses import replace
+
+import jax.numpy as jnp
+from optixstuff.coronagraph import on_grid
 from optixstuff.grids import Image, Measure
 
-# The stellar halo spans about eight decades from the bright field to the dark hole,
-# so a band-limited (sinc) interpolant rings at the level of the hole floor along
-# the rows and columns of the bright pixels and goes negative. Linear cannot. A log
-# interpolant is positive too but biased low: between two pixels it returns their
-# geometric mean, and a speckle field varies by large factors pixel to pixel. Rebuilding
-# dropped pixels of a shipped map from every second pixel, the dark-hole flux (2.5 to
-# 16 lambda/D) is low by 8 to 15 % with log and within 1 % with linear.
-STELLAR_RECONSTRUCTION = "linear"
+# A stored stellar map holds the intensity sampled at each cell center times the
+# cell area, not the integral over the cell; a detector pixel integrates the
+# intensity over its footprint. The map is therefore read as the integral of a
+# reconstruction of the samples over each pixel, at every pitch including the
+# native one. The halo spans about eight decades and the table ends inside the
+# bright field, so a band-limited (sinc) reconstruction carries the cut into the
+# dark hole and rings below its floor. The not-a-knot cubic spline is accurate on
+# a field band-limited at the table pitch (about 0.05 percent at the median and
+# 0.3 percent at the 95th percentile per pixel in the hole) and uses the table
+# alone at its edge; linear smooths the hole by several percent per pixel.
+STELLAR_RECONSTRUCTION = "cubic_spline"
+
+# The spline has negative lobes, so the pixel read is floored at this fraction of
+# the linear footprint read, which has no negative weight. The maximum of two
+# continuous reads is continuous in pointing, wavelength and stellar diameter,
+# with a kink where the floor starts to bind. On eac1_aavc_2d the floor binds
+# nowhere between 1 and 24 lambda/D: only at the central null of the largest
+# stars and within four cells of the table edge, at pitches finer than the
+# table.
+STELLAR_FLOOR_FRACTION = 0.1
+
+
+def stellar_on_grid(image, grid):
+    """Read a native stellar map onto a detector grid, floored to stay positive.
+
+    The pixel value is the larger of the declared reconstruction's footprint
+    integral and ``STELLAR_FLOOR_FRACTION`` times the linear footprint integral
+    of the same samples. The linear margin (0.5 cell) lies inside the cubic
+    spline's (2 cells), so the floor does not change the supported pixels.
+
+    Args:
+        image: Native stellar map, a point density with the stellar
+            reconstruction.
+        grid: Detector grid to read onto.
+
+    Returns:
+        Cell-integrated stellar flux fractions on ``grid``, declaring the
+        reconstruction of ``image``.
+    """
+    read = on_grid(image, grid)
+    floor = on_grid(replace(image, reconstruction="linear"), grid)
+    return replace(
+        read, data=jnp.maximum(read.data, STELLAR_FLOOR_FRACTION * floor.data)
+    )
 
 
 def sample_units(sample_kind, grid):
@@ -45,8 +85,9 @@ def fraction_image(
     """Recover the native image measure from per-pixel photon diagnostics.
 
     reconstruction overrides the default (nearest for integrals, band_limited for
-    densities); a stellar halo spanning many decades declares linear, because a
-    band-limited interpolant rings below the dark-hole floor.
+    densities); a stellar halo spanning many decades declares the cubic spline,
+    because a band-limited interpolant of a table cut inside the bright field
+    rings below the dark-hole floor.
 
     Args:
         data: Per-pixel photon fractions, with any leading axes named by ``axes``

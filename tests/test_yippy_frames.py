@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from footprint_truth import assert_stellar_read, axis_positions, floored_spline_read
 from optixstuff.grids import Image, PixelGrid, resample
 from synthetic_yip import synthetic_coronagraph
 
@@ -14,7 +15,16 @@ from yippy import open_yip
 
 
 def test_separate_stellar_and_sky_frames(cached_diameter_coro):
-    """Exact algebra: table images and explicit resampling use each product grid."""
+    """Fails if a table image is read on another product's grid or frame.
+
+    The sky map is checked by exact algebra against an explicit resample of
+    the sky product on its own grid. The stellar truth is the SciPy footprint
+    read of the native samples on the stellar grid (``footprint_truth``), with
+    the geometry typed from the grids and compared to rounding on every pixel
+    (the edge as documented, see ``test_shared_frame_bit_equality``); the
+    stellar grid, the sky grid and the native grid all differ, so a read on
+    the wrong one moves the pixels and the scale.
+    """
     backend = cached_diameter_coro
     sg = PixelGrid.regular(backend.grid.shape, 0.4, "lod", frame=backend.grid.frame)
     kg = PixelGrid.regular(backend.grid.shape, 0.3, "lod", frame=backend.grid.frame)
@@ -25,12 +35,12 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
         (20, 22), 0.35, "lod", frame=backend.grid.frame, center=(10.2, 9.7)
     )
     stellar = backend.stellar_map(None, 0.1).integrated()
-    expected = resample(stellar, target)
-    np.testing.assert_array_equal(
-        coro.stellar_map(500.0, 0.1, grid=target).data, expected.data
-    )
-    wrong = resample(replace(stellar, grid=backend.grid), target)
-    assert not np.allclose(expected.data, wrong.data, atol=0.0, rtol=1e-3)
+    assert stellar.grid == sg
+    actual = coro.stellar_map(500.0, 0.1, grid=target).data
+    assert_stellar_read(actual, stellar.data, sg, target)
+    # The truth separates the grids: read on the native grid it differs.
+    wrong = floored_spline_read(stellar.data, axis_positions(backend.grid, target))
+    assert not np.allclose(actual, wrong, atol=0.0, rtol=1e-3)
     np.testing.assert_array_equal(
         coro.uniform_sky_map(500.0, grid=target).data,
         resample(sky, target).data,
@@ -48,36 +58,46 @@ def test_separate_stellar_and_sky_frames(cached_diameter_coro):
         != separate_stellar.grid.frame
     )
     other_grid = replace(target, frame=other_frame)
-    np.testing.assert_array_equal(
+    assert_stellar_read(
         coro.stellar_map(500.0, 0.1, grid=other_grid).data,
-        resample(
-            replace(stellar, grid=sg.to_arcsec(500.0)), other_grid.to_arcsec(600.0)
-        ).data,
+        stellar.data,
+        sg.to_arcsec(500.0),
+        other_grid.to_arcsec(600.0),
     )
     # Frame conversion is explicit angular geometry; no inferred area diameter.
     angular = target.to_arcsec(500.0)
-    np.testing.assert_allclose(
+    assert_stellar_read(
         coro.on_axis_psf(500.0, angular).data,
-        resample(
-            replace(
-                backend.stellar_map(None, 0.0).integrated(), grid=sg.to_arcsec(500.0)
-            ),
-            angular,
-        ).data,
-        rtol=8 * np.finfo(np.float32).eps,
+        backend.stellar_map(None, 0.0).integrated().data,
+        sg.to_arcsec(500.0),
+        angular,
     )
 
 
 def test_shared_frame_bit_equality(cached_diameter_coro):
-    """On the native grid, products are box integrals with no centre change.
+    """Fails if a product on its native grid changes frame, center or read.
 
-    The expected value resamples the native Image onto its own grid; a frame,
-    centre or reconstruction change on the consumer side breaks bit equality.
+    The sky and source products reproduce an explicit resample of the native
+    Image onto its own grid bit for bit. The stellar map is a point density
+    read as the footprint integral of its reconstruction even on its own grid,
+    so it is not the stored sample: its truth is the SciPy footprint read of
+    the native samples (``footprint_truth``), compared to rounding on every
+    pixel. The fixture's stellar table is uniform, so a center or
+    reconstruction change shows only in the two edge rings, where the truth
+    follows the documented edge (the spline restricted to the table
+    footprint, zero beyond it for the linear floor); the full array is
+    compared for that reason.
     """
     c = cached_diameter_coro
     g = c.grid
+    assert c.stellar_grid == g
+    assert_stellar_read(
+        c.stellar_map(500.0, 0.1, grid=g).data,
+        c.stellar_map(None, 0.1).integrated().data,
+        g,
+        g,
+    )
     for actual, expected in [
-        (c.stellar_map(500.0, 0.1, grid=g), c.stellar_map(None, 0.1).integrated()),
         (c.uniform_sky_map(500.0, grid=g), c.sky_trans),
         (
             c.source_psfs(500.0, jnp.array([1.0]), jnp.array([0.0]), grid=g).image,
