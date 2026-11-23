@@ -16,6 +16,7 @@ from yippy import (
     BlendSceneOperator,
     MaskedSceneOperator,
     SceneCoronagraph,
+    fetch_yip,
     open_yip,
 )
 from yippy.scene import AbstractSceneOperator
@@ -63,8 +64,12 @@ def test_render_matches_the_dense_contraction(tmp_path, kind, symmetric):
     The synthetic packages put nodes between source centers, so every read blends
     shifted neighbors; the unsymmetric case has no reflection classes and sources
     in all four quadrants. Sources stay clear of the window edge: there the
-    dense read keeps Fourier ringing of the truncated PSF that the node form
-    drops (0.2 percent of one source's peak in the outer rings).
+    sub-pixel shift of a truncated PSF rings below zero inside its window, which
+    each dense read clips and the linear render keeps (1e-4 of the peak with the
+    whole grid lit). Away from it they differ by the smaller negative ringing
+    the reads clip and, for the radial table, by the sub-pixel remainder a
+    stored PSF shares across sources: measured 9e-6 of the peak and 4e-6 of the
+    flux, in float32 and float64 alike.
     """
     package = write_synthetic_yip(
         tmp_path / kind,
@@ -80,9 +85,8 @@ def test_render_matches_the_dense_contraction(tmp_path, kind, symmetric):
     flux = np.zeros(model.grid.shape)
     flux[8:24, 8:24] = np.random.default_rng(0).uniform(0.5, 1.5, (16, 16))
     peak_error, flux_error = _agreement(model, flux)
-    print(kind, symmetric, peak_error, flux_error)
-    assert peak_error < 1e-3
-    assert flux_error < 1e-4
+    assert peak_error < 3e-5
+    assert flux_error < 1e-5
 
 
 @pytest.mark.medium(reason="1000 dense reference PSFs and one 256-pixel build, 12 s")
@@ -90,9 +94,10 @@ def test_shipped_package_blocks_size_and_estimate(coro):
     """Fails if the node form drifts from the per-source blend on real 2D PSFs.
 
     Three blocks of sources (core, mid field, far field) are lit at random flux;
-    agreement must hold to 1e-3 of the image peak and 1e-4 of the total flux
-    (a cube-free build measured 3e-4 and 5e-5). The built arrays must match the
-    reported resident bytes and stay far below the per-source cube (8.6 GB).
+    agreement must hold to 1e-5 of the image peak and of the total flux, the
+    float32 rounding of the two paths (measured 1.1e-6 and 1.9e-6). The built
+    arrays must match the reported resident bytes and stay far below the
+    per-source cube (8.6 GB).
     """
     model = coro.with_scene_operator()
     rng = np.random.default_rng(0)
@@ -103,8 +108,8 @@ def test_shipped_package_blocks_size_and_estimate(coro):
         cy, cx = (n // 2 for n in flux.shape)
         flux[cy + rows, cx + cols] = rng.uniform(0.5, 1.5, rows.size)
         peak_error, flux_error = _agreement(model, flux)
-        assert peak_error < 1e-3
-        assert flux_error < 1e-4
+        assert peak_error < 1e-5
+        assert flux_error < 1e-5
     estimate = coro.scene_operator_bytes()
     assert model.operators[0].nbytes == estimate["resident"] < 400e6
     assert estimate["total"] == estimate["resident"] + estimate["scratch"]
@@ -322,24 +327,42 @@ def test_nonfinite_flux_is_zero_and_invalid(syn_coro_2d):
     assert bool(jnp.all(jnp.isfinite(bad.image.data)))
 
 
-def test_scene_grid_reaches_the_node_hull(tmp_path):
+@pytest.fixture(scope="module")
+def wide_x64(tmp_path_factory):
+    """A float64 package whose nodes reach 3 times the stamp half-width.
+
+    Its Gaussian PSFs (sigma 2 lambda/D on a 16 lambda/D stamp) are nonzero at
+    the stamp edge, so a translated node carries its truncation into the image.
+    """
+    with jax.enable_x64():
+        package = write_synthetic_yip(
+            tmp_path_factory.mktemp("wide") / "wide",
+            kind="2dq",
+            npix=64,
+            pixscale=0.25,
+            max_offset_lod=24.0,
+            offset_step_lod=1.0,
+            psf_sigma_lod=2.0,
+            occulter_floor=1.0,
+        )
+        return open_yip(package.path).prepare().with_scene_operator()
+
+
+@pytest.fixture(scope="module")
+def eac1_x64():
+    """The shipped 2D package in float64 with its scene operator."""
+    with jax.enable_x64():
+        return open_yip(fetch_yip("eac1_aavc_2d")).prepare().with_scene_operator()
+
+
+def test_scene_grid_reaches_the_node_hull(wide_x64):
     """Fails if sources between the stamp edge and the outermost node are dropped.
 
     The nodes reach 3 times the stamp half-width. The scene grid must hold the
-    cells out to the hull, the operator must read them like the per-source blend
-    does, and the operator covers exactly the cells inside the hull.
+    cells out to the hull, and the operator covers exactly the cells inside the
+    hull.
     """
-    package = write_synthetic_yip(
-        tmp_path / "wide",
-        kind="2dq",
-        npix=64,
-        pixscale=0.25,
-        max_offset_lod=24.0,
-        offset_step_lod=1.0,
-        psf_sigma_lod=2.0,
-        occulter_floor=1.0,
-    )
-    model = open_yip(package.path).prepare()
+    model = wide_x64
     stamp = model.grid
     grid = model.scene_grid
     assert grid.shape[0] > stamp.shape[0] and grid.shape[1] > stamp.shape[1]
@@ -351,23 +374,106 @@ def test_scene_grid_reaches_the_node_hull(tmp_path):
     np.testing.assert_allclose(
         x[top, left : left + nx], np.asarray(stamp.coordinates()[0])[0]
     )
-    operator = model.with_scene_operator()
-    backend = model._offaxis_backend
-    inside = np.asarray(backend.in_source_domain(x, y))
-    np.testing.assert_array_equal(np.asarray(operator.operators[0].covered), inside)
-    # A source past the stamp edge puts its wing on the stamp. The dense read
-    # rings in the outer wings of such a PSF (it translates the truncated array
-    # by Fourier phase), so compare the image peak, which is clear of the edge.
-    for px, py in ((8.9, 0.9), (10.1, 4.4)):
-        cell = np.unravel_index(np.argmin((x - px) ** 2 + (y - py) ** 2), x.shape)
-        flux = np.zeros(grid.shape)
-        flux[cell] = 1.0
-        image, covered = operator.operators[0].render(jnp.asarray(flux), grid)
-        reference = np.asarray(
-            backend._create_psfs(jnp.asarray([x[cell]]), jnp.asarray([y[cell]]))
-        )[0]
-        assert bool(covered[cell])
-        assert np.unravel_index(np.argmax(image), image.shape) == np.unravel_index(
-            np.argmax(reference), reference.shape
+    inside = np.asarray(model._offaxis_backend.in_source_domain(x, y))
+    np.testing.assert_array_equal(np.asarray(model.operators[0].covered), inside)
+
+
+_EAC1 = pytest.mark.medium(reason="float64 load and scene operator of eac1_aavc_2d")
+
+
+@pytest.mark.parametrize(
+    ("model_name", "cell_lod"),
+    [
+        ("wide_x64", (2.1, 1.4)),
+        ("wide_x64", (-7.9, 3.1)),
+        ("wide_x64", (23.9, -0.9)),
+        pytest.param("eac1_x64", (10.125, 5.125), marks=_EAC1),
+        pytest.param("eac1_x64", (-31.875, 0.125), marks=_EAC1),
+        pytest.param("eac1_x64", (61.875, 0.125), marks=_EAC1),
+    ],
+    ids=[
+        "synthetic-interior",
+        "synthetic-stamp-edge",
+        "synthetic-hull-edge",
+        "eac1-interior",
+        "eac1-stamp-edge",
+        "eac1-hull-edge",
+    ],
+)
+def test_a_point_read_is_the_clipped_render_of_its_cell(model_name, cell_lod, request):
+    """Fails if a point read leaves light where its nodes' stored windows end.
+
+    One lit cell renders the same blend as the point read of that source: the
+    same nodes, weights and shifts, each node zero beyond its stored window
+    translated by the whole-pixel part of its shift. The read is that render
+    clipped at zero, to 1e-12 of its peak (basis: exact-algebra, float64; the
+    two differ only in the order of the Fourier transforms). Cells sit inside
+    the stamp, at its edge (the mirrored quadrant) and at the edge of the node
+    hull. Before the read cut each node to its window it differed by up to 0.2
+    of the peak on the synthetic table and 3e-2 on eac1_aavc_2d at the hull
+    edge, and by 9e-4 and 8e-6 inside the stamp.
+    """
+    model = request.getfixturevalue(model_name)
+    grid = model.scene_grid
+    x, y = (np.asarray(c, np.float64) for c in grid.coordinates())
+    cell = np.unravel_index(
+        np.argmin((x - cell_lod[0]) ** 2 + (y - cell_lod[1]) ** 2), x.shape
+    )
+    with jax.enable_x64():
+        flux = jnp.zeros(grid.shape).at[cell].set(1.0)
+        image, covered = (np.asarray(a) for a in model.operators[0].render(flux, grid))
+        read = np.asarray(
+            model._offaxis_backend._create_psfs(
+                jnp.asarray([x[cell]]), jnp.asarray([y[cell]])
+            )[0]
         )
-        np.testing.assert_allclose(image.max(), reference.max(), rtol=2e-3)
+    assert covered[cell]
+    peak = read.max()
+    assert peak > 0
+    np.testing.assert_allclose(read, np.maximum(image, 0.0), rtol=0, atol=1e-12 * peak)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_lod", "outside"),
+    [
+        # Nodes on a 4 lambda/D grid; the query blends (4, 0) and (4, 4), both
+        # shifted +5.5 pixels in x, so the first columns lie beyond both.
+        ("2dq", (5.375, 0.0), np.s_[:, :5]),
+        ("2dq", (0.0, 5.375), np.s_[:5, :]),
+        # Below the first radial node (4 lambda/D) the read is that node alone,
+        # shifted -5.5 pixels: the last columns lie beyond it.
+        ("1d", (2.625, 0.0), np.s_[:, -5:]),
+    ],
+    ids=["polar-x", "polar-y", "radial"],
+)
+def test_a_read_is_zero_beyond_the_stored_windows(tmp_path, kind, source_lod, outside):
+    """Fails if a read puts light where no stored PSF of its blend reaches.
+
+    Every node PSF is a Gaussian of sigma 4 lambda/D on a 8 lambda/D stamp, so
+    it is far from zero at the stamp edge. A read whose every neighbor is
+    translated by 5.5 pixels the same way has no data in the 5 rows or columns
+    shifted in from beyond the stored arrays: they must be 0 to 1e-12 of the
+    read's peak (basis: exact-algebra, the window cut leaves exact zeros).
+    Summing the shifted spectra before one inverse transform left the Fourier
+    tail of each truncated PSF there, 7e-3 to 7e-2 of the peak.
+    """
+    with jax.enable_x64():
+        package = write_synthetic_yip(
+            tmp_path / kind,
+            kind=kind,
+            npix=32,
+            psf_sigma_lod=4.0,
+            occulter_floor=1.0,
+            min_offset_lod=4.0 if kind == "1d" else 0.0,
+            max_offset_lod=8.0,
+            offset_step_lod=4.0,
+        )
+        backend = open_yip(package.path).prepare()._offaxis_backend
+        read = np.asarray(
+            backend._create_psfs(
+                jnp.asarray([source_lod[0]]), jnp.asarray([source_lod[1]])
+            )[0]
+        )
+    peak = read.max()
+    assert peak > 0
+    np.testing.assert_allclose(read[outside], 0.0, rtol=0, atol=1e-12 * peak)

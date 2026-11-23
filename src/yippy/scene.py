@@ -9,7 +9,13 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.fft import next_fast_len
 
-from ._jax_funcs import blend_pad, idw_read_plan, separable_read_plan
+from ._jax_funcs import (
+    _FRACTION_TOL,
+    _whole_pixel_shift,
+    blend_pad,
+    idw_read_plan,
+    separable_read_plan,
+)
 from ._precision import float_dtype
 from .logger import logger
 from .sinc.scene import AbstractSceneOperator
@@ -135,8 +141,6 @@ class MaskedSceneOperator(AbstractSceneOperator):
 _PRESHIFT_CHUNK = 8
 # Sources per host-side neighbor search.
 _PLAN_CHUNK = 8192
-# Fractional shifts that agree within this many pixels share one table row.
-_FRACTION_TOL = 1e-5
 # Sources per batch of the dense per-source build.
 DENSE_BATCH = 128
 
@@ -281,9 +285,9 @@ def _blend_plan(backend, grid, valid, itemsize):
         node, source, reflection = (np.zeros(1, int) for _ in range(3))
         weight, shift_x, shift_y = (np.zeros(1) for _ in range(3))
     # Integer part of each shift; the remainder is shared by a node's reads.
-    whole_x = np.floor(shift_x + 0.5 + _FRACTION_TOL)
-    whole_y = np.floor(shift_y + 0.5 + _FRACTION_TOL)
+    whole_x, whole_y = _whole_pixel_shift(shift_x), _whole_pixel_shift(shift_y)
     frac = np.stack((shift_y - whole_y, shift_x - whole_x), axis=1)
+    # Fractional shifts that agree within _FRACTION_TOL pixels share one table row.
     keys = np.column_stack((node, np.round(frac / (4 * _FRACTION_TOL)).astype(int)))
     rows, term = np.unique(keys, axis=0, return_inverse=True)
     term = term.reshape(-1)

@@ -597,6 +597,53 @@ def blend_pad(n_pixels):
     return n_pad + 1 if (n_pixels + 2 * n_pad) % 2 else n_pad
 
 
+# Shifts within this many pixels of a half-pixel boundary round up to the next
+# whole pixel, so a read and the scene operator split a shift the same way.
+_FRACTION_TOL = 1e-5
+
+
+def _whole_pixel_shift(shift):
+    """Whole-pixel part of a translation in pixels, leaving at most half a pixel.
+
+    Floor division keeps this valid for NumPy arrays on the host and traced
+    JAX arrays alike, so the point reader and the scene operator place a
+    stored PSF window at the same whole-pixel offset.
+    """
+    return (shift + 0.5 + _FRACTION_TOL) // 1
+
+
+def _blend_windows(spec, weights, shift_x, shift_y, n_pad, shape):
+    """Weighted sum of shifted neighbors, each zero outside its stored window.
+
+    A stored PSF carries no data beyond its array, so each translated neighbor
+    contributes only inside its stored window moved by the whole-pixel part of
+    its shift. Each neighbor is inverse transformed on its own: summing the
+    spectra first would leave the Fourier ringing of every truncated PSF in
+    pixels its window does not reach.
+
+    Args:
+        spec: Shifted neighbor spectra [K, H_pad, W_pad // 2 + 1], FFT along y
+            and real FFT along x.
+        weights: Blend weight of each neighbor [K].
+        shift_x: Shift of each neighbor along x, in pixels [K].
+        shift_y: Shift of each neighbor along y, in pixels [K].
+        n_pad: Zero padding added to each side of both axes, in pixels.
+        shape: Detector shape (H, W) of one stored PSF.
+
+    Returns:
+        The blended image on the stored PSF grid, shape (H, W).
+    """
+    h, w = shape
+    w_pad = w + 2 * n_pad
+    # Rows are cut before the x transform: each row's inverse is independent.
+    planes = jnp.fft.ifft(spec, axis=1)[:, n_pad : n_pad + h, :]
+    planes = jnp.fft.irfft(planes, n=w_pad, axis=2)[:, :, n_pad : n_pad + w]
+    rows = jnp.arange(h)[None, :, None] - _whole_pixel_shift(shift_y)[:, None, None]
+    cols = jnp.arange(w)[None, None, :] - _whole_pixel_shift(shift_x)[:, None, None]
+    inside = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
+    return jnp.sum(jnp.where(inside, planes, 0.0) * weights[:, None, None], axis=0)
+
+
 def separable_read_plan(
     x,
     y,
@@ -731,6 +778,8 @@ def synthesize_psf_separable(
 
     Optimized for speed and stability with even-sized padding.
     Uses flat_psfs with offset_to_flat_idx mapping for memory efficiency.
+    Each neighbor contributes only inside its stored window translated by the
+    whole-pixel part of its shift; beyond it the table has no data.
 
     For 1D input the neighbors are the tabulated PSFs along +x at the radial
     separation of (x, y). They are mirrored for x < 0 or y < 0 and translated,
@@ -786,9 +835,6 @@ def synthesize_psf_separable(
     pad_width = ((0, 0), (n_pad, n_pad), (n_pad, n_pad))
     neighbors = jnp.pad(neighbors, pad_width)
 
-    # Capture width for robust reconstruction
-    _, _h_pad, w_pad = neighbors.shape
-
     # FFT X (Real-to-Complex, Axis 2)
     # Output: (K, H_pad, W_pad//2 + 1)
     spec = jnp.fft.rfft(neighbors, axis=2)
@@ -808,20 +854,7 @@ def synthesize_psf_separable(
     phasor_y = jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
     spec = spec * phasor_y
 
-    # Weighted Sum (Collapse Neighbors)
-    # (K, H_freq, W_freq) -> (H_freq, W_freq)
-    summed_spec = jnp.sum(spec * weights[:, None, None], axis=0)
-
-    # IFFT Y
-    res = jnp.fft.ifft(summed_spec, axis=0)
-
-    # IFFT X (Complex-to-Real)
-    # Pass n=w_pad to ensure we reconstruct to the exact even size
-    res = jnp.fft.irfft(res, n=w_pad, axis=1)
-
-    # Unpad
-    h_orig = flat_psfs.shape[-2]
-    psf = res[n_pad : n_pad + h_orig, n_pad : n_pad + h_orig]
+    psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 
     if x_symmetric:
         psf = lax.cond(x < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, psf)
@@ -965,7 +998,9 @@ def synthesize_psf_idw(
 ):
     """Synthesize a PSF from polar-ring nodes by bilinear (radius, azimuth) blending.
 
-    See ``idw_read_plan`` for the weights. The result is a PSF, not a
+    See ``idw_read_plan`` for the weights. Each neighbor contributes only
+    inside its stored window translated by the whole-pixel part of its shift;
+    beyond it the table has no data. The result is a PSF, not a
     flux-normalized image.
 
     Args:
@@ -1013,16 +1048,7 @@ def synthesize_psf_idw(
     phasor_y = jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
     spec = spec * phasor_y
 
-    # Weighted Sum
-    summed_spec = jnp.sum(spec * weights[:, None, None], axis=0)
-
-    # IFFT
-    res = jnp.fft.ifft(summed_spec, axis=0)
-    res = jnp.fft.irfft(res, n=neighbors.shape[-1], axis=1)
-
-    # Unpad
-    h_orig = flat_psfs.shape[-2]
-    psf = res[n_pad : n_pad + h_orig, n_pad : n_pad + h_orig]
+    psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 
     if x_symmetric:
         psf = lax.cond(x < 0, lambda p: jnp.flip(p, axis=1), lambda p: p, psf)

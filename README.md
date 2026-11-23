@@ -178,7 +178,10 @@ The blend operator renders the scene with one FFT product per stored PSF, so
 it holds the stored PSFs rather than one PSF per source pixel (about 0.12 GB in
 float32 for `eac1_aavc_2d` on its scene grid, where a PSF per stamp-grid source
 takes 8.6 GB), and it is exactly linear in the source flux. A render may ring
-slightly below zero, so clip it where a nonnegative image is required.
+slightly below zero, so clip it where a nonnegative image is required. A stored
+PSF contributes only inside its own array translated to the source, in the
+render and in `source_psfs` alike, so the render of one lit cell clipped at
+zero is the PSF read of that source.
 
 Build a disk on `coro.scene_grid`. A uniform disk filled exactly to the edge of
 that grid still reads `valid` False, because the outermost cells lie just

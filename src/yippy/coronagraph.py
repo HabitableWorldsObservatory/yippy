@@ -428,7 +428,9 @@ class Coronagraph(AbstractTableCoronagraph):
             npix = int(self._host.npixels)
             resident = sy * sx * npix * npix * itemsize
             padded = npix + 2 * blend_pad(npix)
-            batch = DENSE_BATCH * 4 * padded * (padded // 2 + 1) * 2 * itemsize
+            # Per source: the four shifted neighbor spectra and their inverse
+            # along y, taken per neighbor.
+            batch = DENSE_BATCH * 2 * 4 * padded * (padded // 2 + 1) * 2 * itemsize
             # The cube is gathered on the host, then copied to the device.
             scratch = resident + batch
         else:
