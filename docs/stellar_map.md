@@ -103,6 +103,14 @@ supported = coverage(
 On the native grid this leaves out the two outer rings. The two cells mark the
 support boundary and are not an accuracy bound: the spline has no finite reach.
 
+The floored map also carries light beyond the table. The spline read is
+restricted to the table footprint, but the linear read of the floor is the
+integral of the zero-extended kernel sum and is not clipped, so pixels that
+overlap the half cell beyond the table edge receive a tenth of its tail: on the
+public AAVC map about 7.2e-4 of the supported sum. `coverage` marks those pixels unsupported,
+and the image route zeroes unsupported pixels; a consumer of `stellar_map`
+masks with `coverage` in the same way.
+
 ## Accuracy
 
 - **Per pixel.** On a band-limited speckle field with power up to the band edge,

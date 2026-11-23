@@ -6,34 +6,24 @@ import jax.numpy as jnp
 import numpy as np
 from footprint_truth import assert_stellar_read
 from optixstuff import MultiBandCoronagraph
-from optixstuff.grids import Measure, coverage
 from optixstuff.spectral import Band
-
-from yippy.sampling import STELLAR_RECONSTRUCTION
 
 
 def test_yippy_diameter_forwarding(cached_diameter_coro):
     """Fails if a gridded stellar map drops the diameter of its native samples.
 
     Truth: the SciPy footprint read of the native samples at each diameter
-    (``footprint_truth``), compared to rounding on the pixels the read
-    supports (corners two cells inside the table); the outer two rings depend
-    on the spline's end condition and are not a promised value.
+    (``footprint_truth``), compared to rounding on every pixel; the truth
+    implements the documented edge (the spline restricted to the table
+    footprint, zero beyond it for the linear floor).
     """
     c = cached_diameter_coro
-    supported = coverage(
-        c.stellar_grid,
-        c.grid,
-        reconstruction=STELLAR_RECONSTRUCTION,
-        measure=Measure.density("grid"),
-    )
     for d in (0.0, 0.1, 0.2):
         assert_stellar_read(
             c.stellar_map(500.0, d, grid=c.grid).data,
             c.stellar_map(None, d).integrated().data,
             c.stellar_grid,
             c.grid,
-            where=supported,
         )
     assert float(c.stellar_map(500.0, 0.2, grid=c.grid).data.sum()) > float(
         c.stellar_map(500.0, 0.0, grid=c.grid).data.sum()

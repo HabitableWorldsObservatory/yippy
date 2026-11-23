@@ -149,6 +149,11 @@ def test_stellar_read_is_positive_and_its_floor_idle_in_the_hole(shipped_coro):
     map; the floor binds only inside 0.3 lambda/D and beyond 31 lambda/D,
     within four cells of the table edge. Mutant: a floor at the full linear
     read binds through the hole.
+
+    2b is scoped to the AAVC map. On eac1_optimal_order_6_1d at 0.03125
+    lambda/D the floor binds on 14 pixels at 4.11 to 4.20 lambda/D for the
+    point star, whose map sums to 1.4e-27 of the unocculted star: the spline
+    rings on numerical zero there and the floor does what it is for.
     """
     coro = shipped_coro
     for pitch in SUPPORT_PITCHES:
@@ -169,6 +174,11 @@ def test_stellar_read_is_positive_and_its_floor_idle_in_the_hole(shipped_coro):
 @pytest.mark.medium(reason="21 pointings of a 1024^2 grid, three reads each, 4 s")
 def test_stellar_read_is_continuous_where_the_floor_binds(shipped_coro):
     """Fails if the floor switches reads instead of taking their maximum.
+
+    This proves that the floor is a maximum and not a switch. It does not test
+    continuity by itself: the continuity of each read in pointing is
+    optixstuff's ``test_no_switch_at_equal_pitch``, and a maximum of two
+    continuous reads is continuous.
 
     (2c) A pointing offset swept along the diagonal in 20 steps of 0.05 cell,
     at 0.0625 lambda/D for the 1 lambda/D star, where the floor binds at the
