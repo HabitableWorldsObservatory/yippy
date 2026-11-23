@@ -100,12 +100,12 @@ def test_synthetic_performance_agrees_in_float64(synthetic_1d):
         grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
         for field, method in [
             ("throughput", lambda x: coro.curves().evaluate("throughput", x)),
-            ("raw_contrast", lambda x: coro.curves().evaluate("raw_contrast", x)),
+            ("raw_contrast", lambda x: coro.curves().evaluate("raw_contrast", x, 0.0)),
             ("core_area_lod2", lambda x: coro.curves().evaluate("core_area_lod2", x)),
         ]:
             expected = PchipInterpolator(
                 coro.curves().separation_lod,
-                np.log10(getattr(coro.curves(), field))
+                np.log10(getattr(coro.curves(), field)[0])
                 if field == "raw_contrast"
                 else getattr(coro.curves(), field),
             )

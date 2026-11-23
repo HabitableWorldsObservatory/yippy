@@ -437,9 +437,9 @@ def test_table_consumer(admitted):
     """Fails if the table consumer rescales densities or resamples off its frame."""
     host = _YIPData(admitted.package, interpolation="sinc")
     # The record stores density per (lambda/D)^2: no pitch factor.
-    density = host.performance.evaluate("leakage_density_lod2", 0.0)
+    density = host.performance.evaluate("leakage_density_lod2", 0.0, 0.0)
     np.testing.assert_allclose(
-        admitted.curves().evaluate("leakage_density_lod2", 0.0) / 30.0,
+        admitted.curves().evaluate("leakage_density_lod2", 0.0, 0.0) / 30.0,
         density / 30.0,
         rtol=0,
     )

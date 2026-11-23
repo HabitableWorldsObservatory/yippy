@@ -45,8 +45,10 @@ def test_yippy_diameter_jit_and_vmap(cached_diameter_coro):
         return c.stellar_map(500.0, d, grid=c.grid).data
 
     np.testing.assert_array_equal(
-        jax.jit(lambda s: c.curves().evaluate("leakage_fraction", s))(jnp.array(1.0)),
-        c.curves().evaluate("leakage_fraction", jnp.array(1.0)),
+        jax.jit(lambda s: c.curves().evaluate("leakage_fraction", s, 0.0))(
+            jnp.array(1.0)
+        ),
+        c.curves().evaluate("leakage_fraction", jnp.array(1.0), 0.0),
     )
     diameters = jnp.array([0.0, 0.1, 0.2])
     expected = jnp.stack([f(d) for d in diameters])

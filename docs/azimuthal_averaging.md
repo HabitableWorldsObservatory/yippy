@@ -123,7 +123,7 @@ a separation, and a post-processing factor `ppf`.
 
 ```python notest
 record = coro.curves(rule, leakage_rule="azimuthal_ring_mean")
-residual_density = record.evaluate("leakage_density_lod2", separation) / ppf
+residual_density = record.evaluate("leakage_density_lod2", separation, 0.0) / ppf
 ```
 
 See also: [Noise Floor Conventions](examples/06_Noise_Floor_Conventions.ipynb)

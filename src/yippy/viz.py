@@ -4,7 +4,11 @@ Style activation and figure saving belong to the caller. Importing this module
 does not load eyepiece or Matplotlib or change the active style.
 """
 
-from optixstuff.performance import PerformanceCurves, SampledProfile
+from optixstuff.performance import (
+    DIAMETER_QUANTITIES,
+    PerformanceCurves,
+    SampledProfile,
+)
 
 __all__ = ["plot_core_mean_intensity", "plot_performance_curve"]
 
@@ -45,6 +49,7 @@ def plot_performance_curve(
     values=None,
     *,
     metric=None,
+    stellar_diameter_lod=None,
     ax=None,
     label=None,
     line_kw=None,
@@ -57,6 +62,9 @@ def plot_performance_curve(
         metric: Record field for throughput, collecting area, leakage fraction
             or leakage density (mean or variance), or raw_contrast. A profile
             supplies its own quantity. Otherwise the default is throughput.
+        stellar_diameter_lod: Stellar diameter in lambda/D at which a leakage
+            quantity or raw_contrast of a record is drawn; required when the
+            record is tabulated at several diameters.
         ax: Optional single destination axes; None creates a figure and axes.
         label: Optional series label for caller-managed legends or labels.
         line_kw: Properties routed to the eyepiece line primitive.
@@ -79,7 +87,11 @@ def plot_performance_curve(
                     f"select a metric stored in the record; got {metric!r}"
                 )
             separations = curves_or_separations.separation_lod
-            values = getattr(curves_or_separations, metric)
+            values = curves_or_separations.evaluate(
+                metric,
+                separations,
+                stellar_diameter_lod if metric in DIAMETER_QUANTITIES else None,
+            )
         else:
             separations = curves_or_separations
             if values is None:

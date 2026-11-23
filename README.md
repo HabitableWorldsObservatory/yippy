@@ -203,7 +203,11 @@ routes read the stored PSF grid.
 The corresponding variance moments are `throughput_variance`,
 `core_area_variance_lod2`, `leakage_fraction_variance`, and
 `leakage_density_variance_lod2`.
-Use `record.evaluate(field, separation_lod)` to interpolate. Throughput and
+Use `record.evaluate(field, separation_lod)` to interpolate; the leakage and
+contrast fields take the star's diameter in lambda/D as a third argument,
+`record.evaluate("leakage_density_lod2", separation_lod, 0.0)`, because the
+record holds one leakage profile per stellar diameter of the product
+(`stellar_diameters_lod`). Throughput and
 area use linear-value PCHIP; leakage and contrast use log-value PCHIP. The
 fields interpolate independently. Their contrast identity holds at measured
 knots: contrast = leakage_density * core_area / throughput.
@@ -243,7 +247,7 @@ from yippy.export import export_ayo_csv, export_exosims
 ppf = 30.0
 record = coro.curves()
 contrast_noise = np.maximum(np.abs(record.evaluate("raw_contrast", 5.0)), 4e-10) / ppf
-density_noise = record.evaluate("leakage_density_lod2", 5.0) / ppf
+density_noise = record.evaluate("leakage_density_lod2", 5.0, 0.0) / ppf
 export_exosims(coro)
 export_ayo_csv(coro, "output.csv", ppf)
 ```

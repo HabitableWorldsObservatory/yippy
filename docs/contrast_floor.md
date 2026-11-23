@@ -23,7 +23,7 @@ EXOSIMS noise convention. It changes neither the stored curve nor the PSFs,
 aperture throughput, aperture area, stellar leakage, or sky transmission.
 The AYO CSV noise-floor column gives the exported point-source contrast
 divided by `ppf`. The corresponding residual density is
-`curves.evaluate("leakage_density_lod2", separations) / ppf`;
+`curves.evaluate("leakage_density_lod2", separations, 0.0) / ppf`;
 per-stellar-pixel ring intensity is read with
 `yippy.performance.stellar_intensity_curves` as
 `stellar_intensity_curves(coro).evaluate(separations)`.

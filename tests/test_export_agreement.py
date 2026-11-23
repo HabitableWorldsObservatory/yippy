@@ -38,7 +38,9 @@ def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
         data, header = fits.getdata(
             tmp_path / "exosims" / f"{filename}.fits", header=True
         )
-        expected = record.evaluate(quantity, separations)
+        expected = record.evaluate(
+            quantity, separations, 0.0 if quantity == "raw_contrast" else None
+        )
         np.testing.assert_array_equal(data[:, 0], separations)
         np.testing.assert_allclose(data[:, 1], expected, rtol=tolerance, atol=0)
         np.testing.assert_allclose(
@@ -56,7 +58,7 @@ def test_exports_agree_with_record_between_knots(syn_coro_1d, tmp_path):
     )
     np.testing.assert_allclose(
         fits.getdata(tmp_path / "exosims/core_mean_intensity.fits")[:, 1],
-        record.evaluate("leakage_density_lod2", separations)
+        record.evaluate("leakage_density_lod2", separations, 0.0)
         * coro.stellar_grid.pixel_area,
         rtol=tolerance,
         atol=0,
@@ -160,6 +162,7 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
         leakage_density_lod2=np.array([1e-08, 1e-10]),
         leakage_density_variance_lod2=np.array([1e-08, 1e-10]),
         raw_contrast=np.array([1e-11, 1e-13]),
+        stellar_diameters_lod=None,
     )
     coro = eqx.tree_at(lambda c: c._records, coro, (updated,))
     record = coro.curves()
@@ -174,7 +177,10 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
         ("leakage_density_lod2", 1e-9),
     ):
         np.testing.assert_allclose(
-            record.evaluate(quantity, separations), [midpoint], rtol=tolerance, atol=0
+            record.evaluate(quantity, separations, 0.0),
+            [midpoint],
+            rtol=tolerance,
+            atol=0,
         )
 
     plain = export_ayo_csv(
@@ -193,4 +199,4 @@ def test_log_interpolation_and_explicit_contrast_floor(syn_coro_1d, tmp_path):
     np.testing.assert_allclose(plain_data[:, 1], [1e-12], rtol=tolerance, atol=0)
     np.testing.assert_array_equal(floor_data[:, 1], [1e-10])
     np.testing.assert_allclose(floor_data[:, 2], [1e-10 / 30], rtol=tolerance, atol=0)
-    np.testing.assert_array_equal(record.raw_contrast, [1e-11, 1e-13])
+    np.testing.assert_array_equal(record.raw_contrast, [[1e-11, 1e-13]])

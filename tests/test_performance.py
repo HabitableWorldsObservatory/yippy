@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from conftest import requires_available_yip
 from optixstuff.apertures import Circular, HalfMaximum
-from optixstuff.performance import PerformanceCurves
+from optixstuff.performance import DIAMETER_QUANTITIES, PerformanceCurves
 from scipy.interpolate import PchipInterpolator, make_interp_spline
 
 from yippy import open_yip
@@ -166,7 +166,9 @@ class TestPreparedPerformanceCurves:
         floor = 1e-9
         result = coro.curves()
         assert np.all(
-            np.maximum(result.evaluate("raw_contrast", result.separation_lod), floor)
+            np.maximum(
+                result.evaluate("raw_contrast", result.separation_lod, 0.0), floor
+            )
             >= floor
         )
         assert np.any(result.raw_contrast < floor)
@@ -189,45 +191,60 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
     coro, record = performance_interpolation
     with pytest.raises(TypeError, match="interp_order"):
         coro.package.prepare(interp_order=1)
-    for name in (
-        "throughput",
-        "throughput_variance",
-        "core_area_lod2",
-        "core_area_variance_lod2",
-        "raw_contrast",
-        "leakage_fraction",
-        "leakage_fraction_variance",
-        "leakage_density_lod2",
-        "leakage_density_variance_lod2",
-    ):
-        values = getattr(record, name)
-        is_log = record.interpolation[name] == "log"
-        y = np.log10(np.maximum(values, 1e-300)) if is_log else values
-        nodes = record.separation_lod
-        grid = np.linspace(nodes[0], nodes[-1], 301)
-        expected = PchipInterpolator(nodes, y)(grid)
-        if is_log:
-            expected = 10**expected
-        np.testing.assert_allclose(
-            record.evaluate(name, grid), expected, rtol=1e-13, atol=0
-        )
+    with jax.enable_x64():
+        for name in (
+            "throughput",
+            "throughput_variance",
+            "core_area_lod2",
+            "core_area_variance_lod2",
+            "raw_contrast",
+            "leakage_fraction",
+            "leakage_fraction_variance",
+            "leakage_density_lod2",
+            "leakage_density_variance_lod2",
+        ):
+            # A leakage quantity is read at the first tabulated diameter, a point star.
+            by_diameter = name in DIAMETER_QUANTITIES
+            values = getattr(record, name)[0] if by_diameter else getattr(record, name)
+            is_log = record.interpolation[name] == "log"
+            y = np.log10(np.maximum(values, 1e-300)) if is_log else values
+            nodes = record.separation_lod
+            grid = np.linspace(nodes[0], nodes[-1], 301)
+            expected = PchipInterpolator(nodes, y)(grid)
+            if is_log:
+                expected = 10**expected
+            np.testing.assert_allclose(
+                record.evaluate(name, grid, 0.0 if by_diameter else None),
+                expected,
+                rtol=1e-13,
+                atol=0,
+            )
 
 
 def test_performance_interpolation_linear_tails(performance_interpolation):
     """Fails if tail extrapolation uses the end cubic (float64 bound 1e-13)."""
     coro, record = performance_interpolation
-    for name in ("throughput", "core_area_lod2", "raw_contrast"):
-        values, nodes = (
-            np.asarray(getattr(record, name)),
-            np.asarray(record.separation_lod),
-        )
-        is_log = record.interpolation[name] == "log"
-        y = np.log10(np.maximum(values, 1e-300)) if is_log else values
-        grid = np.array([nodes[0] - 0.1, nodes[-1] + 0.1, np.nan])
-        expected = make_interp_spline(nodes, y, k=1)(grid)
-        if is_log:
-            expected = 10**expected
-        np.testing.assert_allclose(record.evaluate(name, grid), expected, rtol=1e-13)
+    with jax.enable_x64():
+        for name in ("throughput", "core_area_lod2", "raw_contrast"):
+            by_diameter = name in DIAMETER_QUANTITIES
+            values, nodes = (
+                np.asarray(
+                    getattr(record, name)[0] if by_diameter else getattr(record, name)
+                ),
+                np.asarray(record.separation_lod),
+            )
+            is_log = record.interpolation[name] == "log"
+            y = np.log10(np.maximum(values, 1e-300)) if is_log else values
+            grid = np.array([nodes[0] - 0.1, nodes[-1] + 0.1, np.nan])
+            expected = make_interp_spline(nodes, y, k=1)(grid)
+            if is_log:
+                expected = 10**expected
+            np.testing.assert_allclose(
+                record.evaluate(name, grid, 0.0 if by_diameter else None),
+                expected,
+                rtol=1e-13,
+            )
+
     with jax.enable_x64():
         assert np.isnan(
             stellar_intensity_curves(coro, 0.3, interpolation="keys").evaluate(2.0)
@@ -293,7 +310,7 @@ def test_zero_on_axis_psf_builds_finite_curves(tmp_path, rule):
 
     zero = np.argmin(data.separation_lod)
     assert data.separation_lod[zero] == 0.0
-    assert data.raw_contrast[zero] == 1e20
+    assert np.all(data.raw_contrast[:, zero] == 1e20)
     assert np.all(np.isfinite(data.raw_contrast))
     assert float(coro.curves(rule).evaluate("throughput", 0.0)) == pytest.approx(
         0.0, abs=1e-12
@@ -309,4 +326,4 @@ def test_zero_on_axis_psf_builds_finite_curves(tmp_path, rule):
     np.testing.assert_allclose(
         float(coro.curves(rule).evaluate("throughput", far)), expected, rtol=0.05
     )
-    assert np.isfinite(float(coro.curves(rule).evaluate("raw_contrast", far)))
+    assert np.isfinite(float(coro.curves(rule).evaluate("raw_contrast", far, 0.0)))

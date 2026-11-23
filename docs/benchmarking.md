@@ -28,7 +28,9 @@ pixelization. Use `centre="peak"` for a circle following the refined local PSF
 peak. HalfMaximum includes only the region connected to the source peak.
 Declare the rules with `open_yip(path).prepare(rules=(...))`. Select a prepared
 record with `record = coro.curves(rule)` and evaluate every curve with
-`record.evaluate(name, separation_lod)`, including export samples. Generic
+`record.evaluate(name, separation_lod)`, including export samples; the
+leakage quantities and `raw_contrast` also take the star's angular diameter in
+lambda/D, `record.evaluate(name, separation_lod, stellar_diameter_lod)`. Generic
 `PerformanceCurves` interpolation and aperture photometry are owned by
 optixstuff. YIP loading, native offset selection, and export remain in yippy.
 
@@ -39,6 +41,13 @@ deprecated `azimuthal_ring_mean`; the rules are defined in optixstuff. Contrast 
 leakage density times aperture area divided by throughput. `iwa_lod` is the first
 half-maximum-throughput crossing. `data_extent_lod` is the array half-width;
 it does not specify an outer working angle.
+
+The leakage quantities and `raw_contrast` carry one profile per stellar diameter
+of the product, tabulated in `stellar_diameters_lod` (shape `(K, S)`), and are
+read between the tabulated diameters with the rule the image route uses for the
+stellar map (a cubic spline of the log intensity in diameter). Evaluating them
+needs the star's diameter; zero is a point star. A record made with
+`stellar_diameter_lod=d` holds one profile and serves only that star.
 
 ## Key Results
 

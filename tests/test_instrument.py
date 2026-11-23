@@ -72,7 +72,7 @@ class TestCoronagraph:
 
     def test_leakage_density_lod2_nonnegative(self, cached_diameter_coro):
         """The stellar density remains nonnegative."""
-        cmi = cached_diameter_coro.curves().evaluate("leakage_density_lod2", 5.0)
+        cmi = cached_diameter_coro.curves().evaluate("leakage_density_lod2", 5.0, 0.0)
         assert float(cmi) >= 0
 
     def test_uniform_sky_response_in_range(self, cached_diameter_coro):

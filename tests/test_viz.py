@@ -38,7 +38,7 @@ def curves():
         raw_contrast=density * area / throughput,
         iwa_lod=0.75,
         data_extent_lod=4.0,
-        stellar_diameter_lod=0.0,
+        stellar_diameters_lod=0.0,
     )
 
 
@@ -126,7 +126,9 @@ def test_viz_records_arrays_and_axes(curves):
             assert set(result.artists) <= ep.plot.ARTIST_KEYS
             line = result.artists["line"]
             np.testing.assert_array_equal(line.get_xdata(), [0.0, 2.0])
-            np.testing.assert_array_equal(line.get_ydata(), getattr(curves, metric))
+            np.testing.assert_array_equal(
+                line.get_ydata(), np.ravel(getattr(curves, metric))
+            )
             assert result.ax.get_ylabel()
         transmission = SampledProfile(
             [0.0, 2.0],

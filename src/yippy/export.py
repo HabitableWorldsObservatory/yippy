@@ -17,6 +17,12 @@ if TYPE_CHECKING:
     from .coronagraph import Coronagraph
 
 
+def _smallest_diameter(record):
+    """The smallest stellar diameter a record tabulates in lambda/D, or None."""
+    diameters = record.stellar_diameters_lod
+    return None if diameters is None else float(diameters[0])
+
+
 def export_exosims(
     coro: Coronagraph,
     units: str = "LAMBDA/D",
@@ -30,6 +36,8 @@ def export_exosims(
     requested separations (its knots by default). ``arcsec`` converts both
     separation and aperture area. The EXOSIMS core-mean-intensity file retains
     per-stellar-pixel flux fractions; LEAKRULE identifies the averaging rule.
+    The leakage and raw contrast are those of the smallest tabulated stellar
+    diameter, a point star for the shipped products.
     Array extent is not an outer working angle and is not exported as one.
 
     Args:
@@ -48,6 +56,7 @@ def export_exosims(
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
         raise ValueError("units must be 'LAMBDA/D' or 'arcsec'")
     performance = coro._records[0]
+    point_star = _smallest_diameter(performance)
     separations = np.asarray(
         performance.separation_lod if separations_lod is None else separations_lod,
         dtype=float,
@@ -98,9 +107,9 @@ def export_exosims(
         "core_thruput": performance.evaluate("throughput", separations),
         "core_area": np.asarray(performance.evaluate("core_area_lod2", separations))
         * angle_scale**2,
-        "raw_contrast": performance.evaluate("raw_contrast", separations),
+        "raw_contrast": performance.evaluate("raw_contrast", separations, point_star),
         "core_mean_intensity": np.asarray(
-            performance.evaluate("leakage_density_lod2", separations)
+            performance.evaluate("leakage_density_lod2", separations, point_star)
         )
         * stellar_pixel_area_lod2,
         "occ_trans": coro.uniform_sky_response(separations),
@@ -154,7 +163,8 @@ def export_ayo_csv(
     Point-source contrast is the selected mean leakage density times the
     mean collecting area divided by throughput. The noise-floor column is
     this contrast divided by ``ppf``, the post-processing factor the caller
-    assumes, including any requested contrast floor.
+    assumes, including any requested contrast floor. The leakage is that of the
+    smallest tabulated stellar diameter, a point star for the shipped products.
     Skytrans is the radial sky transmission.
 
     Separations are in lambda/D. A contrast floor applies only when explicitly
@@ -187,7 +197,11 @@ def export_ayo_csv(
         else separations_lod,
         dtype=float,
     )
-    contrast = np.asarray(coro._records[0].evaluate("raw_contrast", separations))
+    contrast = np.asarray(
+        coro._records[0].evaluate(
+            "raw_contrast", separations, _smallest_diameter(coro._records[0])
+        )
+    )
     if contrast_floor is not None:
         contrast = np.maximum(contrast, contrast_floor)
     throughput = coro._records[0].evaluate("throughput", separations)

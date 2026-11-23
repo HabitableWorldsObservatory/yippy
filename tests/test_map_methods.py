@@ -91,7 +91,7 @@ class TestNoiseFloorAyoMap:
         """Output shape matches (npix, npix)."""
         m = (
             coro.curves().evaluate(
-                "leakage_density_lod2", np.hypot(*coro.grid.coordinates())
+                "leakage_density_lod2", np.hypot(*coro.grid.coordinates()), 0.0
             )
             / 30.0
         )
@@ -101,13 +101,13 @@ class TestNoiseFloorAyoMap:
         """Result should scale inversely with ppf."""
         m30 = (
             coro.curves().evaluate(
-                "leakage_density_lod2", np.hypot(*coro.grid.coordinates())
+                "leakage_density_lod2", np.hypot(*coro.grid.coordinates()), 0.0
             )
             / 30.0
         )
         m60 = (
             coro.curves().evaluate(
-                "leakage_density_lod2", np.hypot(*coro.grid.coordinates())
+                "leakage_density_lod2", np.hypot(*coro.grid.coordinates()), 0.0
             )
             / 60.0
         )
@@ -117,11 +117,11 @@ class TestNoiseFloorAyoMap:
         """Residual density is exactly contract leakage density divided by ppf."""
         ppf = 25.0
         istar = coro.curves().evaluate(
-            "leakage_density_lod2", np.hypot(*coro.grid.coordinates())
+            "leakage_density_lod2", np.hypot(*coro.grid.coordinates()), 0.0
         )
         nf = (
             coro.curves().evaluate(
-                "leakage_density_lod2", np.hypot(*coro.grid.coordinates())
+                "leakage_density_lod2", np.hypot(*coro.grid.coordinates()), 0.0
             )
             / ppf
         )

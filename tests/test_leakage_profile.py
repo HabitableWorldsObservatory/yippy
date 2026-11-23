@@ -386,7 +386,7 @@ def test_leakage_rules_on_a_modulated_map(modulated, separation):
 
     def leak(rule):
         record = modulated[rule].curves(leakage_rule=rule)
-        return float(record.evaluate("leakage_fraction", s)), record
+        return float(record.evaluate("leakage_fraction", s, 0.0)), record
 
     along_x, _ = leak("aperture_mean")
     ring, ring_record = leak("aperture_ring_mean")
@@ -394,7 +394,7 @@ def test_leakage_rules_on_a_modulated_map(modulated, separation):
     area = float(point_record.evaluate("core_area_lod2", s))
     # The point rule stores its ring density per unit area; the leakage read by a
     # calculator is that density times the aperture area.
-    point = float(point_record.evaluate("leakage_density_lod2", s)) * area
+    point = float(point_record.evaluate("leakage_density_lod2", s, 0.0)) * area
 
     x_axis = _disk_integral(
         lambda x, y: (
@@ -458,3 +458,128 @@ def test_curves_of_a_2d_product_warn_once(modulated_package, caplog):
     ]
     assert len(messages) == 1
     assert "position angle" in messages[0]
+
+
+# The curves record tabulates the star leakage over the diameter axis of the
+# product, so the leakage read at a stellar diameter agrees with the image route
+# at that diameter (the star is not a point at zero diameter).
+RECORD_SEPARATIONS_LOD = np.array([2.86, 5.30, 8.27, 11.27])
+RECORD_TOL = 2e-3
+
+
+@pytest.fixture(scope="module")
+def eac1_curves():
+    """The measured vortex product and its curves record, or a data-absent skip."""
+    from yippy import fetch_yip
+
+    try:
+        path = fetch_yip("eac1_aavc_2d")
+    except Exception as exc:
+        message = (
+            f"data-absent: eac1_aavc_2d is not cached and could not be fetched ({exc})"
+        )
+        if REFERENCE_DATA_REQUIRED:
+            pytest.fail(message)
+        pytest.skip(message)
+    coro = open_yip(path).prepare()
+    return coro, coro.curves()
+
+
+def disc_ring_leakage(coro, image, separation_lod, n_apertures=360, n_sub=16):
+    """Mean over position angle of the exact-coverage sum of a circular aperture.
+
+    The aperture is a disc of the record's rule radius centred on a circle about
+    the optical axis; each pixel is weighted by the fraction of it covered,
+    counted on an n_sub by n_sub sub-grid. NumPy only, independent of the record.
+    """
+    pixel_lod = float(coro.grid.step)
+    radius = float(coro.curves().rule.radius_lod) / pixel_lod
+    centre_y, centre_x = coro.stellar_grid.center_y, coro.stellar_grid.center_x
+    sub = (np.arange(n_sub) + 0.5) / n_sub - 0.5
+    total = 0.0
+    for theta in np.linspace(0.0, 2.0 * np.pi, n_apertures, endpoint=False):
+        cy = centre_y + separation_lod / pixel_lod * np.sin(theta)
+        cx = centre_x + separation_lod / pixel_lod * np.cos(theta)
+        y0, y1 = int(np.floor(cy - radius)) - 1, int(np.ceil(cy + radius)) + 2
+        x0, x1 = int(np.floor(cx - radius)) - 1, int(np.ceil(cx + radius)) + 2
+        ys = (np.arange(y0, y1)[:, None] + sub[None, :]).ravel()
+        xs = (np.arange(x0, x1)[:, None] + sub[None, :]).ravel()
+        inside = (ys[:, None] - cy) ** 2 + (xs[None, :] - cx) ** 2 <= radius**2
+        weights = inside.reshape(y1 - y0, n_sub, x1 - x0, n_sub).mean(axis=(1, 3))
+        total += (weights * image[y0:y1, x0:x1]).sum()
+    return total / n_apertures
+
+
+def record_vs_ring(coro, record, diameter_lod):
+    """Relative difference of the record's leakage and the NumPy ring mean."""
+    image = np.asarray(
+        coro.stellar_map(None, diameter_lod, grid=None).integrated().data,
+        dtype=np.float64,
+    )
+    truth = np.array(
+        [disc_ring_leakage(coro, image, s) for s in RECORD_SEPARATIONS_LOD]
+    )
+    got = np.asarray(
+        record.evaluate("leakage_fraction", RECORD_SEPARATIONS_LOD, diameter_lod),
+        dtype=np.float64,
+    )
+    return got / truth - 1.0
+
+
+def test_record_leakage_at_each_tabulated_diameter(eac1_curves):
+    """Fails if the record's leakage is not the ring mean of that table plane.
+
+    Truth is 360 exact-coverage apertures on the plane at each tabulated
+    diameter. Tolerance 0.2 percent, the card's; the measured worst case over the
+    diameters tried is 0.11 percent, the sub-grid coverage of the NumPy truth.
+    """
+    coro, record = eac1_curves
+    diameters = np.asarray(record.stellar_diameters_lod)
+    assert diameters.size > 1
+    for diameter in diameters[[0, 4, 6]]:
+        err = record_vs_ring(coro, record, float(diameter))
+        assert np.max(np.abs(err)) <= RECORD_TOL, (diameter, err)
+
+
+@pytest.mark.parametrize("diameter_lod", [0.0325, 0.045])
+def test_record_leakage_between_diameters_follows_the_map(eac1_curves, diameter_lod):
+    """Fails if the curves route leaves the image route's interpolated map.
+
+    Truth is the ring mean of the map the image route interpolates at this
+    diameter. Tolerance 0.2 percent; measured worst case 0.14 percent. The
+    interpolation in diameter holds this only for a star below about 0.07
+    lambda/D, which covers a Sun at 10 pc (0.032 lambda/D at 1 micron).
+    """
+    coro, record = eac1_curves
+    err = record_vs_ring(coro, record, diameter_lod)
+    assert np.max(np.abs(err)) <= RECORD_TOL, err
+
+
+def test_resolved_star_differs_from_a_point_star(eac1_curves):
+    """Fails if the record reads the leakage at zero diameter whatever the star."""
+    _, record = eac1_curves
+    point = float(record.evaluate("leakage_fraction", 2.86, 0.0))
+    resolved = float(record.evaluate("leakage_fraction", 2.86, 0.25))
+    assert abs(resolved / point - 1.0) > 10 * RECORD_TOL
+
+
+def test_record_gradient_in_the_stellar_diameter(eac1_curves):
+    """Fails if the leakage cannot be differentiated in the stellar diameter."""
+    _, record = eac1_curves
+    grad = jax.grad(lambda d: record.evaluate("leakage_fraction", 2.86, d))(0.0325)
+    assert np.isfinite(grad)
+    assert grad != 0.0
+
+
+def test_one_profile_record_refuses_another_star(eac1_curves):
+    """Fails if a record of one stellar diameter silently serves a different star."""
+    coro, _ = eac1_curves
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as cache:
+        single = coro._host._prepare_record(
+            coro._host.rule, 0.0325, save_to_fits=False, cache_dir=cache
+        )
+    assert float(single.evaluate("leakage_fraction", 2.86, 0.0325)) > 0
+    with pytest.raises(ValueError, match="one profile"):
+        single.evaluate("leakage_fraction", 2.86, 0.1)

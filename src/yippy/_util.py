@@ -7,8 +7,9 @@ from pathlib import Path
 import astropy.io.fits as fits
 import numpy as np
 from optixstuff.grids import Frame
+from optixstuff.performance import DIAMETER_QUANTITIES
 
-PERFORMANCE_VERSION = 7
+PERFORMANCE_VERSION = 8
 PERFORMANCE_FIELDS = (
     "throughput",
     "throughput_variance",
@@ -94,18 +95,25 @@ def save_coro_performance_to_fits(
     header["FRAME"] = json.dumps(asdict(record.frame), sort_keys=True)
     header["IWA_LOD"] = record.iwa_lod if np.isfinite(record.iwa_lod) else "undefined"
     header["EXTENT"] = record.data_extent_lod
-    if record.stellar_diameter_lod is not None:
-        header["STARDIAM"] = record.stellar_diameter_lod
+    if record.stellar_diameters_lod is not None:
+        header["STARDIAM"] = json.dumps(
+            [float(d) for d in record.stellar_diameters_lod]
+        )
     if identity is not None:
         header["CACHEKEY"] = cache_identity_digest(identity)
         header["CACHEID"] = cache_identity_json(identity)
-    table = fits.BinTableHDU.from_columns(
-        [
-            fits.Column(name=name, format="D", array=getattr(record, name))
-            for name in ("separation_lod", *PERFORMANCE_FIELDS)
-        ],
-        name="PERFORMANCE",
-    )
+    # A leakage field holds one profile per stellar diameter: one column of
+    # K values per separation.
+    columns = []
+    for name in ("separation_lod", *PERFORMANCE_FIELDS):
+        values = np.asarray(getattr(record, name), dtype=float)
+        if name in DIAMETER_QUANTITIES:
+            columns.append(
+                fits.Column(name=name, format=f"{len(values)}D", array=values.T)
+            )
+        else:
+            columns.append(fits.Column(name=name, format="D", array=values))
+    table = fits.BinTableHDU.from_columns(columns, name="PERFORMANCE")
     outpath = Path(outdir) / filename
     if outpath.exists() and not overwrite:
         raise FileExistsError(outpath)
@@ -164,10 +172,11 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
             "HalfMaximum": HalfMaximum,
         }[header["APERRULE"]]
         rule = rule_type(**json.loads(header["RULEJSON"]))
-        fields = {
-            name: np.array(hdus["PERFORMANCE"].data[name], dtype=float)
-            for name in ("separation_lod", *PERFORMANCE_FIELDS)
-        }
+        fields = {}
+        for name in ("separation_lod", *PERFORMANCE_FIELDS):
+            values = np.array(hdus["PERFORMANCE"].data[name], dtype=float)
+            fields[name] = values.T if name in DIAMETER_QUANTITIES else values
+        diameters = header.get("STARDIAM")
         iwa = header["IWA_LOD"]
         return PerformanceCurves(
             **fields,
@@ -176,5 +185,5 @@ def load_coro_performance_from_fits(filename: str, indir: Path):
             leakage_rule=header["LEAKRULE"],
             iwa_lod=np.nan if iwa == "undefined" else float(iwa),
             data_extent_lod=header["EXTENT"],
-            stellar_diameter_lod=header.get("STARDIAM"),
+            stellar_diameters_lod=None if diameters is None else json.loads(diameters),
         )

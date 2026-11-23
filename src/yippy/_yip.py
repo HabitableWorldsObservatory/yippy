@@ -502,6 +502,11 @@ class _YIPData:
                 "rule": {"name": type(rule).__name__, **asdict(rule)},
                 "leakage_rule": leakage_rule,
                 "stellar_diameter": stellar_diameter_lod,
+                "stellar_diameters": (
+                    [float(d) for d in self.stellar_intens.diams.value]
+                    if stellar_diameter_lod is None
+                    else None
+                ),
                 "oversample": CORE_OVERSAMPLE,
                 "separations_lod": None
                 if separations_lod is None
@@ -513,9 +518,7 @@ class _YIPData:
         return identity
 
     def _auto_perf_identity(self):
-        return self._perf_identity(
-            self.rule, self.leakage_rule, float(self.stellar_intens.diams[0].value)
-        )
+        return self._perf_identity(self.rule, self.leakage_rule, None)
 
     def _perf_filename(self):
         digest = cache_identity_digest(self._auto_perf_identity())[:16]
@@ -539,9 +542,11 @@ class _YIPData:
         """Build/select one complete record; explicitly imported metadata must match.
 
         Persistent records store all photometry fields on one axis, plus aperture,
-        averaging rule, stellar diameter and frame. Corrupt automatic entries
-        are cache misses. Explicit imports fail clearly instead of silently
-        overriding their physical definitions.
+        averaging rule, stellar diameters and frame. The leakage is tabulated at
+        every stellar diameter of the product unless ``stellar_diameter_lod``
+        names one, which builds a record of that single profile. Corrupt
+        automatic entries are cache misses. Explicit imports fail clearly instead
+        of silently overriding their physical definitions.
         """
         rule = self.rule if rule is None else rule
         if not isinstance(rule, ApertureRule):
@@ -552,10 +557,19 @@ class _YIPData:
             else resolve_leakage_rule(leakage_rule, self.offax.type)
         )
         diameter = (
-            float(self.stellar_intens.diams[0].value)
+            None
             if stellar_diameter_lod is None
             else float(getattr(stellar_diameter_lod, "value", stellar_diameter_lod))
         )
+        # The record's diameter axis is in lambda/D of its own (off-axis) frame.
+        pf, sf = self.grid.frame, self.stellar_intens.grid.frame
+        angular_ratio = pf.lod_to_arcsec(pf.reference_wavelength_nm) / sf.lod_to_arcsec(
+            sf.reference_wavelength_nm
+        )
+        expected_diameters = np.asarray(
+            self.stellar_intens.diams.value if diameter is None else [diameter],
+            dtype=float,
+        ) / float(angular_ratio)
         identity = self._perf_identity(rule, leakage_rule, diameter, separations_lod)
         expected = cache_identity_digest(identity)
         directory = self._perf_dir if cache_dir is None else Path(cache_dir)
@@ -576,11 +590,19 @@ class _YIPData:
                     record.rule != rule
                     or record.leakage_rule != leakage_rule
                     or record.frame != self.grid.frame
-                    or record.stellar_diameter_lod != diameter
+                    or record.stellar_diameters_lod is None
+                    or np.shape(record.stellar_diameters_lod)
+                    != expected_diameters.shape
+                    or not np.allclose(
+                        record.stellar_diameters_lod,
+                        expected_diameters,
+                        rtol=1e-12,
+                        atol=0,
+                    )
                 ):
                     raise ValueError(
                         "performance record rule, leakage_rule, frame "
-                        "or stellar diameter mismatch"
+                        "or stellar diameters mismatch"
                     )
                 if separations_lod is not None and not np.array_equal(
                     record.separation_lod, separations_lod
@@ -616,13 +638,16 @@ class _YIPData:
                 warnings.filterwarnings(
                     "ignore", message="leakage_rule 'azimuthal_ring_mean'"
                 )
+                diameters = self.stellar_intens.diams
                 record = performance_curves(
                     (
                         samples.__getitem__
                         if separations_lod is None
                         else lambda s: self.create_psf(s, 0.0)
                     ),
-                    self.stellar_intens(diameter * lod),
+                    self.stellar_intens(
+                        diameters if diameter is None else diameter * lod
+                    ),
                     rule,
                     separations_lod=native_axis
                     if separations_lod is None
@@ -630,6 +655,9 @@ class _YIPData:
                     source_positions_lod=locations if separations_lod is None else None,
                     leakage_rule=leakage_rule,
                     stellar_diameter_lod=diameter,
+                    stellar_diameters_lod=None
+                    if diameter is not None
+                    else diameters.value,
                 )
             if save_to_fits:
                 save_coro_performance_to_fits(

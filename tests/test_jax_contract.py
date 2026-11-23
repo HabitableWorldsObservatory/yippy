@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from lod_unit import lod
+from optixstuff.performance import DIAMETER_QUANTITIES
 
 from yippy.performance import stellar_intensity_curves
 
@@ -94,7 +95,9 @@ def test_a_traced_stellar_diameter_runs_and_matches_eager(syn_eqx_1d, diameter):
 def test_a_traced_separation_runs_and_matches_eager(syn_eqx_1d):
     """The performance curves stay correct when the separation is traced."""
     methods = {
-        name: lambda s, name=name: syn_eqx_1d.curves().evaluate(name, s)
+        name: lambda s, name=name: syn_eqx_1d.curves().evaluate(
+            name, s, 0.0 if name == "raw_contrast" else None
+        )
         for name in ("throughput", "raw_contrast", "core_area_lod2")
     }
     methods["uniform_sky_response"] = syn_eqx_1d.uniform_sky_response
@@ -157,7 +160,9 @@ def test_gradients_agree_with_a_central_difference(syn_eqx_1d, name):
     """
 
     def method(s):
-        return syn_eqx_1d.curves().evaluate(name, s)
+        return syn_eqx_1d.curves().evaluate(
+            name, s, 0.0 if name in DIAMETER_QUANTITIES else None
+        )
 
     for separation in (2.25, 3.25, 4.25):
         analytic = float(

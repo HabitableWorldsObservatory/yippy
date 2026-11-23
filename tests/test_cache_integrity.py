@@ -61,11 +61,11 @@ def test_circular_centres_have_distinct_complete_cache_records(
         path = obj._perf_dir / obj._perf_filename()
         paths.append(path)
         header = fits.getheader(path)
-        assert header["PERFVER"] == 7
+        assert header["PERFVER"] == 8
         assert json.loads(header["RULEJSON"])["centre"] == centre
         identity = json.loads(header["CACHEID"])
         assert identity["rule"]["centre"] == centre
-        assert float.fromhex(identity["performance_record"]) == 7
+        assert float.fromhex(identity["performance_record"]) == 8
         assert record.rule.centre == centre
     assert paths[0] != paths[1]
     assert all(p.exists() for p in paths)
@@ -93,15 +93,17 @@ def test_circular_centres_have_distinct_complete_cache_records(
             "data_extent_lod",
             "frame",
             "leakage_rule",
-            "stellar_diameter_lod",
         ):
             assert getattr(loaded, name) == getattr(original, name)
+        np.testing.assert_array_equal(
+            loaded.stellar_diameters_lod, original.stellar_diameters_lod
+        )
     legacy = tmp_path / "legacy.fits"
     with fits.open(paths[0]) as hdus:
-        hdus[0].header["PERFVER"] = 6
+        hdus[0].header["PERFVER"] = 7
         hdus.writeto(legacy)
     assert read_performance_cache_key(legacy) is None
-    with pytest.raises(ValueError, match="PERFVER=7"):
+    with pytest.raises(ValueError, match="PERFVER=8"):
         load_coro_performance_from_fits(legacy.name, legacy.parent)
 
 
@@ -113,7 +115,9 @@ def _metrics(coro):
     return {
         "throughput": np.asarray(coro.performance.evaluate("throughput", SEPS)),
         "core_area": np.asarray(coro.performance.evaluate("core_area_lod2", SEPS)),
-        "raw_contrast": np.asarray(coro.performance.evaluate("raw_contrast", SEPS)),
+        "raw_contrast": np.asarray(
+            coro.performance.evaluate("raw_contrast", SEPS, 0.0)
+        ),
     }
 
 
@@ -219,11 +223,13 @@ def test_explicit_floor_does_not_change_cached_contrast(tmp_path):
     seed._prepare_record(HalfMaximum(0.3))
     warm = _YIPData(open_yip(path), rule=HalfMaximum(0.3))
     cold = _YIPData(open_yip(_yip(tmp_path, "cold")), rule=HalfMaximum(0.3))
-    assert np.all(cold.performance.evaluate("raw_contrast", SEPS) < contrast_floor), (
-        "floor must bind"
-    )
+    assert np.all(
+        cold.performance.evaluate("raw_contrast", SEPS, 0.0) < contrast_floor
+    ), "floor must bind"
     np.testing.assert_array_equal(
-        np.maximum(seed.performance.evaluate("raw_contrast", SEPS), contrast_floor),
+        np.maximum(
+            seed.performance.evaluate("raw_contrast", SEPS, 0.0), contrast_floor
+        ),
         np.full_like(SEPS, contrast_floor),
     )
     _assert_same_metrics(warm, cold, names=("raw_contrast",))
@@ -361,7 +367,7 @@ def test_default_construction_measures_the_selected_aperture(tmp_path, mode):
         planet_flux = record.evaluate("throughput", sep)
         area_pixels = record.evaluate("core_area_lod2", sep) / package.pixscale**2
         assert not np.isclose(area_pixels, np.pi * 2.8**2, rtol=1e-3)
-    assert record.evaluate("raw_contrast", sep) == pytest.approx(
+    assert record.evaluate("raw_contrast", sep, 0.0) == pytest.approx(
         package.stellar_level * area_pixels / planet_flux, rel=1e-5
     )
 
@@ -616,7 +622,7 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
         iwa_lod=1.23456789012345,
         data_extent_lod=16.0,
         leakage_rule="azimuthal_ring_mean",
-        stellar_diameter_lod=0.123456789012345,
+        stellar_diameters_lod=0.123456789012345,
     )
     save_coro_performance_to_fits(record, "performance.fits", tmp_path)
     loaded = load_coro_performance_from_fits("performance.fits", tmp_path)
@@ -637,8 +643,10 @@ def test_performance_fits_preserves_every_float64_bit(tmp_path):
         "rule",
         "frame",
         "leakage_rule",
-        "stellar_diameter_lod",
         "iwa_lod",
         "data_extent_lod",
     ):
         assert getattr(loaded, name) == getattr(record, name)
+    np.testing.assert_array_equal(
+        loaded.stellar_diameters_lod, record.stellar_diameters_lod
+    )

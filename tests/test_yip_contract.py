@@ -174,11 +174,11 @@ def test_data_extent_does_not_claim_a_dark_hole_boundary(shipped_coro):
     """
     extent = shipped_coro.curves().data_extent_lod
     reference = max(
-        float(shipped_coro.curves().evaluate("raw_contrast", s))
+        float(shipped_coro.curves().evaluate("raw_contrast", s, 0.0))
         for s in np.linspace(shipped_coro.curves().iwa_lod + 1.0, 0.75 * extent, 8)
     )
     probes = np.linspace(0.75 * extent, extent, 9)
-    values = np.asarray(shipped_coro.curves().evaluate("raw_contrast", probes))
+    values = np.asarray(shipped_coro.curves().evaluate("raw_contrast", probes, 0.0))
     assert np.all(np.isfinite(values))
     assert values.max() > 10.0 * reference
     assert not hasattr(shipped_coro, "OWA")
@@ -391,7 +391,9 @@ def test_public_geometric_leakage_change(shipped_coro):
         ),
     ):
         record = host._prepare_record(rule)
-        leakage = record.evaluate("leakage_fraction", np.array([2.0, 3.0, 5.0, 10.0]))
+        leakage = record.evaluate(
+            "leakage_fraction", np.array([2.0, 3.0, 5.0, 10.0]), 0.0
+        )
         np.testing.assert_allclose(
             100 * (leakage / native_leakage - 1), change_percent, atol=0.01, rtol=0
         )

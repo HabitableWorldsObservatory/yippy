@@ -133,7 +133,7 @@ def test_raw_contrast_divides_two_aperture_sums_not_two_means(package, coro):
     separations = np.array([1.5, 3.0, 5.0])
     implied_area = np.array(
         [
-            float(coro.curves().evaluate("raw_contrast", s))
+            float(coro.curves().evaluate("raw_contrast", s, 0.0))
             * float(coro.curves().evaluate("throughput", s))
             / package.stellar_level
             for s in separations
@@ -199,7 +199,7 @@ def test_contrast_does_not_blow_up_between_last_offset_and_data_extent(package, 
     last_offset = float(package.offsets[:, 0].max())
     data_extent_lod = coro.curves().data_extent_lod
     in_image = [
-        float(coro.curves().evaluate("raw_contrast", s))
+        float(coro.curves().evaluate("raw_contrast", s, 0.0))
         for s in (last_offset - 0.5, last_offset)
     ]
     ceiling = 10.0 * max(in_image)
@@ -207,7 +207,7 @@ def test_contrast_does_not_blow_up_between_last_offset_and_data_extent(package, 
     probes = np.linspace(last_offset, data_extent_lod, 9)
     checked = 0
     for separation in probes:
-        value = float(coro.curves().evaluate("raw_contrast", separation))
+        value = float(coro.curves().evaluate("raw_contrast", separation, 0.0))
         assert np.isfinite(value), f"raw_contrast({separation}) is not finite"
         assert value <= ceiling, (
             f"raw_contrast({separation:.3f}) = {value:.3e} exceeds ten times the "
