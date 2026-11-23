@@ -12,8 +12,12 @@ Performance curves are PCHIP-interpolated between the YIP's offsets
 through `PerformanceCurves.evaluate`. PCHIP preserves the shape of the tabulated curves without overshoot
 near the inner working angle (Fritsch, F. N. and Carlson, R. E. 1980,
 *SIAM Journal on Numerical Analysis* 17, 238). Throughput and area use linear
-values; leakage and contrast use logarithmic values. Outside the tabulated range,
-curves use linear end-segment extrapolation in their declared space.
+values; leakage and contrast use logarithmic values. A record holds data only from its
+first to its last tabulated separation, and while the aperture fits inside
+`data_extent_lod`: `record.supported(separation_lod)` reports it. Beyond the
+last tabulated separation `evaluate` only continues the end segment in the
+declared space, so read it where `supported` is True and treat the rest as
+unsupported.
 
 ## Shared performance record
 
