@@ -12,7 +12,12 @@ from optixstuff.grids import Image, Measure
 from synthetic_yip import write_synthetic_yip
 
 import yippy.sinc
-from yippy import BlendSceneOperator, SceneCoronagraph, open_yip
+from yippy import (
+    BlendSceneOperator,
+    MaskedSceneOperator,
+    SceneCoronagraph,
+    open_yip,
+)
 from yippy.scene import AbstractSceneOperator
 
 
@@ -26,7 +31,7 @@ def _dense_image(backend, grid, flux):
     x, y = (np.asarray(c, np.float64).ravel() for c in grid.coordinates())
     inside = np.asarray(backend.in_source_domain(x, y))
     lit = np.flatnonzero((flux.ravel() != 0) & inside)
-    image = np.zeros(grid.shape)
+    image = np.zeros(tuple(backend.flat_psfs.shape[-2:]))
     for i in range(0, lit.size, 16):
         block = lit[i : i + 16]
         psfs = backend._create_psfs(jnp.asarray(x[block]), jnp.asarray(y[block]))
@@ -36,9 +41,12 @@ def _dense_image(backend, grid, flux):
 
 def _agreement(model, flux):
     """Peak-normalized maximum difference and relative flux difference."""
-    image, valid = model.operators[0].render(jnp.asarray(flux), model.grid)
-    reference = _dense_image(model._offaxis_backend, model.grid, flux)
-    assert valid
+    grid = model.scene_grid
+    image, covered = model.operators[0].render(jnp.asarray(flux), grid)
+    reference = _dense_image(model._offaxis_backend, grid, flux)
+    x, y = (np.asarray(c, np.float64) for c in grid.coordinates())
+    inside = np.asarray(model._offaxis_backend.in_source_domain(x, y))
+    np.testing.assert_array_equal(np.asarray(covered), inside)
     peak = reference.max()
     return (
         float(np.abs(np.asarray(image) - reference).max() / peak),
@@ -91,8 +99,9 @@ def test_shipped_package_blocks_size_and_estimate(coro):
     for lo, hi in ((0, 12), (8, 20), (80, 92)):
         side = np.arange(lo, hi)
         rows, cols = (a.ravel() for a in np.meshgrid(side, side, indexing="ij"))
-        flux = np.zeros(model.grid.shape)
-        flux[128 + rows, 128 + cols] = rng.uniform(0.5, 1.5, rows.size)
+        flux = np.zeros(model.scene_grid.shape)
+        cy, cx = (n // 2 for n in flux.shape)
+        flux[cy + rows, cx + cols] = rng.uniform(0.5, 1.5, rows.size)
         peak_error, flux_error = _agreement(model, flux)
         assert peak_error < 1e-3
         assert flux_error < 1e-4
@@ -181,11 +190,15 @@ class _Gain(AbstractSceneOperator):
     ok: bool = eqx.field(static=True, default=True)
 
     def render(self, flux, grid):
-        return self.gain * flux, jnp.asarray(self.ok)
+        return self.gain * flux, jnp.full(flux.shape, self.ok)
 
 
 def test_scene_coronagraph_sums_its_operators(syn_coro_2d):
-    """Fails if the render is not the sum of the operators, or drops a refusal."""
+    """Fails if the render is not the sum of the operators, or drops a refusal.
+
+    A cell is refused only when no operator covers it: a covered cell is valid
+    whatever another operator reports for it.
+    """
     model = syn_coro_2d.with_scene_operator()
     blend = model.operators[0]
     assert isinstance(blend, AbstractSceneOperator)
@@ -202,7 +215,108 @@ def test_scene_coronagraph_sums_its_operators(syn_coro_2d):
     expected = single.image.data + alone.image.data
     assert float(jnp.abs(alone.image.data).max()) > 0
     np.testing.assert_allclose(both.image.data, expected, rtol=1e-6, atol=1e-9)
-    refused = SceneCoronagraph(model, (blend, _Gain(1.0, ok=False))).render_scene(
+    covered_elsewhere = SceneCoronagraph(
+        model, (blend, _Gain(1.0, ok=False))
+    ).render_scene(scene, None, grid=model.grid)
+    assert covered_elsewhere.valid
+    refused = SceneCoronagraph(model, (_Gain(1.0, ok=False),)).render_scene(
         scene, None, grid=model.grid
     )
     assert not refused.valid
+    assert bool(jnp.all(jnp.isfinite(refused.image.data)))
+
+
+def _disjoint_masks(grid):
+    """A checkerboard of 4-cell tiles and its complement on a source grid."""
+    row, col = np.indices(grid.shape)
+    inside = ((row // 4 + col // 4) % 2) == 0
+    return inside, ~inside
+
+
+def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
+    """Fails if masked operators do not compose into the unmasked operator.
+
+    Two operators over complementary masks must add to the single operator over
+    every source, to rounding, with the scene valid: each reads only its own
+    cells and the union covers every lit cell (before, an operator that was
+    handed a source outside its mask turned the whole image to NaN).
+    """
+    with jax.enable_x64():
+        package = write_synthetic_yip(
+            tmp_path / "masked",
+            kind="2dq",
+            npix=32,
+            max_offset_lod=3.0,
+            offset_step_lod=0.5,
+            psf_sigma_lod=0.4,
+            occulter_floor=1.0,
+        )
+        model = open_yip(package.path).prepare()
+        whole = model.with_scene_operator()
+        grid = whole.scene_grid
+        keep, rest = _disjoint_masks(grid)
+        halves = model.with_scene_operator(mask=keep).with_operators(
+            *model.with_scene_operator(mask=rest).operators
+        )
+        assert len(halves.operators) == 2
+        flux = np.zeros(grid.shape)
+        flux[8:24, 8:24] = np.random.default_rng(3).uniform(0.5, 1.5, (16, 16))
+        scene = Image(jnp.asarray(flux), grid, (), Measure.integral(), "flux")
+        reference = whole.render_scene(scene, None, grid=model.grid)
+        composed = halves.render_scene(scene, None, grid=model.grid)
+        assert reference.valid and composed.valid
+        assert float(jnp.abs(reference.image.data).max()) > 0
+        np.testing.assert_allclose(
+            composed.image.data, reference.image.data, rtol=0, atol=1e-12
+        )
+        # One half alone leaves lit cells uncovered: finite image, not valid.
+        alone = model.with_scene_operator(mask=keep).render_scene(
+            scene, None, grid=model.grid
+        )
+        assert not alone.valid
+        assert bool(jnp.all(jnp.isfinite(alone.image.data)))
+        assert float(jnp.abs(alone.image.data).sum()) < float(
+            jnp.abs(reference.image.data).sum()
+        )
+
+
+def test_masked_wrapper_matches_the_native_mask(tmp_path):
+    """Fails if MaskedSceneOperator reads or reports a cell outside its mask."""
+    with jax.enable_x64():
+        package = write_synthetic_yip(
+            tmp_path / "wrapper",
+            kind="2dq",
+            npix=32,
+            max_offset_lod=3.0,
+            offset_step_lod=0.5,
+            psf_sigma_lod=0.4,
+            occulter_floor=1.0,
+        )
+        model = open_yip(package.path).prepare().with_scene_operator()
+        keep, _ = _disjoint_masks(model.scene_grid)
+        native = BlendSceneOperator.from_backend(
+            model._offaxis_backend, model.scene_grid, mask=keep
+        )
+        wrapped = MaskedSceneOperator(model.operators[0], keep)
+        flux = jnp.asarray(
+            np.random.default_rng(4).uniform(0.5, 1.5, model.scene_grid.shape)
+        )
+        image_n, covered_n = native.render(flux, model.scene_grid)
+        image_w, covered_w = wrapped.render(flux, model.scene_grid)
+        np.testing.assert_allclose(image_w, image_n, rtol=0, atol=1e-12)
+        assert bool(jnp.all(covered_w == covered_n & keep))
+
+
+def test_nonfinite_flux_is_zero_and_invalid(syn_coro_2d):
+    """Fails if a nonfinite source cell reaches the image or passes as valid."""
+    model = syn_coro_2d.with_scene_operator()
+    grid = model.scene_grid
+    flux = np.zeros(grid.shape)
+    flux[10:14, 10:14] = 1.0
+    clean = Image(jnp.asarray(flux), grid, (), Measure.integral(), "flux")
+    flux[12, 12] = np.nan
+    broken = Image(jnp.asarray(flux), grid, (), Measure.integral(), "flux")
+    good = model.render_scene(clean, None, grid=model.grid)
+    bad = model.render_scene(broken, None, grid=model.grid)
+    assert good.valid and not bad.valid
+    assert bool(jnp.all(jnp.isfinite(bad.image.data)))

@@ -20,6 +20,7 @@ class _DenseSceneOperator(AbstractSceneOperator):
 
     One PSF per source position: the route for a sinc delivery that falls back to
     blend per source, and the reference the blend operator is tested against.
+    A source the delivery refused is not covered and renders nothing.
     """
 
     psfs: jax.Array
@@ -34,38 +35,62 @@ class _DenseSceneOperator(AbstractSceneOperator):
         self.psfs = jnp.where(self.valid[..., None, None], psfs, 0.0)
 
     def render(self, flux, grid):
-        """Return the native detector array and whether every lit source is valid."""
+        """Return the finite native detector array and the covered source cells."""
         if flux.shape != grid.shape:
             raise ValueError("source flux must match the native grid")
+        flux = jnp.where(jnp.isfinite(flux), flux, 0.0)
         if self.valid.shape == grid.shape:
-            valid = jnp.all((flux == 0) | (jnp.isfinite(flux) & self.valid))
-            image = jnp.einsum("ij,ijyx->yx", flux, self.psfs)
-        else:
-            ny, nx = grid.shape
-            if not grid.is_geometric or self.valid.shape != (
-                (ny + 1) // 2,
-                (nx + 1) // 2,
-            ):
-                raise ValueError(
-                    "quarter PSFs must match the positive quadrant of a geometric grid"
-                )
-            # Shared zero-offset axes belong to the positive halves on odd grids.
-            sx, sy = math.ceil(grid.center_x), math.ceil(grid.center_y)
-            padx, pady = nx % 2, ny % 2
-            quadrants = jnp.stack(
-                (
-                    flux[sy:, sx:],
-                    jnp.pad(flux[sy:, :sx][:, ::-1], ((0, 0), (padx, 0))),
-                    jnp.pad(flux[:sy, :sx][::-1, ::-1], ((pady, 0), (padx, 0))),
-                    jnp.pad(flux[:sy, sx:][::-1, :], ((pady, 0), (0, 0))),
-                )
+            return jnp.einsum("ij,ijyx->yx", flux, self.psfs), self.valid
+        ny, nx = grid.shape
+        if not grid.is_geometric or self.valid.shape != ((ny + 1) // 2, (nx + 1) // 2):
+            raise ValueError(
+                "quarter PSFs must match the positive quadrant of a geometric grid"
             )
-            valid = jnp.all((quadrants == 0) | (jnp.isfinite(quadrants) & self.valid))
-            parts = jnp.einsum("qij,ijyx->qyx", quadrants, self.psfs)
-            image = (
-                parts[0] + parts[1, :, ::-1] + parts[2, ::-1, ::-1] + parts[3, ::-1, :]
+        # Shared zero-offset axes belong to the positive halves on odd grids.
+        sx, sy = math.ceil(grid.center_x), math.ceil(grid.center_y)
+        padx, pady = nx % 2, ny % 2
+        quadrants = jnp.stack(
+            (
+                flux[sy:, sx:],
+                jnp.pad(flux[sy:, :sx][:, ::-1], ((0, 0), (padx, 0))),
+                jnp.pad(flux[:sy, :sx][::-1, ::-1], ((pady, 0), (padx, 0))),
+                jnp.pad(flux[:sy, sx:][::-1, :], ((pady, 0), (0, 0))),
             )
-        return jnp.where(valid, image, jnp.nan), valid
+        )
+        parts = jnp.einsum("qij,ijyx->qyx", quadrants, self.psfs)
+        image = parts[0] + parts[1, :, ::-1] + parts[2, ::-1, ::-1] + parts[3, ::-1, :]
+        # Cell (i, j) reads the quadrant entry at its distance from the axes.
+        row = np.floor(np.abs(np.arange(ny) - (ny - 1) / 2)).astype(int)
+        col = np.floor(np.abs(np.arange(nx) - (nx - 1) / 2)).astype(int)
+        return image, self.valid[row[:, None], col[None, :]]
+
+
+class MaskedSceneOperator(AbstractSceneOperator):
+    """Any scene operator restricted to the source cells of a mask.
+
+    A cell outside the mask contributes nothing and is reported uncovered, so
+    masked operators over disjoint masks compose in a ``SceneCoronagraph``.
+    Prefer a native ``mask`` where an operator has one (``BlendSceneOperator``
+    drops the unread sources from its table); this wrapper restricts an operator
+    that has none and holds the same arrays as the operator it wraps.
+    """
+
+    operator: AbstractSceneOperator
+    mask: jax.Array
+
+    def __init__(self, operator, mask):
+        """Wrap ``operator``; ``mask`` is a boolean [sy, sx] on its source grid."""
+        mask = jnp.asarray(mask)
+        if mask.ndim != 2 or mask.dtype != bool:
+            raise ValueError("mask must be a boolean [sy, sx] array")
+        self.operator, self.mask = operator, mask
+
+    def render(self, flux, grid):
+        """Return the image of the masked sources and the covered cells."""
+        if flux.shape != self.mask.shape:
+            raise ValueError("source flux must match the mask")
+        image, covered = self.operator.render(jnp.where(self.mask, flux, 0.0), grid)
+        return image, covered & self.mask
 
 
 # Stored PSFs pre-shifted per build step: bounds the transient spectra.
@@ -90,7 +115,9 @@ class _BlendPlan:
     shift_yx: np.ndarray  # [term, S, 2] integer displacement modulo n_fft
     flips: tuple
     n_fft: int
-    shape: tuple
+    shape: tuple  # source raster (ny, nx)
+    out_shape: tuple  # detector array of one stored PSF
+    admitted: np.ndarray  # [ny, nx] bool, sources the operator reads
     itemsize: int
 
     def resident(self):
@@ -147,8 +174,7 @@ def _blend_plan(backend, grid, valid, itemsize):
     """
     ny, nx = grid.shape
     npix = backend.flat_psfs.shape[-1]
-    if tuple(backend.flat_psfs.shape[-2:]) != (ny, nx):
-        raise ValueError("source grid must match the stored PSF grid")
+    out_shape = tuple(backend.flat_psfs.shape[-2:])
     xsym, ysym = bool(backend.x_symmetric), bool(backend.y_symmetric)
     with jax.enable_x64():
         xg, yg = grid.coordinates()
@@ -172,6 +198,7 @@ def _blend_plan(backend, grid, valid, itemsize):
     # the same domain the point reader has.
     admitted &= np.asarray(backend.in_source_domain(xs, ys))
     weight = np.where(admitted[:, None], weight, 0.0)
+    admitted = admitted.reshape(ny, nx)
     flips = tuple(
         (fx, fy)
         for fy in ((0, 1) if ysym else (0,))
@@ -221,6 +248,8 @@ def _blend_plan(backend, grid, valid, itemsize):
         flips=flips,
         n_fft=n_fft,
         shape=(ny, nx),
+        out_shape=out_shape,
+        admitted=admitted,
         itemsize=itemsize,
     )
 
@@ -256,25 +285,33 @@ class BlendSceneOperator(AbstractSceneOperator):
     weight: jax.Array  # [term, S] blend weight, zero on padding
     reflection: jax.Array  # [term, S] int32 reflection class of the source
     shift_yx: jax.Array  # [term, S, 2] int32 whole-pixel displacement modulo n_fft
-    valid: jax.Array  # [ny, nx] bool per-source admission
+    covered: jax.Array  # [sy, sx] bool, the sources the operator reads
     n_fft: int = eqx.field(static=True)
     flips: tuple = eqx.field(static=True)  # (flip_x, flip_y) of each class
-    shape: tuple = eqx.field(static=True)
+    shape: tuple = eqx.field(static=True)  # source raster (sy, sx)
+    out_shape: tuple = eqx.field(static=True)  # detector array (ny, nx)
 
     @classmethod
-    def from_backend(cls, backend, grid, *, valid=None):
+    def from_backend(cls, backend, grid, *, mask=None):
         """Regroup the reads of every source on ``grid`` by stored PSF.
+
+        The operator covers the sources that are inside ``mask`` and inside the
+        hull of the tabulated nodes; any other source renders nothing and is
+        reported uncovered. Operators over disjoint masks add to the operator
+        over their union.
 
         Args:
             backend: The blend backend holding the stored PSFs and offsets.
-            grid: Native source grid, equal to the stored PSF grid.
-            valid: Optional boolean [ny, nx] mask; sources outside it render
-                nothing and mark the render invalid when lit.
+            grid: Source grid: any grid of cell centers in the PSF frame, the
+                stored PSF grid or one that extends beyond it. The image is
+                always the stored PSF grid.
+            mask: Optional boolean [sy, sx] mask of the sources to read; the
+                default reads every source of the grid.
         """
         dtype = float_dtype()
-        valid = np.ones(grid.shape, bool) if valid is None else np.asarray(valid, bool)
+        valid = np.ones(grid.shape, bool) if mask is None else np.asarray(mask, bool)
         if valid.shape != tuple(grid.shape):
-            raise ValueError("valid must match the source grid")
+            raise ValueError("mask must match the source grid")
         if backend.type == "1d":
             logger.warning(
                 "Building a scene operator from a 1D YIP: off-axis PSFs are "
@@ -304,17 +341,18 @@ class BlendSceneOperator(AbstractSceneOperator):
             weight=jnp.asarray(plan.weight, dtype),
             reflection=jnp.asarray(plan.reflection),
             shift_yx=jnp.asarray(plan.shift_yx),
-            valid=jnp.asarray(valid),
+            covered=jnp.asarray(plan.admitted),
             n_fft=plan.n_fft,
             flips=plan.flips,
             shape=plan.shape,
+            out_shape=plan.out_shape,
         )
 
     @staticmethod
-    def size_bytes(backend, grid, valid=None):
+    def size_bytes(backend, grid, mask=None):
         """Resident, scratch and total bytes of the operator, from shapes alone."""
         itemsize = jnp.dtype(float_dtype()).itemsize
-        valid = np.ones(grid.shape, bool) if valid is None else valid
+        valid = np.ones(grid.shape, bool) if mask is None else mask
         plan = _blend_plan(backend, grid, valid, itemsize)
         resident = plan.resident()
         scratch = plan.scratch(backend.flat_psfs.shape[-1])
@@ -326,13 +364,12 @@ class BlendSceneOperator(AbstractSceneOperator):
         return sum(leaf.nbytes for leaf in jax.tree.leaves(self))
 
     def render(self, flux, grid):
-        """Return the native detector array and whether every lit source is valid."""
+        """Return the finite native detector array and the covered source cells."""
         if flux.shape != grid.shape or tuple(grid.shape) != self.shape:
-            raise ValueError("source flux must match the native grid")
-        ny, nx = self.shape
+            raise ValueError("source flux must match the source grid")
+        ny, nx = self.out_shape
         dtype = self.weight.dtype
         n, planes = self.n_fft, len(self.flips)
-        valid = jnp.all((flux == 0) | (jnp.isfinite(flux) & self.valid))
         lit = jnp.where(jnp.isfinite(flux), flux, 0.0).astype(dtype).ravel()
 
         def add_term(acc, term):
@@ -349,4 +386,4 @@ class BlendSceneOperator(AbstractSceneOperator):
             part[:: -1 if fy else 1, :: -1 if fx else 1]
             for part, (fx, fy) in zip(parts, self.flips, strict=True)
         )
-        return jnp.where(valid, image, jnp.nan), valid
+        return image, self.covered

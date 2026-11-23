@@ -6,7 +6,7 @@ from .datasets import Archive, cache_dir, fetch_yip, list_yips, yip_exists, yip_
 from .header import lod_inscribed_to_circumscribed
 from .interpolation import SincOptions
 from .package import YIPPackage, open_yip
-from .scene import AbstractSceneOperator, BlendSceneOperator
+from .scene import AbstractSceneOperator, BlendSceneOperator, MaskedSceneOperator
 from .writer import write_yip
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "Archive",
     "BlendSceneOperator",
     "Coronagraph",
+    "MaskedSceneOperator",
     "SceneCoronagraph",
     "SincOptions",
     "YIPPackage",

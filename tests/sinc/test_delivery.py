@@ -549,7 +549,9 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
     bad = eqx.filter_jit(scene_model.render_scene)(
         unsupported, None, grid=admitted.grid
     )
-    assert not bad.valid and jnp.isnan(bad.image.data).all()
+    # The refused source is flagged and adds nothing: the image is the good one.
+    assert not bad.valid
+    np.testing.assert_allclose(bad.image.data, good.image.data, rtol=0, atol=1e-15)
 
 
 @pytest.mark.medium(
@@ -587,9 +589,10 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
         x, y = model.grid.coordinates()
         raster = model.operators[0].render_raster(flux, x[0], y[:, 0])
         direct = raster.intensity * model._offaxis_backend.conversion
-        data, valid = model.operators[0].render(flux, model.grid)
-        assert valid == raster.accepted
+        data, covered = model.operators[0].render(flux, model.grid)
+        assert covered[2, 1] and bool(raster.accepted)
         np.testing.assert_array_equal(data, direct)
+        assert not covered[0, 0] and bool(jnp.all(jnp.isfinite(data)))
         lit = replace(scene, data=flux.at[0, 0].set(1.0))
         assert not model.render_scene(lit, None, grid=model.grid).valid
 

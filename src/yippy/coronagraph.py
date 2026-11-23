@@ -36,6 +36,7 @@ from .scene import (
     DENSE_BATCH,
     AbstractSceneOperator,
     BlendSceneOperator,
+    MaskedSceneOperator,
     _DenseSceneOperator,
 )
 from .sinc import SceneRenderer
@@ -296,7 +297,15 @@ class Coronagraph(AbstractTableCoronagraph):
         reader = getattr(backend, "reader", None)
         return isinstance(reader, PrefilteredReader) and backend.blend_nodes is None
 
-    def scene_operator_bytes(self):
+    @property
+    def scene_grid(self):
+        """The grid of source cells a scene operator reads, in lambda/D.
+
+        ``render_scene`` takes the scene on this grid; its image is on ``grid``.
+        """
+        return self.grid
+
+    def scene_operator_bytes(self, mask=None):
         """Estimate the bytes of `with_scene_operator` without allocating them.
 
         Returns a dict with the keys ``resident`` (the operator), ``scratch``
@@ -323,7 +332,7 @@ class Coronagraph(AbstractTableCoronagraph):
             # The cube is gathered on the host, then copied to the device.
             scratch = resident + batch
         else:
-            return BlendSceneOperator.size_bytes(backend, self.grid)
+            return BlendSceneOperator.size_bytes(backend, self.scene_grid, mask)
         return {"resident": resident, "scratch": scratch, "total": resident + scratch}
 
     def _host_for_scene(self):
@@ -341,8 +350,8 @@ class Coronagraph(AbstractTableCoronagraph):
         )
         return host
 
-    def with_scene_operator(self, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Prepare a scene renderer for this model on its native source grid.
+    def with_scene_operator(self, *, max_bytes=DEFAULT_MAX_BYTES, mask=None):
+        """Prepare a scene renderer for this model on its ``scene_grid``.
 
         Prefiltered products render from their coefficient table. A blend model
         renders through ``BlendSceneOperator``, one FFT product per stored PSF. A
@@ -352,12 +361,15 @@ class Coronagraph(AbstractTableCoronagraph):
             max_bytes: Refuse, before allocating, an operator whose estimated
                 total (see ``scene_operator_bytes``) exceeds this many bytes, on
                 every route. ``None`` disables the check.
+            mask: Optional boolean mask on ``scene_grid``: the operator reads
+                only the sources inside it and reports the rest uncovered.
+                Combine masked operators with ``SceneCoronagraph.with_operators``.
 
         Raises:
             hwoutils.memory.MemoryLimit: The estimate exceeds ``max_bytes``.
         """
         if max_bytes is not None:
-            estimate = self.scene_operator_bytes()
+            estimate = self.scene_operator_bytes(mask)
             logger.info(
                 f"Scene operator estimate: {estimate['resident'] / 1e9:.2f} GB "
                 f"resident, {estimate['scratch'] / 1e9:.2f} GB scratch."
@@ -376,7 +388,12 @@ class Coronagraph(AbstractTableCoronagraph):
             valid = host.psf_datacube_info["accepted"]
             operator = _DenseSceneOperator(cube, valid)
         else:
-            operator = BlendSceneOperator.from_backend(backend, self.grid)
+            return SceneCoronagraph(
+                self,
+                (BlendSceneOperator.from_backend(backend, self.scene_grid, mask=mask),),
+            )
+        if mask is not None:
+            operator = MaskedSceneOperator(operator, mask)
         return SceneCoronagraph(self, (operator,))
 
     def __repr__(self):
@@ -390,8 +407,9 @@ class Coronagraph(AbstractTableCoronagraph):
 class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
     """YIP imaging model with prepared native scene operators.
 
-    The operators cover disjoint sets of sources; the rendered image is the sum
-    of their images and is valid when every operator's render is.
+    The rendered image is the sum of the operators' images, so operators should
+    cover disjoint sources. It is valid when every lit source cell is covered by
+    some operator; a lit cell no operator covers contributes zero.
     """
 
     operators: tuple[AbstractSceneOperator, ...]
@@ -402,14 +420,25 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
             setattr(self, field.name, getattr(model, field.name))
         self.operators = tuple(operators)
 
+    def with_operators(self, *operators):
+        """Return this model with more scene operators added to the sum."""
+        return SceneCoronagraph(self, (*self.operators, *operators))
+
     def render_scene(self, scene, wavelength_nm, *, grid):
-        """Sum native flux through the operators and sample the detector."""
+        """Sum native flux through the operators and sample the detector.
+
+        ``scene`` is a cell-integral image, on ``scene_grid`` or resampled onto
+        it. The result is finite; its ``valid`` is False when a lit cell is
+        nonfinite or covered by no operator.
+        """
         if scene.measure != Measure.integral() or scene.data.ndim != 2:
             raise ValueError("scene must be a two-dimensional cell-integral Image")
-        flux = scene.data if scene.grid == self.grid else on_grid(scene, self.grid).data
-        parts = [operator.render(flux, self.grid) for operator in self.operators]
+        source = self.scene_grid
+        flux = scene.data if scene.grid == source else on_grid(scene, source).data
+        parts = [operator.render(flux, source) for operator in self.operators]
         data = sum(part[0] for part in parts)
-        valid = jnp.all(jnp.stack([part[1] for part in parts]))
+        covered = jnp.any(jnp.stack([part[1] for part in parts]), axis=0)
+        valid = jnp.all((flux == 0) | (jnp.isfinite(flux) & covered))
         image = fraction_image(
             data, self.grid, (), self._offaxis_backend.measure, quantity=scene.quantity
         )

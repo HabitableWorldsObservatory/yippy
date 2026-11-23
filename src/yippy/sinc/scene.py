@@ -1,6 +1,7 @@
 """Extended-scene rendering from a fixed set of prefiltered coefficient images."""
 
 from abc import abstractmethod
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -21,23 +22,29 @@ CONTRACT_COLUMNS = 1024
 class AbstractSceneOperator(eqx.Module):
     """A linear map from native source-pixel flux to a detector image.
 
-    A scene coronagraph holds a tuple of operators over disjoint sets of
-    sources and adds their images, which is exact because rendering is linear in
-    the flux. ``yippy.BlendSceneOperator`` renders from stored PSF nodes and
+    A scene coronagraph holds a tuple of operators and adds their images, which
+    is exact because rendering is linear in the flux. Each operator renders the
+    source cells it covers and reports which they are; a lit cell it does not
+    cover contributes zero and is neither flagged nor an error here. The scene
+    is valid when every lit cell is covered by some operator, so operators over
+    disjoint masks compose into one valid render.
+    ``yippy.BlendSceneOperator`` renders from stored PSF nodes and
     ``SceneRenderer`` from prefiltered coefficient images.
     """
 
     @abstractmethod
     def render(self, flux, grid):
-        """Return the image and whether every lit source this operator covers is valid.
+        """Return the image and the source cells this operator covers.
 
         Args:
-            flux: Source flux [ny, nx] on the native grid, one value per pixel.
-            grid: The native grid of ``flux``.
+            flux: Source flux [sy, sx] on the source grid ``grid``, one value per
+                pixel. A nonfinite value counts as zero.
+            grid: The source grid of ``flux``.
 
         Returns:
-            ``(image, valid)``: the native detector array, linear in ``flux``
-            where valid, and a boolean scalar.
+            ``(image, covered)``: the finite native detector array, linear in
+            ``flux``, and a boolean [sy, sx] mask of the cells the operator
+            renders. The image holds no light from a cell outside the mask.
         """
 
 
@@ -283,11 +290,10 @@ class SceneRenderer(AbstractSceneOperator):
             )
         return partial
 
-    def _finish(self, amplitudes, accepted, sampling_ok, failures):
-        """Contract node amplitudes with the table and attach read diagnostics."""
-        reader = self.reader
+    def _image(self, amplitudes):
+        """Finite native image [ny, nx] of node amplitudes [groups, rows]."""
         partial = self._contract(amplitudes).reshape(
-            amplitudes.shape[0], *reader.products.pixels.shape
+            amplitudes.shape[0], *self.reader.products.pixels.shape
         )
         image = partial[0]
         if self._groups == 4:
@@ -299,6 +305,12 @@ class SceneRenderer(AbstractSceneOperator):
                 + partial[2][::-1, :]
                 + partial[3][::-1, ::-1]
             )
+        return image
+
+    def _finish(self, amplitudes, accepted, sampling_ok, failures):
+        """Contract node amplitudes with the table and attach read diagnostics."""
+        reader = self.reader
+        image = self._image(amplitudes)
         reason = jnp.asarray(Reason.BOUND_UNKNOWN, dtype=jnp.uint32)
         for failed, bit in failures:
             reason = reason | jnp.where(failed, jnp.uint32(bit), jnp.uint32(0))
@@ -399,24 +411,23 @@ class SceneRenderer(AbstractSceneOperator):
         )
 
     def render(self, flux, grid):
-        """Render the flux raster of a native grid, scaled by ``scale``.
+        """Render the flux raster of a source grid, scaled by ``scale``.
 
-        Returns the image and whether every lit source was readable. A bounded
-        policy never reads a PSF for an all-dark raster: that image is exactly
-        zero and valid.
+        Returns the finite image and the mask of cells that are readable: finite
+        coordinates, inside the domain, covered, with every tap stored. A lit
+        cell outside the mask adds nothing. A bounded policy never reads a PSF:
+        its image is exactly zero and its mask empty, so only an all-dark raster
+        is valid.
 
         Args:
             flux: Source flux [H, W] at the pixel centers of ``grid``.
-            grid: The native grid whose cell centers locate the sources.
+            grid: The source grid whose cell centers locate the sources.
         """
         x, y = grid.coordinates()
         flux = jnp.asarray(flux, jnp.float64)
-        read = self.render_raster(flux, x[0], y[:, 0])
-        data, valid = read.intensity * self.scale, read.accepted
-        if self.reader.policy.mode == "bounded":
-            dark = jnp.all(flux == 0)
-            data, valid = jnp.where(dark, 0.0, data), valid | dark
-        return data, valid
+        fold = self._fold_raster(flux, x[0], y[:, 0])
+        image = self._image(fold.amplitudes) * self.scale
+        return image, fold.readable & (self.reader.policy.mode == "sampling")
 
     def render_raster(self, scene: F64, x_lod: F64, y_lod: F64) -> ImageRead:
         """Render a raster scene [H, W] whose pixel centers are x_lod [W], y_lod [H].
@@ -432,6 +443,32 @@ class SceneRenderer(AbstractSceneOperator):
         and not in a point read, depending on how the backend compiles each
         path; the image then differs by the bump's edge value, the size of a
         stencil switch.
+        """
+        fold = self._fold_raster(scene, x_lod, y_lod)
+        lit, finite, usable = fold.lit, fold.finite, fold.usable
+        sampling_ok = jnp.all(usable | ~lit)
+        accepted = sampling_ok & (self.reader.policy.mode == "sampling")
+        return self._finish(
+            fold.amplitudes,
+            accepted,
+            sampling_ok,
+            (
+                (jnp.any(lit & ~finite), Reason.NONFINITE_QUERY),
+                (jnp.any(lit & finite & ~fold.member), Reason.OUTSIDE_DOMAIN),
+                (
+                    jnp.any(lit & finite & ~fold.covered)
+                    | jnp.any(lit & finite & fold.covered & fold.member & ~fold.stored),
+                    Reason.INCOMPLETE_STENCIL,
+                ),
+            ),
+        )
+
+    def _fold_raster(self, scene, x_lod, y_lod):
+        """Fold a raster onto the node amplitudes and flag each cell's readability.
+
+        A cell is readable when its coordinates are finite, inside the domain,
+        covered and every tap lands on a stored node. Only readable, finite,
+        lit cells in a sampling policy reach the amplitudes.
         """
         _require_precision()
         scene, x, y = jnp.asarray(scene), jnp.asarray(x_lod), jnp.asarray(y_lod)
@@ -459,10 +496,8 @@ class SceneRenderer(AbstractSceneOperator):
         finite = jnp.isfinite(scene) & finite_y[:, None] & finite_x[None, :]
         covered = covered_y[:, None] & covered_x[None, :]
         lit = scene != 0
-        usable = finite & member & covered
-        amount = jnp.where(usable & lit, scene, 0.0)
         safe = reader._safe_query
-        spreading = []
+        spreading, columns = [], []
         for axis, (clean, ok, span) in enumerate(
             (
                 (clean_x, finite_x & covered_x, span_x),
@@ -481,14 +516,22 @@ class SceneRenderer(AbstractSceneOperator):
                 weight[:, axis, :]
             )
             spreading.append(matrix)
+            columns.append((column, weight[:, axis, :] != 0))
+        # A cell is stored when every tap it weights is a stored node.
+        present = jnp.pad(self.lookup < rows, ((0, 1), (0, 1)))
+        (col_x, used_x), (col_y, used_y) = columns
+        stored = jnp.ones((height, width), dtype=jnp.bool_)
+        for ty in range(col_y.shape[1]):
+            for tx in range(col_x.shape[1]):
+                weighted = used_y[:, ty, None] & used_x[None, :, tx]
+                node_ok = present[col_y[:, ty, None], col_x[None, :, tx]]
+                stored = stored & (~weighted | node_ok)
+        readable = finite_y[:, None] & finite_x[None, :] & member & covered & stored
+        usable = finite & member & covered & stored
+        sampling = reader.policy.mode == "sampling"
+        amount = jnp.where(usable & lit & sampling, scene, 0.0)
         across, down = spreading
         folded = down.T @ amount @ across
-        # Flux that lands on a node outside the table marks an unreadable pixel.
-        mass = down.T @ jnp.abs(amount) @ across
-        present = jnp.pad(self.lookup < rows, ((0, 1), (0, 1)))
-        stored = ~jnp.any((mass > 0) & ~present)
-        sampling_ok = jnp.all(usable | ~lit) & stored
-        accepted = sampling_ok & (reader.policy.mode == "sampling")
         index_y, index_x = self.nodes[:, 0], self.nodes[:, 1]
         quadrant = self._quadrant(
             index_x + self._corner_xy[0], index_y + self._corner_xy[1]
@@ -498,13 +541,17 @@ class SceneRenderer(AbstractSceneOperator):
             .at[quadrant, self.lookup[index_y, index_x]]
             .add(folded[index_y, index_x])
         )
-        return self._finish(
-            amplitudes,
-            accepted,
-            sampling_ok,
-            (
-                (jnp.any(lit & ~finite), Reason.NONFINITE_QUERY),
-                (jnp.any(lit & finite & ~member), Reason.OUTSIDE_DOMAIN),
-                (jnp.any(lit & finite & ~covered) | ~stored, Reason.INCOMPLETE_STENCIL),
-            ),
-        )
+        return _Fold(amplitudes, lit, finite, usable, readable, member, covered, stored)
+
+
+class _Fold(NamedTuple):
+    """Node amplitudes of a raster fold and the per-cell flags that gate it."""
+
+    amplitudes: jax.Array
+    lit: jax.Array
+    finite: jax.Array
+    usable: jax.Array
+    readable: jax.Array
+    member: jax.Array
+    covered: jax.Array
+    stored: jax.Array

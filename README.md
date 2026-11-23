@@ -144,26 +144,35 @@ def simulate(coro, x_lod, y_lod, diameter_lod):
 planets, star = simulate(coro, jnp.array([3.0]), jnp.array([2.0]), 0.01)
 ```
 
-For an extended scene, prepare its operator outside JIT. Unsupported pixels
-may carry zero flux. An illuminated unsupported pixel sets the result validity
-to false.
+For an extended scene, prepare its operator outside JIT. The render is always
+finite: a lit source cell that no operator covers (outside the hull of the
+tabulated source nodes, or outside every operator's mask) contributes zero and
+sets `SceneRender.valid` to false.
 
 ```python notest
 coro = coro.with_scene_operator()
-image, valid = coro.render_scene(scene_image, None, grid=detector_grid)
+render = coro.render_scene(scene_image, None, grid=detector_grid)
+image, valid = render.image, render.valid
 ```
 
 `with_scene_operator()` returns a `SceneCoronagraph`, which carries a tuple of
 scene operators (`operators`) beside the unchanged model: a
 `BlendSceneOperator` or a sinc `SceneRenderer`. Each operator is a linear map
-from source flux to an image over its own set of sources, and the render is
-the sum of their images.
+from source flux to an image that renders the source cells it covers and
+returns, with the image, a boolean mask of those cells. The render is the sum
+of their images and is valid when every lit cell is covered by some operator.
+`with_scene_operator(mask=...)` builds an operator over the cells of a mask
+only; masked operators over disjoint masks add to the operator over their
+union, and `SceneCoronagraph.with_operators(...)` combines them.
+`MaskedSceneOperator` restricts any operator the same way.
+
+The scene is a cell-integral image on `coro.scene_grid`, the stored PSF grid; its
+image is on `coro.grid`.
 The blend operator renders the scene with one FFT product per stored PSF, so
 it holds the stored PSFs rather than one PSF per source pixel (about 60 MB in
-float32 and 120 MB in float64 for `eac1_aavc_2d` on its 256 by 256 grid, where a
-PSF per source takes 8.6 GB), and it is exactly linear in the source flux. A
-render may ring slightly below zero, so clip it where a nonnegative image is
-required.
+float32 for `eac1_aavc_2d` on its 256 by 256 grid, where a PSF per source takes
+8.6 GB), and it is exactly linear in the source flux. A render may ring
+slightly below zero, so clip it where a nonnegative image is required.
 
 `coro.scene_operator_bytes()` reports the resident and scratch bytes of the
 operator from shapes alone. `with_scene_operator(max_bytes=2 * 2**30)` raises
