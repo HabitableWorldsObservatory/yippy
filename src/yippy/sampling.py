@@ -39,7 +39,6 @@ def fraction_image(
     axes,
     measure,
     *,
-    outside="zero",
     quantity="stellar_flux_fraction",
     reconstruction=None,
 ):
@@ -56,7 +55,6 @@ def fraction_image(
         axes: Names of the leading axes of ``data``.
         measure: Measure of the stored native values, used to decide whether the
             result is returned as stored or converted to a density.
-        outside: Fill rule for positions outside the grid.
         quantity: Name of the physical quantity carried by the image.
         reconstruction: Reconstruction override between pixels, or None for the
             default.
@@ -72,6 +70,5 @@ def fraction_image(
         quantity,
         reconstruction=reconstruction
         or ("nearest" if measure == Measure.integral() else "band_limited"),
-        outside=outside,
     )
     return image if measure == image.measure else image.density("grid")

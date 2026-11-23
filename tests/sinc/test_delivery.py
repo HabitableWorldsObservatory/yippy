@@ -264,7 +264,6 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     # Zero extension doubles each axis (period 8): the table is centered in a
     # zero field, since nothing is reflected past its edge.
     stellar = view.stellar_map(None, 0.0)
-    assert stellar.outside == "zero"
     data = np.asarray(stellar.integrated().data)
     even = np.zeros((8, 8))
     even[2:6, 2:6] = data

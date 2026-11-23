@@ -283,12 +283,6 @@ def test_public_images_carry_header_grid(syn_coro_1d):
         assert image.data.shape == grid.shape
         assert (image.measure, image.quantity) == (Measure.intensive(), "transmission")
         assert image.reconstruction == "linear"
-        assert image.outside == "zero"
-    # No product is extended past its table: every image is zero outside it.
-    for image in (native_star, batch_star, rendered_star):
-        assert image.outside == "zero"
-    for image in (native_source, batch_source, rendered_source):
-        assert image.outside == "zero"
     # A coarser detector cannot promise to reconstruct the native bandwidth.
     coarse = PixelGrid.regular((32, 32), 0.5, "lod", frame=grid.frame)
     for image in (
