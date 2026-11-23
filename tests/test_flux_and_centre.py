@@ -357,7 +357,9 @@ def test_scene_source_grid_matches_point_sources(tmp_path, npix, kind):
     psfs = jnp.asarray(cube[half:, half:]).at[-1, -1].set(jnp.nan)
     # Reject a different, finite plane as well: admission is independent of NaN.
     mask = jnp.ones(psfs.shape[:2], bool).at[-1, -2:].set(False)
-    partial = SceneCoronagraph(full, (_DenseSceneOperator(psfs, mask),))
+    partial = SceneCoronagraph(
+        full, (_DenseSceneOperator(psfs, mask),), scene_grid=full.grid
+    )
     origin = replace(
         image, data=jnp.zeros_like(image.data).at[npix // 2, npix // 2].set(1.0)
     )

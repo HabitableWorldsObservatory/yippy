@@ -119,6 +119,11 @@ class OffJAX(OffAx):
         self.source_radius_lod = float(
             np.max(np.hypot(self.flat_offsets[:, 0], self.flat_offsets[:, 1]))
         )
+        # Host floats, so the scene grid is sized without reading a device array.
+        self.source_extent_lod = (
+            float(np.max(np.abs(self.flat_offsets[:, 0]))),
+            float(np.max(np.abs(self.flat_offsets[:, 1]))),
+        )
         radius = self.source_radius_lod
         self._hull = (
             None

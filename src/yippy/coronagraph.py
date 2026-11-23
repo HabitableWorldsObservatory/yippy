@@ -1,5 +1,6 @@
 """Immutable YIP tables implementing the shared coronagraph contract."""
 
+import math
 from copy import copy
 from dataclasses import fields, replace
 from math import pi
@@ -301,9 +302,41 @@ class Coronagraph(AbstractTableCoronagraph):
     def scene_grid(self):
         """The grid of source cells a scene operator reads, in lambda/D.
 
-        ``render_scene`` takes the scene on this grid; its image is on ``grid``.
+        Cells of the stored PSF grid, extended symmetrically to the hull of the
+        tabulated off-axis nodes when the nodes reach beyond the stamp, so a
+        source between the stamp edge and the outermost node is rendered, not
+        dropped. ``render_scene`` takes the scene on this grid; its image is on
+        ``grid``. Routes that render from a per-source cube or a prefiltered
+        table read the stored PSF grid.
         """
-        return self.grid
+        backend = self._offaxis_backend
+        grid = self.grid
+        if (
+            self._prefiltered_scene()
+            or self._dense_delivery()
+            or not grid.is_geometric
+            or not hasattr(backend, "source_extent_lod")
+        ):
+            return grid
+        if backend.type == "1d":
+            reach = (backend.source_radius_lod,) * 2
+        else:
+            reach = backend.source_extent_lod
+        ny, nx = grid.shape
+        step = grid.step
+        # Cell centers out to the cell that holds the outermost node.
+        pad_x, pad_y = (
+            max(0, math.ceil(r / step - 0.5 - (n - 1) / 2 - 1e-9))
+            for r, n in zip(reach, (nx, ny), strict=True)
+        )
+        if not (pad_x or pad_y):
+            return grid
+        return replace(
+            grid,
+            shape=(ny + 2 * pad_y, nx + 2 * pad_x),
+            center_x=grid.center_x + pad_x,
+            center_y=grid.center_y + pad_y,
+        )
 
     def scene_operator_bytes(self, mask=None):
         """Estimate the bytes of `with_scene_operator` without allocating them.
@@ -413,12 +446,27 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
     """
 
     operators: tuple[AbstractSceneOperator, ...]
+    _source_grid: PixelGrid = eqx.field(static=True)
 
-    def __init__(self, model, operators):
-        """Reuse the prepared imaging tables and bind the scene operators."""
+    def __init__(self, model, operators, scene_grid=None):
+        """Reuse the prepared imaging tables and bind the scene operators.
+
+        Args:
+            model: The imaging model whose tables the operators sit beside.
+            operators: Scene operators built for ``scene_grid``.
+            scene_grid: The source grid the operators read; the model's own
+                ``scene_grid`` by default. Pass the stored PSF grid for an
+                operator built on it.
+        """
         for field in fields(Coronagraph):
             setattr(self, field.name, getattr(model, field.name))
         self.operators = tuple(operators)
+        self._source_grid = model.scene_grid if scene_grid is None else scene_grid
+
+    @property
+    def scene_grid(self):
+        """The grid of source cells the operators read."""
+        return self._source_grid
 
     def with_operators(self, *operators):
         """Return this model with more scene operators added to the sum."""

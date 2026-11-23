@@ -166,19 +166,23 @@ only; masked operators over disjoint masks add to the operator over their
 union, and `SceneCoronagraph.with_operators(...)` combines them.
 `MaskedSceneOperator` restricts any operator the same way.
 
-The scene is a cell-integral image on `coro.scene_grid`, the stored PSF grid; its
-image is on `coro.grid`.
+The scene is a cell-integral image on `coro.scene_grid`: the stored PSF grid,
+extended symmetrically to the hull of the tabulated off-axis nodes where they
+reach beyond it (496 by 496 cells at 0.25 lambda/D for `eac1_aavc_2d`, whose
+nodes reach 62 lambda/D, against its 256 by 256 stamp), so a source between the
+stamp edge and the outermost node is rendered. The image is on `coro.grid`.
 The blend operator renders the scene with one FFT product per stored PSF, so
-it holds the stored PSFs rather than one PSF per source pixel (about 60 MB in
-float32 for `eac1_aavc_2d` on its 256 by 256 grid, where a PSF per source takes
-8.6 GB), and it is exactly linear in the source flux. A render may ring
+it holds the stored PSFs rather than one PSF per source pixel (about 0.12 GB in
+float32 for `eac1_aavc_2d` on its scene grid, where a PSF per stamp-grid source
+takes 8.6 GB), and it is exactly linear in the source flux. A render may ring
 slightly below zero, so clip it where a nonnegative image is required.
 
 `coro.scene_operator_bytes()` reports the resident and scratch bytes of the
 operator from shapes alone. `with_scene_operator(max_bytes=2 * 2**30)` raises
 `hwoutils.memory.MemoryLimit` (a `ValueError`) before allocating when the
 estimate exceeds `max_bytes`, on every route including prefiltered products;
-pass a larger value, or `None` to skip the check.
+pass a larger value, or `None` to skip the check. Prefiltered and per-source
+routes read the stored PSF grid.
 
 ## Performance records
 

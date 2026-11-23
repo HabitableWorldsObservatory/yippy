@@ -320,3 +320,54 @@ def test_nonfinite_flux_is_zero_and_invalid(syn_coro_2d):
     bad = model.render_scene(broken, None, grid=model.grid)
     assert good.valid and not bad.valid
     assert bool(jnp.all(jnp.isfinite(bad.image.data)))
+
+
+def test_scene_grid_reaches_the_node_hull(tmp_path):
+    """Fails if sources between the stamp edge and the outermost node are dropped.
+
+    The nodes reach 3 times the stamp half-width. The scene grid must hold the
+    cells out to the hull, the operator must read them like the per-source blend
+    does, and the operator covers exactly the cells inside the hull.
+    """
+    package = write_synthetic_yip(
+        tmp_path / "wide",
+        kind="2dq",
+        npix=64,
+        pixscale=0.25,
+        max_offset_lod=24.0,
+        offset_step_lod=1.0,
+        psf_sigma_lod=2.0,
+        occulter_floor=1.0,
+    )
+    model = open_yip(package.path).prepare()
+    stamp = model.grid
+    grid = model.scene_grid
+    assert grid.shape[0] > stamp.shape[0] and grid.shape[1] > stamp.shape[1]
+    x, y = (np.asarray(c) for c in grid.coordinates())
+    assert np.abs(x).max() >= 24.0 - 0.25 and np.abs(y).max() >= 24.0 - 0.25
+    # The stamp sits at the middle of the scene grid, cell for cell.
+    ny, nx = stamp.shape
+    top, left = (grid.shape[0] - ny) // 2, (grid.shape[1] - nx) // 2
+    np.testing.assert_allclose(
+        x[top, left : left + nx], np.asarray(stamp.coordinates()[0])[0]
+    )
+    operator = model.with_scene_operator()
+    backend = model._offaxis_backend
+    inside = np.asarray(backend.in_source_domain(x, y))
+    np.testing.assert_array_equal(np.asarray(operator.operators[0].covered), inside)
+    # A source past the stamp edge puts its wing on the stamp. The dense read
+    # rings in the outer wings of such a PSF (it translates the truncated array
+    # by Fourier phase), so compare the image peak, which is clear of the edge.
+    for px, py in ((8.9, 0.9), (10.1, 4.4)):
+        cell = np.unravel_index(np.argmin((x - px) ** 2 + (y - py) ** 2), x.shape)
+        flux = np.zeros(grid.shape)
+        flux[cell] = 1.0
+        image, covered = operator.operators[0].render(jnp.asarray(flux), grid)
+        reference = np.asarray(
+            backend._create_psfs(jnp.asarray([x[cell]]), jnp.asarray([y[cell]]))
+        )[0]
+        assert bool(covered[cell])
+        assert np.unravel_index(np.argmax(image), image.shape) == np.unravel_index(
+            np.argmax(reference), reference.shape
+        )
+        np.testing.assert_allclose(image.max(), reference.max(), rtol=2e-3)
