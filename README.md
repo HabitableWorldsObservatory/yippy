@@ -110,7 +110,10 @@ product saying so.
 
 Images carry array values in `.data` and geometry in `.grid`.
 `source_psfs` returns an `Image` with leading axis `"source"` and a boolean
-validity vector. Stellar and sky maps are two-dimensional for scalar diameters.
+validity vector. A source is valid when it lies inside the source domain, the
+hull of the tabulated off-axis nodes (62 lambda/D for `eac1_aavc_2d`, which is
+wider than its 32 lambda/D PSF stamp); an invalid source has an all-zero image,
+never NaN. Stellar and sky maps are two-dimensional for scalar diameters.
 Source and stellar
 images are per-pixel fractions of unocculted stellar flux. Sky transmission is
 dimensionless and uses sampled-value semantics. The off-axis, stellar, and sky
@@ -176,6 +179,11 @@ it holds the stored PSFs rather than one PSF per source pixel (about 0.12 GB in
 float32 for `eac1_aavc_2d` on its scene grid, where a PSF per stamp-grid source
 takes 8.6 GB), and it is exactly linear in the source flux. A render may ring
 slightly below zero, so clip it where a nonnegative image is required.
+
+Build a disk on `coro.scene_grid`. A uniform disk filled exactly to the edge of
+that grid still reads `valid` False, because the outermost cells lie just
+outside the polygon of the off-axis nodes and their flux is dropped; keep lit
+flux inside the node hull to render with `valid` True.
 
 `coro.scene_operator_bytes()` reports the resident and scratch bytes of the
 operator from shapes alone. `with_scene_operator(max_bytes=2 * 2**30)` raises
@@ -356,8 +364,9 @@ that campaign test with the core's separate binary64 nm-frame arithmetic.
 Images contain incident photon fractions per pixel. Integral samples receive
 only their declared photon conversion; mean densities additionally receive the
 pixel area. Sinc output retains signed excursions. Each source read returns an
-image and a validity flag. Refused positions carry NaN pixels in eager and
-compiled reads.
+image and a validity flag. `source_psfs` gives a refused position an all-zero
+image and `valid` False, in eager and compiled reads; the sinc reader's own
+`read` returns NaN pixels with a refused status.
 
 The model selects one monochromatic product and reads stellar and sky data
 from the manifest's separate package. Each `Image` carries its own `PixelGrid`
