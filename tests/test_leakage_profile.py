@@ -526,29 +526,51 @@ def record_vs_ring(coro, record, diameter_lod):
     return got / truth - 1.0
 
 
-def test_record_leakage_at_each_tabulated_diameter(eac1_curves):
+# Measured worst case over the four separations, per tabulated diameter, of the
+# record against the converged ring mean of that plane (360 apertures with a
+# 16 by 16 sub-grid, 720 with 32 agree to 0.02 percent). The 0.1 percent at the
+# smallest diameters is the record's, not the truth's: it is the same at every
+# truth resolution. It does not come from the radial step of the ring profile
+# (halving it twice moves the 0.25 and 0.50 lambda/D rows by under 0.1 percent)
+# or the azimuth count, and a quintic in place of the cubic map interpolant
+# leaves it unchanged. The ring rule weights a point-sampled ring-mean map with
+# pixel weights; the truth sums the pixel values over the same apertures. The two
+# are the same integral only in the continuum, and at the diameters where the
+# map varies on the scale of a pixel inside the aperture the gap reaches
+# 0.6 percent.
+KNOT_TOL = {
+    "small": 2e-3,  # measured max 0.14 percent at diameters up to 0.126
+    "large": 7e-3,  # measured max 0.61 percent at 0.25, 0.50 and 1.0
+}
+
+
+@pytest.mark.parametrize("knot", range(12))
+def test_record_leakage_at_each_tabulated_diameter(eac1_curves, knot):
     """Fails if the record's leakage is not the ring mean of that table plane.
 
-    Truth is 360 exact-coverage apertures on the plane at each tabulated
-    diameter. Tolerance 0.2 percent, the card's; the measured worst case over the
-    diameters tried is 0.11 percent, the sub-grid coverage of the NumPy truth.
+    Truth is the mean over 360 exact-coverage apertures on the plane at the
+    tabulated diameter, independent of the record's construction. The tolerance
+    is the measured worst case rounded up: 0.2 percent up to 0.126 lambda/D
+    (measured 0.14) and 0.7 percent from 0.25 lambda/D (measured 0.61). The
+    comment above says where that gap comes from.
     """
     coro, record = eac1_curves
-    diameters = np.asarray(record.stellar_diameters_lod)
-    assert diameters.size > 1
-    for diameter in diameters[[0, 4, 6]]:
-        err = record_vs_ring(coro, record, float(diameter))
-        assert np.max(np.abs(err)) <= RECORD_TOL, (diameter, err)
+    diameter = float(np.asarray(record.stellar_diameters_lod)[knot])
+    err = record_vs_ring(coro, record, diameter)
+    tol = KNOT_TOL["large" if diameter > 0.2 else "small"]
+    assert np.max(np.abs(err)) <= tol, (diameter, err)
 
 
 @pytest.mark.parametrize("diameter_lod", [0.0325, 0.045])
 def test_record_leakage_between_diameters_follows_the_map(eac1_curves, diameter_lod):
     """Fails if the curves route leaves the image route's interpolated map.
 
-    Truth is the ring mean of the map the image route interpolates at this
-    diameter. Tolerance 0.2 percent; measured worst case 0.14 percent. The
-    interpolation in diameter holds this only for a star below about 0.07
-    lambda/D, which covers a Sun at 10 pc (0.032 lambda/D at 1 micron).
+    This checks that the two routes agree, not that either is accurate: the
+    truth is the ring mean of the map the image route interpolates between
+    tabulated diameters, so it shares the interpolation rule and the table, which
+    holds no map between its knots. The 0.2 percent bound is the measured
+    agreement (worst case 0.14 percent at these diameters, which sit below
+    0.07 lambda/D, where the two routes stay within it).
     """
     coro, record = eac1_curves
     err = record_vs_ring(coro, record, diameter_lod)

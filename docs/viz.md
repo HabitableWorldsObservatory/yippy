@@ -90,8 +90,9 @@ plt.show()
 
 Supported record metrics are `throughput`, `core_area_lod2`,
 `leakage_fraction`, `leakage_density_lod2`, and `raw_contrast`. The leakage
-metrics and `raw_contrast` are drawn at `stellar_diameter_lod` (default the
-smallest tabulated diameter, a point star).
+metrics and `raw_contrast` are drawn at `stellar_diameter_lod`. A record tabulated over
+stellar diameter needs it and raises without it; a record of one profile does
+not.
 Stellar leakage and raw contrast use logarithmic y axes. Zero and negative
 samples remain in the line data; Matplotlib's log-axis policy controls their
 display. Use `line_kw` for line styling and the returned axes for titles and

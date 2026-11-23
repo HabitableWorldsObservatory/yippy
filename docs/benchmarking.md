@@ -46,7 +46,10 @@ The leakage quantities and `raw_contrast` carry one profile per stellar diameter
 of the product, tabulated in `stellar_diameters_lod` (shape `(K, S)`), and are
 read between the tabulated diameters with the rule the image route uses for the
 stellar map (a cubic spline of the log intensity in diameter). Evaluating them
-needs the star's diameter; zero is a point star. A record made with
+needs the star's diameter; zero is a point star.
+
+Accuracy between diameters. The shipped product tabulates 12 stellar diameters, 0, 0.001 and then each knot a factor of two above the last up to 1.0 lambda/D, so the leakage between two knots is an interpolation through a table that holds no map there. Against the image route, which applies the same rule to the stellar map, the curves route agrees to 0.14 percent at 0.045, 0.5 percent at 0.09, 3.8 percent at 0.18, 10 percent at 0.36 and 19 percent at 0.71 lambda/D (at the separations tested, 2.9 to 11 lambda/D); neither route is known to be right between knots at the larger diameters. A Sun at 10 pc is 0.032 lambda/D at 1 micron, inside the accurate region; a star beyond the last knot (1.0 lambda/D) raises. At the tabulated diameters the record equals the ring mean of that plane to 0.14 percent up to 0.126 lambda/D and 0.6 percent at 0.25 lambda/D and above.
+ A record made with
 `stellar_diameter_lod=d` holds one profile and serves only that star.
 
 ## Key Results
