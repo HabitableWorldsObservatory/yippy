@@ -40,6 +40,7 @@ sinc/index.md
 ```{toctree}
 :maxdepth: 2
 :caption: Reference
+stellar_map.md
 viz.md
 contrast_floor.md
 azimuthal_averaging.md
@@ -62,7 +63,8 @@ select records with `coro.curves(rule)`, and query images through
 `source_psfs(None, x_lod, y_lod, grid=None).image` or
 `stellar_map(None, diameter_lod, grid=None)`. Native images carry their product grid and sampling measure. Point samples
 carry density per square grid unit. Call `image.integrated()` for midpoint
-photon fractions per pixel. Explicit target grids request pixel integration.
+photon fractions per pixel. Explicit target grids request pixel integration
+(see [the stellar intensity map](stellar_map.md) for the read of the star).
 Source reads include one validity flag per position.
 
 Aperture rules and generic photometry belong to optixstuff:
