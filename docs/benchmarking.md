@@ -44,13 +44,28 @@ it does not specify an outer working angle.
 
 The leakage quantities and `raw_contrast` carry one profile per stellar diameter
 of the product, tabulated in `stellar_diameters_lod` (shape `(K, S)`), and are
-read between the tabulated diameters with the rule the image route uses for the
-stellar map (a cubic spline of the log intensity in diameter). Evaluating them
-needs the star's diameter; zero is a point star.
+read between the tabulated diameters with a cubic spline of the log intensity.
+The image route switches to PCHIP in linear intensity for pixels with a zero
+knot, including knots treated as zero in the working dtype. Evaluating the
+curves needs the star's diameter; zero is a point star.
 
-Accuracy between diameters. The shipped product tabulates 12 stellar diameters, 0, 0.001 and then each knot a factor of two above the last up to 1.0 lambda/D, so the leakage between two knots is an interpolation through a table that holds no map there. Against the image route, which applies the same rule to the stellar map, the curves route agrees to 0.14 percent at 0.045, 0.5 percent at 0.09, 3.8 percent at 0.18, 10 percent at 0.36 and 19 percent at 0.71 lambda/D (at the separations tested, 2.9 to 11 lambda/D); neither route is known to be right between knots at the larger diameters. A Sun at 10 pc is 0.032 lambda/D at 1 micron, inside the accurate region; a star beyond the last knot (1.0 lambda/D) raises. At the tabulated diameters the record equals the ring mean of that plane to 0.14 percent up to 0.126 lambda/D and 0.6 percent at 0.25 lambda/D and above.
+Accuracy between diameters. The shipped product tabulates 12 stellar diameters, 0, 0.001 and then each knot a factor of two above the last up to 1.0 lambda/D, so the leakage between two knots is an interpolation through a table that holds no map there. Against the image route, the curves route agrees to 0.14 percent at 0.045, 0.5 percent at 0.09, 3.8 percent at 0.18, 10 percent at 0.36 and 19 percent at 0.71 lambda/D (at the separations tested, 2.9 to 11 lambda/D); neither route is known to be right between knots at the larger diameters. A Sun at 10 pc is 0.032 lambda/D at 1 micron, inside the accurate region; a star beyond the last knot (1.0 lambda/D) raises. At the tabulated diameters the record equals the ring mean of that plane to 0.14 percent up to 0.126 lambda/D and 0.6 percent at 0.25 lambda/D and above.
  A record made with
 `stellar_diameter_lod=d` holds one profile and serves only that star.
+
+## EXOSIMS FITS export
+
+`PIXSCALE` gives the angular pitch per pixel in the header's `UNITS`, using
+the export wavelength and pupil diameter as the reference for `LAMBDA/D`.
+
+- In `core_thruput.fits`, `PIXSCALE` describes the off-axis PSF pixels used to measure throughput.
+- In `core_area.fits`, `PIXSCALE` describes the off-axis PSF pixels used to measure aperture area.
+- In `raw_contrast.fits`, `PIXSCALE` describes the off-axis PSF pixels used for the core photometry.
+- In `core_mean_intensity.fits`, `PIXSCALE` describes the stellar intensity pixels that set the leakage fraction per pixel.
+- In `occ_trans.fits`, `PIXSCALE` describes the sky transmission pixels used to measure the radial response.
+
+`specs.json` repeats the stellar pixel pitch and its unit as
+`core_platescale` and `core_platescale_units`.
 
 ## Key Results
 
