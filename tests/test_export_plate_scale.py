@@ -1,13 +1,16 @@
 """Check EXOSIMS plate scales and the absolute stellar leakage density."""
 
 import json
+from dataclasses import replace
 
+import equinox as eqx
 import jax
 import numpy as np
 import pytest
 from astropy.io import fits
 from hwoutils.conversions import lambda_d_to_arcsec
 from sinc_fixture import save_manifest, write_delivery
+from synthetic_yip import write_synthetic_yip
 
 from yippy import open_yip
 from yippy.export import export_exosims
@@ -97,3 +100,36 @@ def test_arcsec_export_plate_scale_by_product(unequal_product_grids, tmp_path):
         rtol=1e-6,
         atol=0,
     )
+
+
+def test_export_refuses_dark_point_star_before_writing(tmp_path):
+    """A dark plane stays invalid even when other stellar diameters are bright."""
+    package_dir = tmp_path / "package"
+    write_synthetic_yip(package_dir, npix=24, max_offset_lod=2.0)
+    with fits.open(package_dir / "stellar_intens.fits", mode="update") as hdus:
+        hdus[0].data[0] = 0
+    coro = open_yip(package_dir).prepare()
+
+    write_to = tmp_path / "exosims"
+    write_to.mkdir()
+    with pytest.raises(ValueError, match=r"leakage.*separations.*0\.5.*0\.75.*1\.0"):
+        export_exosims(coro, separations_lod=[0.5, 0.75, 1.0], output_dir=write_to)
+    assert list(write_to.iterdir()) == []
+
+
+def test_export_names_separation_with_nonfinite_leakage(
+    unequal_product_grids, tmp_path
+):
+    """A rising leakage profile overflows when extrapolated far past the knots."""
+    coro = unequal_product_grids
+    record = coro.curves()
+    axis = np.asarray(record.separation_lod)
+    levels = np.geomspace(1e-50, 1, axis.size)
+    leakage = np.broadcast_to(levels, record.leakage_density_lod2.shape)
+    record = replace(record, leakage_density_lod2=leakage)
+    coro = eqx.tree_at(lambda model: model._records[0], coro, record)
+
+    write_to = tmp_path / "exosims"
+    with pytest.raises(ValueError, match=r"leakage.*separations.*\[10000\.0\]"):
+        export_exosims(coro, separations_lod=[axis[-1], 10000.0], output_dir=write_to)
+    assert not write_to.exists()

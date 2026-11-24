@@ -52,6 +52,10 @@ def export_exosims(
     Returns:
         The ``specs.json`` content: pupil diameter in m, obscuration fraction and the
         starlight suppression system entry.
+
+    Raises:
+        ValueError: The requested units are unsupported, or the stellar leakage is
+            nonpositive or nonfinite at a requested separation.
     """
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
         raise ValueError("units must be 'LAMBDA/D' or 'arcsec'")
@@ -76,6 +80,35 @@ def export_exosims(
     offaxis_pitch_lod = pitch_in_export_lod(coro.grid)
     stellar_pitch_lod = pitch_in_export_lod(coro.stellar_grid)
     sky_pitch_lod = pitch_in_export_lod(coro.sky_trans.grid)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        leakage = np.asarray(
+            performance.evaluate("leakage_density_lod2", separations, point_star)
+        )
+        mean_intensity = leakage * stellar_pitch_lod**2
+    invalid = ~np.isfinite(mean_intensity) | (mean_intensity <= 0)
+
+    # The diameter evaluator floors dark profiles before taking their logarithms.
+    # Check the selected plane's measurements at knots and across dark intervals.
+    axis = np.asarray(performance.separation_lod)
+    point_leakage = np.asarray(performance.leakage_density_lod2[0])
+    knot = np.clip(
+        np.searchsorted(axis, separations, side="right") - 1, 0, len(axis) - 1
+    )
+    left = np.minimum(knot, max(len(axis) - 2, 0))
+    right = np.minimum(left + 1, len(axis) - 1)
+    bad_sample = ~np.isfinite(point_leakage) | (point_leakage <= 0)
+    invalid |= np.where(
+        separations == axis[knot],
+        bad_sample[knot],
+        bad_sample[left] & bad_sample[right],
+    )
+    if np.any(invalid):
+        offending = separations[invalid].tolist()
+        raise ValueError(
+            "EXOSIMS export found nonpositive or nonfinite stellar leakage at "
+            f"separations (lambda/D) {offending}"
+        )
 
     output_separations = separations * angle_scale
     exosims_dir = (
@@ -109,10 +142,7 @@ def export_exosims(
         "core_area": np.asarray(performance.evaluate("core_area_lod2", separations))
         * angle_scale**2,
         "raw_contrast": performance.evaluate("raw_contrast", separations, point_star),
-        "core_mean_intensity": np.asarray(
-            performance.evaluate("leakage_density_lod2", separations, point_star)
-        )
-        * stellar_pitch_lod**2,
+        "core_mean_intensity": mean_intensity,
         "occ_trans": coro.uniform_sky_response(separations),
     }
     pitches_lod = {"core_mean_intensity": stellar_pitch_lod, "occ_trans": sky_pitch_lod}
