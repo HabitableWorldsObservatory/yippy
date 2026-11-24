@@ -52,9 +52,14 @@ def export_exosims(
     Returns:
         The ``specs.json`` content: pupil diameter in m, obscuration fraction and the
         starlight suppression system entry.
+
+    Raises:
+        ValueError: The requested units are unsupported, or the stellar leakage is
+            nonpositive or nonfinite at a requested separation.
     """
     if units.upper() not in ("LAMBDA/D", "ARCSEC"):
         raise ValueError("units must be 'LAMBDA/D' or 'arcsec'")
+    units = "arcsec" if units.lower() == "arcsec" else "LAMBDA/D"
     performance = coro._records[0]
     point_star = _smallest_diameter(performance)
     separations = np.asarray(
@@ -62,13 +67,49 @@ def export_exosims(
         dtype=float,
     )
     offaxis = coro.package.header.offaxis_psfs
-    angle_scale = (
-        float(
-            performance.frame.lod_to_arcsec(performance.frame.reference_wavelength_nm)
-        )
-        if units.lower() == "arcsec"
-        else 1.0
+    arcsec_per_lod = float(
+        performance.frame.lod_to_arcsec(performance.frame.reference_wavelength_nm)
     )
+    angle_scale = arcsec_per_lod if units == "arcsec" else 1.0
+
+    def pitch_in_export_lod(grid):
+        frame = grid.frame
+        native_arcsec_per_lod = frame.lod_to_arcsec(frame.reference_wavelength_nm)
+        return grid.step * (native_arcsec_per_lod / arcsec_per_lod)
+
+    offaxis_pitch_lod = pitch_in_export_lod(coro.grid)
+    stellar_pitch_lod = pitch_in_export_lod(coro.stellar_grid)
+    sky_pitch_lod = pitch_in_export_lod(coro.sky_trans.grid)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        leakage = np.asarray(
+            performance.evaluate("leakage_density_lod2", separations, point_star)
+        )
+        mean_intensity = leakage * stellar_pitch_lod**2
+    invalid = ~np.isfinite(mean_intensity) | (mean_intensity <= 0)
+
+    # The diameter evaluator floors dark profiles before taking their logarithms.
+    # Check the selected plane's measurements at knots and across dark intervals.
+    axis = np.asarray(performance.separation_lod)
+    point_leakage = np.asarray(performance.leakage_density_lod2[0])
+    knot = np.clip(
+        np.searchsorted(axis, separations, side="right") - 1, 0, len(axis) - 1
+    )
+    left = np.minimum(knot, max(len(axis) - 2, 0))
+    right = np.minimum(left + 1, len(axis) - 1)
+    bad_sample = ~np.isfinite(point_leakage) | (point_leakage <= 0)
+    invalid |= np.where(
+        separations == axis[knot],
+        bad_sample[knot],
+        bad_sample[left] & bad_sample[right],
+    )
+    if np.any(invalid):
+        offending = separations[invalid].tolist()
+        raise ValueError(
+            "EXOSIMS export found nonpositive or nonfinite stellar leakage at "
+            f"separations (lambda/D) {offending}"
+        )
+
     output_separations = separations * angle_scale
     exosims_dir = (
         coro.package.source.path / "exosims" if output_dir is None else Path(output_dir)
@@ -76,7 +117,6 @@ def export_exosims(
     exosims_dir.mkdir(parents=True, exist_ok=True)
 
     header = pyfits.Header()
-    header["PIXSCALE"] = (coro.grid.step, "Angular pixel scale")
     header["LAMBDA"] = (offaxis.lambda0.to_value(u.um), "Wavelength in micrometers")
     header["D"] = (offaxis.diameter.to_value(u.m), "Telescope diameter in meters")
     header["OBSCURED"] = (coro.header.obscured, "Obscuration fraction")
@@ -97,29 +137,26 @@ def export_exosims(
         header["DELTALAM"] = (bandwidth.to_value(u.um), "Bandpass width in micrometers")
         delta_lambda_nm = bandwidth.to_value(u.nm)
 
-    stellar_grid = coro.stellar_grid
-    stellar_frame = stellar_grid.frame
-    angular_ratio = performance.frame.lod_to_arcsec(
-        performance.frame.reference_wavelength_nm
-    ) / stellar_frame.lod_to_arcsec(stellar_frame.reference_wavelength_nm)
-    stellar_pixel_area_lod2 = stellar_grid.pixel_area / angular_ratio**2
     curves = {
         "core_thruput": performance.evaluate("throughput", separations),
         "core_area": np.asarray(performance.evaluate("core_area_lod2", separations))
         * angle_scale**2,
         "raw_contrast": performance.evaluate("raw_contrast", separations, point_star),
-        "core_mean_intensity": np.asarray(
-            performance.evaluate("leakage_density_lod2", separations, point_star)
-        )
-        * stellar_pixel_area_lod2,
+        "core_mean_intensity": mean_intensity,
         "occ_trans": coro.uniform_sky_response(separations),
     }
+    pitches_lod = {"core_mean_intensity": stellar_pitch_lod, "occ_trans": sky_pitch_lod}
+    pitch_comment = f"Pixel pitch [{units}/pixel]"
     for name, values in curves.items():
         curve_header = header.copy()
+        curve_header["PIXSCALE"] = (
+            pitches_lod.get(name, offaxis_pitch_lod) * angle_scale,
+            pitch_comment,
+        )
         if name == "core_mean_intensity":
             curve_header["BUNIT"] = "stellar flux fraction/pixel"
         elif name == "core_area":
-            curve_header["BUNIT"] = "arcsec2" if units.lower() == "arcsec" else "lod2"
+            curve_header["BUNIT"] = "arcsec2" if units == "arcsec" else "lod2"
         pyfits.PrimaryHDU(
             np.column_stack((output_separations, values)), header=curve_header
         ).writeto(exosims_dir / f"{name}.fits", overwrite=True)
@@ -135,6 +172,8 @@ def export_exosims(
                 "occ_trans": "occ_trans.fits",
                 "core_thruput": "core_thruput.fits",
                 "core_mean_intensity": "core_mean_intensity.fits",
+                "core_platescale": stellar_pitch_lod * angle_scale,
+                "core_platescale_units": units,
                 "core_area": "core_area.fits",
                 "IWA": float(performance.iwa_lod) * angle_scale,
                 "input_angle_units": units,

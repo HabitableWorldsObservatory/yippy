@@ -19,7 +19,7 @@ from optixstuff.performance import (
 from ._offjax import OffJAX
 from ._precision import dtype_tag
 from ._sky_trans import sky_transmission_image
-from ._stellar_intens import StellarIntens
+from ._stellar_intens import STELLAR_INTERPOLATION_REVISION, StellarIntens
 from ._util import (
     PERFORMANCE_VERSION,
     cache_identity_digest,
@@ -498,6 +498,7 @@ class _YIPData:
                 "performance_record": PERFORMANCE_VERSION,
                 "aperture_algorithm": "continuum_region_dft_peak_v1",
                 "yippy_version": __version__,
+                "stellar_interpolation_revision": STELLAR_INTERPOLATION_REVISION,
                 "table_storage": "float64",
                 "rule": {"name": type(rule).__name__, **asdict(rule)},
                 "leakage_rule": leakage_rule,

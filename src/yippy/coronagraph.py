@@ -20,13 +20,14 @@ from optixstuff.coronagraph import (
     SourcePSFs,
     on_grid,
 )
-from optixstuff.grids import Image, Measure, PixelGrid
+from optixstuff.grids import Image, Measure, PixelGrid, coverage
 from optixstuff.performance import RING_RULE, PerformanceCurves, SampledProfile
 from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band
 
 from ._jax_funcs import blend_pad
 from ._precision import float_dtype
+from ._stellar_intens import bounded_stellar_pchip, stellar_knot_index
 from ._yip import _YIPData
 from .header import HeaderData
 from .interpolation import SincOptions
@@ -58,6 +59,18 @@ def _jax_record(record):
     )
 
 
+def _stellar_exp(log_values):
+    """Exponentiate with a zero tangent for the overflowing entries."""
+    dtype = log_values.dtype
+    limit = np.log(float(np.finfo(dtype).max))
+    max_log = dtype.type(limit)
+    if float(max_log) > limit:
+        max_log = np.nextafter(max_log, dtype.type(-np.inf))
+    overflow = log_values > max_log
+    safe_log = jnp.where(overflow, 0, log_values)
+    return jnp.where(overflow, jnp.inf, jnp.exp(safe_log))
+
+
 class Coronagraph(AbstractTableCoronagraph):
     """A frozen, JAX-compatible coronagraph loaded from a Yield Input Package.
 
@@ -85,6 +98,8 @@ class Coronagraph(AbstractTableCoronagraph):
     bandpass: Band | None
     _offaxis_backend: object
     _stellar_ln_interp: interpax.CubicSpline
+    _stellar_linear_interp: interpax.PchipInterpolator | None
+    _stellar_samples: jax.Array
     _records: tuple[PerformanceCurves, ...]
     uniform_sky_profile: SampledProfile
     _host: _YIPData = eqx.field(static=True)
@@ -162,10 +177,16 @@ class Coronagraph(AbstractTableCoronagraph):
             if low_nm != high_nm:
                 self.bandpass = Band(low_nm, high_nm)
         self._offaxis_backend = host.offax
-        self._stellar_ln_interp = interpax.CubicSpline(
-            jnp.asarray(host.stellar_intens.ln_interp.x, dtype=float_dtype()),
-            jnp.log(jnp.asarray(host.stellar_intens.psfs, dtype=float_dtype())),
-        )
+        stellar = host.stellar_intens
+        diams_lod = jnp.asarray(stellar.diams.value, dtype=float_dtype())
+        samples = jnp.asarray(stellar.spline_samples, dtype=float_dtype())
+        self._stellar_samples = samples
+        self._stellar_linear_interp = None
+        log_samples = samples
+        if stellar.zero_pixels.any():
+            self._stellar_linear_interp = interpax.PchipInterpolator(diams_lod, samples)
+            log_samples = jnp.where(jnp.asarray(stellar.zero_pixels), 1, samples)
+        self._stellar_ln_interp = interpax.CubicSpline(diams_lod, jnp.log(log_samples))
         records = tuple(host._prepare_record(rule) for rule in rules)
         self._records = tuple(_jax_record(record) for record in records)
         self.uniform_sky_profile = _jax_record(host.uniform_sky_profile)
@@ -278,12 +299,32 @@ class Coronagraph(AbstractTableCoronagraph):
     def _native_stellar_map(self, stellar_diameter_lod):
         if hasattr(stellar_diameter_lod, "unit"):
             raise TypeError("stellar_diameter_lod must be floats in lambda/D")
-        data = jnp.exp(self._stellar_ln_interp(stellar_diameter_lod))
+        axis = self._stellar_ln_interp.x
+        diameter = jnp.asarray(stellar_diameter_lod, dtype=axis.dtype)
+        knot = stellar_knot_index(axis, diameter, jnp)
+        at_knot = (diameter == axis[knot])[..., None, None]
+        samples = self._stellar_samples
+        data = _stellar_exp(self._stellar_ln_interp(diameter))
+        stellar = self._host.stellar_intens
+        if self._stellar_linear_interp is not None:
+            zero_pixels = jnp.asarray(stellar.zero_pixels)
+            linear = bounded_stellar_pchip(
+                self._stellar_linear_interp, diameter, samples, knot, jnp
+            )
+            clamped = (diameter <= axis[0]) | (diameter >= axis[-1])
+            linear = jnp.where(clamped[..., None, None], samples[knot], linear)
+            data = jnp.where(zero_pixels, linear, data)
+        # Preserve the spline's diameter derivative while returning the sample.
+        knot_value = jnp.where(at_knot & jnp.isfinite(data), data, 0)
+        sample = samples[knot]
+        correction = knot_value - jax.lax.stop_gradient(knot_value)
+        exact = jnp.where(sample == 0, sample, sample + correction)
+        data = jnp.where(at_knot, exact, data)
         return fraction_image(
             data,
             self.stellar_grid,
             tuple(f"diameter_{i}" for i in range(data.ndim - 2)),
-            self._host.stellar_intens.measure,
+            stellar.measure,
             reconstruction=STELLAR_RECONSTRUCTION,
         )
 
@@ -292,8 +333,8 @@ class Coronagraph(AbstractTableCoronagraph):
 
         The native map holds point samples of the intensity. On a grid each
         pixel is the integral of their cubic spline over the pixel footprint,
-        floored at a tenth of the linear footprint integral so that no pixel
-        is negative or zero; the floor binds only where the spline rings.
+        floored at a tenth of the linear footprint integral for nonnegative
+        samples.
 
         Args:
             wavelength_nm: Wavelength in nm; ignored by this monochromatic table.
@@ -538,8 +579,8 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
     """YIP imaging model with prepared native scene operators.
 
     The rendered image is the sum of the operators' images, so operators should
-    cover disjoint sources. It is valid when every lit source cell is covered by
-    some operator; a lit cell no operator covers contributes zero.
+    cover disjoint sources. A valid scene has finite lit cells wholly inside
+    ``scene_grid``, with the resampled flux covered by the operators.
 
     Attributes:
         operators: Scene operators whose images are summed.
@@ -583,8 +624,11 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         """Sum native flux through the operators and sample the detector.
 
         ``scene`` is a cell-integral image, on ``scene_grid`` or resampled onto
-        it. The result is finite; its ``valid`` is False when a lit cell is
-        nonfinite or covered by no operator.
+        it. The result is finite. Its ``valid`` is False when a lit input cell
+        extends beyond ``scene_grid`` or when resampled flux is nonfinite or
+        falls on a cell covered by no operator.
+        Flux magnitudes below the smallest normal float32 count as zero, below
+        any physical flux.
 
         Args:
             scene: Cell-integral two-dimensional image of the source flux, on
@@ -593,17 +637,37 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
             grid: Detector grid onto which the summed image is sampled.
 
         Returns:
-            The finite image on ``grid`` and a validity flag that is False when a lit
-            cell is nonfinite or covered by no operator.
+            The finite image on ``grid`` and a flag indicating whether all lit
+            cells are supported.
         """
         if scene.measure != Measure.integral() or scene.data.ndim != 2:
             raise ValueError("scene must be a two-dimensional cell-integral Image")
         source = self.scene_grid
-        flux = scene.data if scene.grid == source else on_grid(scene, source).data
+        input_supported = True
+        if scene.grid == source:
+            flux = scene.data
+        else:
+            source_footprint, input_grid = source, scene.grid
+            if source.unit != input_grid.unit or (
+                source.unit == "lod" and source.frame != input_grid.frame
+            ):
+                if source.unit == "lod":
+                    source_footprint = source.to_arcsec(
+                        source.frame.reference_wavelength_nm
+                    )
+                if input_grid.unit == "lod":
+                    input_grid = input_grid.to_arcsec(
+                        input_grid.frame.reference_wavelength_nm
+                    )
+            inside = coverage(source_footprint, input_grid)
+            tiny = np.finfo(np.float32).tiny
+            dark = (scene.data > -tiny) & (scene.data < tiny)
+            input_supported = ~jnp.any(~dark & ~inside)
+            flux = on_grid(scene, source).data
         parts = [operator.render(flux, source) for operator in self.operators]
         data = sum(part[0] for part in parts)
         covered = jnp.any(jnp.stack([part[1] for part in parts]), axis=0)
-        valid = jnp.all((flux == 0) | (jnp.isfinite(flux) & covered))
+        valid = input_supported & jnp.all((flux == 0) | (jnp.isfinite(flux) & covered))
         image = fraction_image(
             data, self.grid, (), self._offaxis_backend.measure, quantity=scene.quantity
         )
