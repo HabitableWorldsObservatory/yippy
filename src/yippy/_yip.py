@@ -207,8 +207,8 @@ class _YIPData:
         assert self.psf_shape[0] == self.psf_shape[1], "PSF must be square"
         self.npixels = self.psf_shape[0]
 
-        self._load_or_compute_performance()
         self._initialize_profiles()
+        self._load_or_compute_performance()
 
         logger.info(f"Created {yip_path.stem}")
 
@@ -548,6 +548,9 @@ class _YIPData:
         names one, which builds a record of that single profile. Corrupt
         automatic entries are cache misses. Explicit imports fail clearly instead
         of silently overriding their physical definitions.
+
+        Both fresh and cached photometry carry the product's uniform-sky
+        profile in the record's frame.
         """
         rule = self.rule if rule is None else rule
         if not isinstance(rule, ApertureRule):
@@ -616,6 +619,19 @@ class _YIPData:
                     ) from exc
                 logger.warning(f"Ignoring incompatible performance cache {path}: {exc}")
                 record = None
+        profile = self.uniform_sky_profile
+        frame = self.grid.frame
+        if profile.frame != frame:
+            ratio = frame.lod_to_arcsec(
+                frame.reference_wavelength_nm
+            ) / profile.frame.lod_to_arcsec(profile.frame.reference_wavelength_nm)
+            profile = SampledProfile(
+                profile.separation_lod / ratio,
+                profile.values,
+                quantity="uniform_sky_response",
+                frame=frame,
+                interpolation="linear",
+            )
         if record is None:
             positions = list(_iter_xaxis_positions(self))
             if isinstance(rule, Circular):
@@ -659,11 +675,14 @@ class _YIPData:
                     stellar_diameters_lod=None
                     if diameter is not None
                     else diameters.value,
+                    uniform_sky=profile,
                 )
             if save_to_fits:
                 save_coro_performance_to_fits(
                     record, filename, directory, identity=identity
                 )
+        else:
+            record = replace(record, uniform_sky=profile)
         self.rule, self.leakage_rule = rule, leakage_rule
         self.performance = record
         self.curves_by_rule[rule] = record

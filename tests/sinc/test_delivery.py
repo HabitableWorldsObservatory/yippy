@@ -251,6 +251,8 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
 
     The Fourier oracle below checks pitch and frame handling, so the stellar map is
     resampled band-limited here; the shipped default is linear (sampling.py).
+    The angular sky-response read is the reference for the reframed profile,
+    with float64 interpolation roundoff. This catches using the native radii.
     """
     import yippy._stellar_intens as stellar_intens
     import yippy.coronagraph as coronagraph
@@ -305,6 +307,13 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     np.testing.assert_allclose(
         sky[:, 1],
         view.uniform_sky_profile.evaluate(separations * (500 / 400)),
+        rtol=1e-14,
+    )
+    record = view.curves()
+    assert record.uniform_sky.frame == record.frame != view.uniform_sky_profile.frame
+    np.testing.assert_allclose(
+        record.uniform_sky.evaluate(separations),
+        view.uniform_sky_response(separations),
         rtol=1e-14,
     )
     np.testing.assert_allclose(stellar_intensity_curves(view).separation_lod[1], 0.1)

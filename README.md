@@ -200,6 +200,7 @@ routes read the stored PSF grid.
 `coro.curves(rule)` returns an `optixstuff.PerformanceCurves` containing
 `separation_lod`, `throughput`, `core_area_lod2`, `leakage_fraction`,
 `leakage_density_lod2`, `raw_contrast`, `iwa_lod`, and `data_extent_lod`.
+Each record carries the coronagraph's uniform-sky profile in `record.uniform_sky`.
 The corresponding variance moments are `throughput_variance`,
 `core_area_variance_lod2`, `leakage_fraction_variance`, and
 `leakage_density_variance_lod2`.

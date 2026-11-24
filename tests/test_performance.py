@@ -153,6 +153,20 @@ class TestCoreMeanIntensityCurve:
 class TestPreparedPerformanceCurves:
     """Integration tests for prepared curve records."""
 
+    def test_record_carries_uniform_sky_profile(self, coro):
+        """Exact EAC1 profile samples catch a dropped, refit, or misframed profile."""
+        record = coro.curves()
+        profile = record.uniform_sky
+        native = coro.uniform_sky_profile
+        assert profile.frame == native.frame == record.frame
+        np.testing.assert_array_equal(profile.separation_lod, native.separation_lod)
+        np.testing.assert_array_equal(profile.values, native.values)
+        assert (
+            profile.values.dtype
+            == profile.separation_lod.dtype
+            == record.throughput.dtype
+        )
+
     def test_iwa_within_range(self, coro):
         """IWA should be within the separation range."""
         result = coro.curves()
@@ -180,6 +194,22 @@ def performance_interpolation(synthetic_1d):
     with jax.enable_x64():
         coro = open_yip(synthetic_1d.path).prepare()
     return (coro, coro.curves())
+
+
+def test_cached_record_retains_the_host_sky_profile(
+    performance_interpolation, monkeypatch
+):
+    """Exact host profile identity catches a missing profile on a FITS cache hit."""
+    coro, prepared = performance_interpolation
+    host = coro._host_for_rule(prepared.rule, prepared.leakage_rule)
+
+    def reject_recomputation(*args, **kwargs):
+        pytest.fail("the cached photometry was recomputed")
+
+    monkeypatch.setattr("yippy._yip.performance_curves", reject_recomputation)
+    with jax.enable_x64():
+        record = host._prepare_record()
+    assert record.uniform_sky is host.uniform_sky_profile
 
 
 def test_performance_interpolation_default_and_legacy(performance_interpolation):
