@@ -56,7 +56,7 @@ def coro(kind, syn_coro_1d, syn_coro_2d):
 def test_a_source_at_positive_x_lands_on_the_expected_column(package, coro):
     """The x coordinate measures columns, and +x moves to a higher column index.
 
-    Only a phasor sign error or a row and column swap can fail this, which is
+    Only a shift sign error or a row and column swap can fail this, which is
     the point. Both are mistakes that leave every other property of the image
     intact, so no test of flux, shape or smoothness can see them.
     """

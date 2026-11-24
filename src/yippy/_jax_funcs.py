@@ -119,8 +119,6 @@ def create_avg_psf_1D(
     y_offsets: jnp.ndarray,
     x_grid: jnp.ndarray,
     y_grid: jnp.ndarray,
-    x_phasor: jnp.ndarray,
-    y_phasor: jnp.ndarray,
     reshaped_psfs: jnp.ndarray,
 ):
     """Creates and returns the PSF at the specified off-axis position using JAX.
@@ -133,8 +131,6 @@ def create_avg_psf_1D(
         y_offsets: Sorted 1D array of tabulated y offsets.
         x_grid: The x pixel-index grid used to mask the shifted PSFs.
         y_grid: The y pixel-index grid used to mask the shifted PSFs.
-        x_phasor: Precomputed phasor components for the x Fourier shift.
-        y_phasor: Precomputed phasor components for the y Fourier shift.
         reshaped_psfs: Tabulated PSFs, shape (n_x_offsets, n_y_offsets, height,
             width).
 
@@ -165,8 +161,6 @@ def create_avg_psf_1D(
         weights[0],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
     shifted_psf2, mask2 = shift_and_mask(
         near_psfs[1],
@@ -175,8 +169,6 @@ def create_avg_psf_1D(
         weights[1],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
 
     # Accumulate the weighted PSFs and the weight masks
@@ -198,8 +190,6 @@ def create_avg_psf_2DQ(
     y_offsets: jnp.ndarray,
     x_grid: jnp.ndarray,
     y_grid: jnp.ndarray,
-    x_phasor: jnp.ndarray,
-    y_phasor: jnp.ndarray,
     reshaped_psfs: jnp.ndarray,
 ):
     """Creates and returns the PSF at the specified off-axis position using JAX.
@@ -212,8 +202,6 @@ def create_avg_psf_2DQ(
         y_offsets: Sorted 1D array of tabulated y offsets.
         x_grid: The x pixel-index grid used to mask the shifted PSFs.
         y_grid: The y pixel-index grid used to mask the shifted PSFs.
-        x_phasor: Precomputed phasor components for the x Fourier shift.
-        y_phasor: Precomputed phasor components for the y Fourier shift.
         reshaped_psfs: Tabulated PSFs, shape (n_x_offsets, n_y_offsets, height,
             width).
 
@@ -244,8 +232,6 @@ def create_avg_psf_2DQ(
         weights[0],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
     shifted_psf2, mask2 = shift_and_mask(
         near_psfs[1],
@@ -254,8 +240,6 @@ def create_avg_psf_2DQ(
         weights[1],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
     shifted_psf3, mask3 = shift_and_mask(
         near_psfs[2],
@@ -264,8 +248,6 @@ def create_avg_psf_2DQ(
         weights[2],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
     shifted_psf4, mask4 = shift_and_mask(
         near_psfs[3],
@@ -274,8 +256,6 @@ def create_avg_psf_2DQ(
         weights[3],
         x_grid,
         y_grid,
-        x_phasor,
-        y_phasor,
     )
 
     # Accumulate the weighted PSFs and the weight masks
@@ -351,9 +331,7 @@ def get_near_inds_offsets_2D(
     return near_inds, near_offsets
 
 
-def shift_and_mask(
-    near_psf, shift_x, shift_y, weight, x_grid, y_grid, x_phasor, y_phasor
-):
+def shift_and_mask(near_psf, shift_x, shift_y, weight, x_grid, y_grid):
     """Shifts the PSF in x and y directions and applies a weight mask.
 
     Args:
@@ -363,16 +341,14 @@ def shift_and_mask(
         weight: Weight for the PSF, used as the mask fill value.
         x_grid: The x pixel-index grid used to build the mask.
         y_grid: The y pixel-index grid used to build the mask.
-        x_phasor: Precomputed components for the x Fourier shift.
-        y_phasor: Precomputed components for the y Fourier shift.
 
     Returns:
         A tuple ``(weighted_psf, weight_mask)``: the shifted PSF multiplied by
         the mask, and the mask, whose valid pixels hold ``weight``.
     """
     # Shift the PSF in x and y directions
-    shifted_psf = fft_shift_x(near_psf, shift_x, x_phasor)
-    shifted_psf = fft_shift_y(shifted_psf, shift_y, y_phasor)
+    shifted_psf = fft_shift_x(near_psf, shift_x)
+    shifted_psf = fft_shift_y(shifted_psf, shift_y)
 
     # Create the weight mask
     weight_mask = create_shift_mask(
@@ -495,7 +471,7 @@ def sym_shift_val(input_val, converted_val, pixel_scale_arcsec):
     return (input_val - sign * converted_val) / pixel_scale_arcsec
 
 
-def x_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phasor):
+def x_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec):
     """Shifts the PSF to the specified x position.
 
     Args:
@@ -505,16 +481,15 @@ def x_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phasor):
         PSF: The tabulated PSF image, shape (height, width).
         pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
             pixel.
-        x_phasor: Precomputed phasor components for the x Fourier shift.
 
     Returns:
         The PSF shifted along x, same shape as ``PSF``.
     """
     shift = basic_shift_val(input_val, converted_val, pixel_scale_arcsec)
-    return fft_shift_x(PSF, shift, x_phasor)
+    return fft_shift_x(PSF, shift)
 
 
-def y_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phasor):
+def y_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec):
     """Shifts the PSF to the specified y position.
 
     Args:
@@ -524,16 +499,15 @@ def y_basic_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phasor):
         PSF: The tabulated PSF image, shape (height, width).
         pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
             pixel.
-        y_phasor: Precomputed phasor components for the y Fourier shift.
 
     Returns:
         The PSF shifted along y, same shape as ``PSF``.
     """
     shift = basic_shift_val(input_val, converted_val, pixel_scale_arcsec)
-    return fft_shift_y(PSF, shift, y_phasor)
+    return fft_shift_y(PSF, shift)
 
 
-def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phasor):
+def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec):
     """Shifts the PSF to the specified position assuming symmetry about x=0.
 
     Args:
@@ -543,7 +517,6 @@ def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phaso
         PSF: The tabulated PSF image, shape (height, width).
         pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
             pixel.
-        x_phasor: Precomputed phasor components for the x Fourier shift.
 
     Returns:
         The PSF, mirrored when ``input_val`` is negative and shifted along
@@ -555,10 +528,10 @@ def x_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, x_phaso
     # Calculate the distance to shift the PSF
     shift = sym_shift_val(input_val, converted_val, pixel_scale_arcsec)
     # Apply the shift
-    return fft_shift_x(_PSF, shift, x_phasor)
+    return fft_shift_x(_PSF, shift)
 
 
-def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phasor):
+def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec):
     """Shifts the PSF to the specified position assuming symmetry about y=0.
 
     Args:
@@ -568,7 +541,6 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
         PSF: The tabulated PSF image, shape (height, width).
         pixel_scale_arcsec: Pixel scale, in the unit of the coordinates per
             pixel.
-        y_phasor: Precomputed phasor components for the y Fourier shift.
 
     Returns:
         The PSF, mirrored when ``input_val`` is negative and shifted along
@@ -580,7 +552,7 @@ def y_symmetric_shift(input_val, converted_val, PSF, pixel_scale_arcsec, y_phaso
     # Get the distance to shift the PSF
     shift = sym_shift_val(input_val, converted_val, pixel_scale_arcsec)
     # Apply the shift
-    return fft_shift_y(_PSF, shift, y_phasor)
+    return fft_shift_y(_PSF, shift)
 
 
 def blend_pad(n_pixels):
@@ -842,8 +814,7 @@ def synthesize_psf_separable(
     # Apply X-Shift
     # kx: (W_freq,). shift_x: (K,).
     # Broadcast: (K, 1, W_freq)
-    phasor_x = jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
-    spec = spec * phasor_x
+    spec = spec * jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
 
     # FFT Y (Complex-to-Complex, Axis 1)
     spec = jnp.fft.fft(spec, axis=1)
@@ -851,8 +822,7 @@ def synthesize_psf_separable(
     # Apply Y-Shift
     # ky: (H_pad,). shift_y: (K,).
     # Broadcast: (K, H_pad, 1)
-    phasor_y = jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
-    spec = spec * phasor_y
+    spec = spec * jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
 
     psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 
@@ -1040,13 +1010,11 @@ def synthesize_psf_idw(
 
     # FFT X
     spec = jnp.fft.rfft(neighbors, axis=2)
-    phasor_x = jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
-    spec = spec * phasor_x
+    spec = spec * jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
 
     # FFT Y
     spec = jnp.fft.fft(spec, axis=1)
-    phasor_y = jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
-    spec = spec * phasor_y
+    spec = spec * jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
 
     psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 
