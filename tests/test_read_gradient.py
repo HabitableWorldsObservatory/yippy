@@ -41,12 +41,11 @@ ATOL = 1e-6
 @pytest.fixture(scope="module")
 def backends(synthetic_1d, synthetic_2d, synthetic_rings):
     """Double-precision readers: a float32 read cannot resolve a 1e-7 step."""
-    with jax.enable_x64():
-        return {
-            "1d": open_yip(synthetic_1d.path).prepare()._offaxis_backend,
-            "2dq": open_yip(synthetic_2d.path).prepare()._offaxis_backend,
-            "rings": open_yip(synthetic_rings.path).prepare()._offaxis_backend,
-        }
+    return {
+        "1d": open_yip(synthetic_1d.path).prepare()._offaxis_backend,
+        "2dq": open_yip(synthetic_2d.path).prepare()._offaxis_backend,
+        "rings": open_yip(synthetic_rings.path).prepare()._offaxis_backend,
+    }
 
 
 def _weighted_read(backend):
@@ -63,6 +62,7 @@ def _weighted_read(backend):
     return read
 
 
+@pytest.mark.float64_only(reason="Finite differences at a 1e-7 step")
 @pytest.mark.parametrize("name", ["origin", "node", "generic"])
 @pytest.mark.parametrize("kind", ["1d", "2dq", "rings"])
 def test_read_gradient_is_finite_and_matches_finite_difference(kind, name, backends):
@@ -77,14 +77,13 @@ def test_read_gradient_is_finite_and_matches_finite_difference(kind, name, backe
     not the slope of the read.
     """
     x, y = POSITIONS[kind][name]
-    with jax.enable_x64():
-        read = _weighted_read(backends[kind])
-        x_, y_ = jnp.float64(x), jnp.float64(y)
-        grad = np.array(jax.grad(read, argnums=(0, 1))(x_, y_))
-        f0 = read(x_, y_)
-        fx = (float(read(x_ + H, y_)), float(read(x_ - H, y_)))
-        fy = (float(read(x_, y_ + H)), float(read(x_, y_ - H)))
-        f0 = float(f0)
+    read = _weighted_read(backends[kind])
+    x_, y_ = jnp.float64(x), jnp.float64(y)
+    grad = np.array(jax.grad(read, argnums=(0, 1))(x_, y_))
+    f0 = read(x_, y_)
+    fx = (float(read(x_ + H, y_)), float(read(x_ - H, y_)))
+    fy = (float(read(x_, y_ + H)), float(read(x_, y_ - H)))
+    f0 = float(f0)
     assert np.all(np.isfinite(grad)), f"gradient is not finite at {name}: {grad}"
     central = np.array([(fx[0] - fx[1]) / (2 * H), (fy[0] - fy[1]) / (2 * H)])
     if kind in ("1d", "rings") and name == "node":

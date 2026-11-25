@@ -235,6 +235,7 @@ floor_modes = (
 )
 
 
+@pytest.mark.float64_only(reason="Float64 floor boundaries and subnormal bit patterns")
 @given(seed=st.integers(min_value=0, max_value=2**32 - 1))
 def test_supported_range_floor_fraction_property(seed):
     """Fails if supported scales or edge neighbours select an inexact floor."""
@@ -268,6 +269,9 @@ def test_supported_range_floor_fraction_property(seed):
         np.testing.assert_array_equal(fn(*args), expected)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 stencil weights against the independent oracle"
+)
 @pytest.mark.parametrize("quadrant", [False, True])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_independent_reference_random_and_edges(quadrant, dtype):
@@ -304,6 +308,9 @@ def test_independent_reference_random_and_edges(quadrant, dtype):
         )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 stencil weights against the independent oracle"
+)
 def test_independent_reference_detects_one_tap_shift(full_delivery, full_reader):
     """Fails if the analytic query cannot distinguish a one-tap y shift."""
     from .reference_reader import reference_read
@@ -344,27 +351,19 @@ def test_reflection_tolerance_range_on_full_grid(full_delivery):
     assert result.reason_bits & Reason.SYMMETRY_UNSUPPORTED
 
 
-# Built under binary64 because collection runs outside the sinc fixtures.
-with jax.enable_x64(True):
-    UNSUPPORTED_DOMAINS = [
-        sc.Domain("annulus", "closed", jnp.zeros((2, 2)), jnp.array([1e-200, 2e-200])),
-        sc.Domain(
-            "annulus",
-            "closed",
-            jnp.zeros((2, 2)),
-            jnp.array([0.0, math.nextafter(1e6, math.inf)]),
-        ),
-        sc.Domain(
-            "box",
-            "closed",
-            jnp.array([[-1.0, -1.0], [math.nextafter(1e6, math.inf), 1.0]]),
-            jnp.zeros(2),
-        ),
-    ]
-
-
-@pytest.mark.parametrize("domain", UNSUPPORTED_DOMAINS)
-def test_reader_constructor_enforces_domain_range(full_reader, domain):
+@pytest.mark.float64_only(reason="Float64 domain boundaries beyond float32 resolution")
+@pytest.mark.parametrize(
+    "shape, bounds, radial",
+    [
+        ("annulus", ((0, 0), (0, 0)), (1e-200, 2e-200)),
+        ("annulus", ((0, 0), (0, 0)), (0.0, math.nextafter(1e6, math.inf))),
+        ("box", ((-1.0, -1.0), (math.nextafter(1e6, math.inf), 1.0)), (0.0, 0.0)),
+    ],
+)
+def test_reader_constructor_enforces_domain_range(full_reader, shape, bounds, radial):
+    domain = sc.Domain(
+        shape, "closed", jnp.asarray(bounds, dtype=float), jnp.asarray(radial)
+    )
     reader = full_reader
     with pytest.raises(ValueError, match="supported numeric range"):
         Interpolator(

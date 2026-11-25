@@ -38,7 +38,7 @@ env:
 
 jobs:
   quick:
-    name: Quick tier (py${{ matrix.python-version }})
+    name: Quick tier (py${{ matrix.python-version }}, ${{ matrix.precision }})
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.tier != 'slow')
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -46,6 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
+        precision: [float32, float64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,13 +59,14 @@ jobs:
           cache-dependency-glob: "pyproject.toml"
 
       - name: Restore the JAX compile cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: jax-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .jax_cache
-          key: jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          key: jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.precision }}-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
           restore-keys: |
-            jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-
-            jax-${{ runner.os }}-py${{ matrix.python-version }}-
+            jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.precision }}-${{ hashFiles('pyproject.toml') }}-
+            jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.precision }}-
 
       - name: Install the package and test tools
         run: |
@@ -89,15 +91,21 @@ jobs:
       - name: Quick tier
         run: |
           pytest tests/ -m "not slow and not network" -ra --tb=short \
+            --precision=${{ matrix.precision }} \
             --timeout=300 --fail-slow=30s \
             --durations=15 --durations-min=1.0 \
             --junitxml=junit-quick.xml
 
-      # Existing strict xfails and the float64-only module intentionally skip.
-      # Missing reference data still fails via YIPPY_REQUIRE_REFERENCE_DATA.
+      - name: Save the JAX compile cache
+        if: always() && steps.jax-cache.outputs.cache-primary-key != '' && steps.jax-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .jax_cache
+          key: ${{ steps.jax-cache.outputs.cache-primary-key }}
+
       - name: Job summary
         if: always()
-        run: python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" --budget-seconds 600 --allow-skips
+        run: python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" --budget-seconds 600
 
   docs:
     name: Docs with executed examples
@@ -119,8 +127,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .jax_cache
-          key: jax-docs-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
-          restore-keys: jax-docs-${{ hashFiles('pyproject.toml') }}-
+          key: jax-docs-float32-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: jax-docs-float32-${{ hashFiles('pyproject.toml') }}-
 
       - name: Install docs dependencies
         run: |
@@ -167,8 +175,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .jax_cache
-          key: jax-slow-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
-          restore-keys: jax-slow-${{ hashFiles('pyproject.toml') }}-
+          key: jax-slow-float64-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: jax-slow-float64-${{ hashFiles('pyproject.toml') }}-
 
       - name: Install the package and test tools
         run: |
@@ -182,7 +190,7 @@ jobs:
           HYPOTHESIS_PROFILE: nightly
         run: |
           status=0
-          pytest tests/ -m slow -ra --tb=short --timeout=900 \
+          pytest tests/ -m slow --precision=float64 -ra --tb=short --timeout=900 \
             --durations=25 --junitxml=junit-slow.xml || status=$?
           if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
             exit "$status"

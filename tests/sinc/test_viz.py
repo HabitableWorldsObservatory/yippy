@@ -8,7 +8,6 @@ from optixstuff.grids import Frame, PixelGrid
 ep = pytest.importorskip("eyepiece")
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import matplotlib
 
@@ -164,10 +163,10 @@ def test_stencil_known_answer_and_update():
     assert artists == list(result.ax.get_children())
 
 
+@pytest.mark.float32_only(reason="Exercises x64-off stencil refusal")
 def test_stencil_requires_x64():
-    with jax.enable_x64(False):
-        with pytest.raises(ValueError, match="jax_enable_x64"):
-            viz.plot_stencil(0.0, profile=KernelProfile())
+    with pytest.raises(ValueError, match="jax_enable_x64"):
+        viz.plot_stencil(0.0, profile=KernelProfile())
 
 
 def test_stencil_callable_samples():
@@ -305,10 +304,7 @@ def test_residual_local_peak_excludes_pixel_just_outside_source_disk():
         (1, 2), 1, "lod", center=(-1e-8, 0), frame=Frame(500, 6, "circumscribed")
     )
     truth = np.array([[2.0, 100.0]])
-    with jax.enable_x64(False):
-        result = viz.plot_residual(
-            truth + 1, truth, pixels=pixels, source_xy_lod=(0, 0)
-        )
+    result = viz.plot_residual(truth + 1, truth, pixels=pixels, source_xy_lod=(0, 0))
     np.testing.assert_allclose(result.artists["image"].get_array(), 0.5)
     plt.close(result.fig)
 

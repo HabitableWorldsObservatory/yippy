@@ -1,6 +1,5 @@
 """Verify detector rebinning and rotation on the cached EAC1 coronagraph PSFs."""
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -14,33 +13,33 @@ from optixstuff.grids import (
 )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 @pytest.mark.parametrize("size", [64, 100])
 def test_real_psf_downsampling_conserves_flux(coro, size):
     """Every stored PSF retains its integral at integer and noninteger ratios."""
-    with jax.enable_x64():
-        source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=jnp.float64)
-        scale = coro.grid.step * source.shape[1] / size
-        target = PixelGrid.focal(size, scale, coro.grid.frame)
-        pixels = Image(
-            source, coro.grid, ("source",), Measure.integral(), "stellar_flux_fraction"
-        )
-        output = integrate_footprints(pixels, footprint_overlap(coro.grid, target)).data
-        np.testing.assert_allclose(
-            output.sum(axis=(1, 2)), source.sum(axis=(1, 2)), rtol=1e-12, atol=1e-30
-        )
-        assert scale == 0.25 * source.shape[1] / size
-        assert np.isfinite(output).all()
-        assert float(output.min()) >= 0
+    source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=jnp.float64)
+    scale = coro.grid.step * source.shape[1] / size
+    target = PixelGrid.focal(size, scale, coro.grid.frame)
+    pixels = Image(
+        source, coro.grid, ("source",), Measure.integral(), "stellar_flux_fraction"
+    )
+    output = integrate_footprints(pixels, footprint_overlap(coro.grid, target)).data
+    np.testing.assert_allclose(
+        output.sum(axis=(1, 2)), source.sum(axis=(1, 2)), rtol=1e-12, atol=1e-30
+    )
+    assert scale == 0.25 * source.shape[1] / size
+    assert np.isfinite(output).all()
+    assert float(output.min()) >= 0
 
 
-def test_real_psf_rotation_padding_convergence(coro):
+def test_real_psf_rotation_padding_convergence(coro, precision):
     """Increasing padding converges while core photometry stays stable."""
-    with jax.enable_x64():
-        source = jnp.asarray(coro._offaxis_backend.flat_psfs[37], dtype=jnp.float64)
-        outputs = [
-            np.asarray(rotate_image(source, 30.0, pad_factor=p))
-            for p in (0.5, 1.5, 3.5)
-        ]
+    source = jnp.asarray(coro._offaxis_backend.flat_psfs[37], dtype=precision)
+    outputs = [
+        np.asarray(rotate_image(source, 30.0, pad_factor=p)) for p in (0.5, 1.5, 3.5)
+    ]
     reference = outputs[-1]
     n = reference.shape[0]
     y, x = np.mgrid[:n, :n]

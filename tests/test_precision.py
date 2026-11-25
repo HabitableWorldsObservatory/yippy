@@ -1,28 +1,34 @@
-"""Precision policy: yippy follows the global jax_enable_x64 flag (default float32).
+"""Check stored and evaluated dtypes and cache keys in each precision lane."""
 
-The default test process runs x64-off, so these assert the float32 behavior. The
-float64 mirror lives in ``test_precision_x64.py``. Both exercise the ``_precision``
-helpers through real yippy code (cache filename + stored Coronagraph arrays),
-so a dedicated unit test of the trivial helpers would be redundant.
-"""
+import jax.numpy as jnp
+import numpy as np
 
-from conftest import assert_eqx_arrays_match_active_dtype
+from yippy._yip import _YIPData
+from yippy.performance import stellar_intensity_curves
 
 
-def test_datacube_cache_path_is_dtype_keyed(coro):
-    """The PSF datacube cache filename carries the active dtype tag (f32 default).
-
-    The filename also carries the realized pixel shape and native source digest.
-    """
-    from yippy._yip import _YIPData
-
+def test_datacube_cache_path_is_dtype_keyed(coro, precision):
+    """The datacube cache name records the lane dtype, shape and source digest."""
     host = _YIPData(coro.package)
     p = host._datacube_cache_path
-    assert p.name.startswith(f"psf_datacube_quarter_f32_{coro.grid.shape[0]}px_")
+    tag = f"f{precision.itemsize * 8}"
+    assert p.name.startswith(f"psf_datacube_quarter_{tag}_{coro.grid.shape[0]}px_")
     assert p.suffix == ".npy"
     assert p.parent == host._cache_dir
 
 
-def test_eqx_stored_arrays_are_f32_by_default(eqx_coro):
-    """In the default (x64-off) suite, Coronagraph float arrays are float32."""
-    assert_eqx_arrays_match_active_dtype(eqx_coro)
+def test_eqx_arrays_match_lane_dtype(eqx_coro, precision):
+    """Stored arrays and forward evaluations use the lane dtype."""
+    assert np.dtype(eqx_coro.sky_trans.data.dtype) == precision, "sky_trans"
+    assert (
+        np.dtype(eqx_coro.stellar_map(None, 0.0, grid=None).data.dtype) == precision
+    ), "stellar_intens"
+    assert (
+        np.dtype(eqx_coro.curves().evaluate("throughput", jnp.asarray(5.0)).dtype)
+        == precision
+    ), "throughput"
+    if len(eqx_coro._stellar_ln_interp.x) > 1:
+        out_2d = stellar_intensity_curves(
+            eqx_coro, 1e-3, interpolation="keys"
+        ).evaluate(jnp.asarray(5.0))
+        assert np.dtype(out_2d.dtype) == precision, "core_mean_intensity_2d"

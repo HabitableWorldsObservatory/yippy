@@ -115,44 +115,46 @@ def test_shipped_package_blocks_size_and_estimate(coro):
     assert estimate["total"] == estimate["resident"] + estimate["scratch"]
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 def test_render_is_linear_mirrored_and_differentiable(tmp_path):
     """Fails if the render stops being exactly linear in flux or loses reflection.
 
     Runs in float64: linearity and the reflected image hold to rounding, and the
     gradient must match central differences.
     """
-    with jax.enable_x64():
-        package = write_synthetic_yip(
-            tmp_path / "linear",
-            kind="2dq",
-            npix=32,
-            max_offset_lod=3.0,
-            offset_step_lod=0.5,
-            psf_sigma_lod=0.4,
-            occulter_floor=1.0,
-        )
-        model = open_yip(package.path).prepare().with_scene_operator()
-        render = lambda flux: model.operators[0].render(flux, model.grid)[0]  # noqa: E731
-        rng = np.random.default_rng(0)
-        f, g = (jnp.asarray(rng.uniform(0.5, 1.5, model.grid.shape)) for _ in range(2))
-        np.testing.assert_allclose(
-            render(2.0 * f - 3.0 * g),
-            2.0 * render(f) - 3.0 * render(g),
-            rtol=0,
-            atol=1e-12,
-        )
-        # A lone source and its mirror image across x = 0 give mirrored images.
-        lone = jnp.zeros(model.grid.shape).at[5, 12].set(1.0)
-        mirror = jnp.zeros(model.grid.shape).at[5, 19].set(1.0)
-        np.testing.assert_allclose(
-            render(mirror), render(lone)[:, ::-1], rtol=0, atol=1e-12
-        )
-        loss = lambda flux: jnp.sum(render(flux) ** 2)  # noqa: E731
-        direction = jnp.asarray(rng.normal(size=model.grid.shape))
-        step = 1e-6
-        numeric = (loss(f + step * direction) - loss(f - step * direction)) / (2 * step)
-        analytic = jnp.vdot(jax.grad(loss)(f), direction)
-        np.testing.assert_allclose(analytic, numeric, rtol=1e-7)
+    package = write_synthetic_yip(
+        tmp_path / "linear",
+        kind="2dq",
+        npix=32,
+        max_offset_lod=3.0,
+        offset_step_lod=0.5,
+        psf_sigma_lod=0.4,
+        occulter_floor=1.0,
+    )
+    model = open_yip(package.path).prepare().with_scene_operator()
+    render = lambda flux: model.operators[0].render(flux, model.grid)[0]  # noqa: E731
+    rng = np.random.default_rng(0)
+    f, g = (jnp.asarray(rng.uniform(0.5, 1.5, model.grid.shape)) for _ in range(2))
+    np.testing.assert_allclose(
+        render(2.0 * f - 3.0 * g),
+        2.0 * render(f) - 3.0 * render(g),
+        rtol=0,
+        atol=1e-12,
+    )
+    # A lone source and its mirror image across x = 0 give mirrored images.
+    lone = jnp.zeros(model.grid.shape).at[5, 12].set(1.0)
+    mirror = jnp.zeros(model.grid.shape).at[5, 19].set(1.0)
+    np.testing.assert_allclose(
+        render(mirror), render(lone)[:, ::-1], rtol=0, atol=1e-12
+    )
+    loss = lambda flux: jnp.sum(render(flux) ** 2)  # noqa: E731
+    direction = jnp.asarray(rng.normal(size=model.grid.shape))
+    step = 1e-6
+    numeric = (loss(f + step * direction) - loss(f - step * direction)) / (2 * step)
+    analytic = jnp.vdot(jax.grad(loss)(f), direction)
+    np.testing.assert_allclose(analytic, numeric, rtol=1e-7)
 
 
 def test_estimate_allocates_nothing_and_matches_the_build(syn_coro_2d):
@@ -238,6 +240,9 @@ def _disjoint_masks(grid):
     return inside, ~inside
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     """Fails if masked operators do not compose into the unmasked operator.
 
@@ -246,70 +251,71 @@ def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     cells and the union covers every lit cell (before, an operator that was
     handed a source outside its mask turned the whole image to NaN).
     """
-    with jax.enable_x64():
-        package = write_synthetic_yip(
-            tmp_path / "masked",
-            kind="2dq",
-            npix=32,
-            max_offset_lod=3.0,
-            offset_step_lod=0.5,
-            psf_sigma_lod=0.4,
-            occulter_floor=1.0,
-        )
-        model = open_yip(package.path).prepare()
-        whole = model.with_scene_operator()
-        grid = whole.scene_grid
-        keep, rest = _disjoint_masks(grid)
-        halves = model.with_scene_operator(mask=keep).with_operators(
-            *model.with_scene_operator(mask=rest).operators
-        )
-        assert len(halves.operators) == 2
-        flux = np.zeros(grid.shape)
-        flux[8:24, 8:24] = np.random.default_rng(3).uniform(0.5, 1.5, (16, 16))
-        scene = Image(jnp.asarray(flux), grid, (), Measure.integral(), "flux")
-        reference = whole.render_scene(scene, None, grid=model.grid)
-        composed = halves.render_scene(scene, None, grid=model.grid)
-        assert reference.valid and composed.valid
-        assert float(jnp.abs(reference.image.data).max()) > 0
-        np.testing.assert_allclose(
-            composed.image.data, reference.image.data, rtol=0, atol=1e-12
-        )
-        # One half alone leaves lit cells uncovered: finite image, not valid.
-        alone = model.with_scene_operator(mask=keep).render_scene(
-            scene, None, grid=model.grid
-        )
-        assert not alone.valid
-        assert bool(jnp.all(jnp.isfinite(alone.image.data)))
-        assert float(jnp.abs(alone.image.data).sum()) < float(
-            jnp.abs(reference.image.data).sum()
-        )
+    package = write_synthetic_yip(
+        tmp_path / "masked",
+        kind="2dq",
+        npix=32,
+        max_offset_lod=3.0,
+        offset_step_lod=0.5,
+        psf_sigma_lod=0.4,
+        occulter_floor=1.0,
+    )
+    model = open_yip(package.path).prepare()
+    whole = model.with_scene_operator()
+    grid = whole.scene_grid
+    keep, rest = _disjoint_masks(grid)
+    halves = model.with_scene_operator(mask=keep).with_operators(
+        *model.with_scene_operator(mask=rest).operators
+    )
+    assert len(halves.operators) == 2
+    flux = np.zeros(grid.shape)
+    flux[8:24, 8:24] = np.random.default_rng(3).uniform(0.5, 1.5, (16, 16))
+    scene = Image(jnp.asarray(flux), grid, (), Measure.integral(), "flux")
+    reference = whole.render_scene(scene, None, grid=model.grid)
+    composed = halves.render_scene(scene, None, grid=model.grid)
+    assert reference.valid and composed.valid
+    assert float(jnp.abs(reference.image.data).max()) > 0
+    np.testing.assert_allclose(
+        composed.image.data, reference.image.data, rtol=0, atol=1e-12
+    )
+    # One half alone leaves lit cells uncovered: finite image, not valid.
+    alone = model.with_scene_operator(mask=keep).render_scene(
+        scene, None, grid=model.grid
+    )
+    assert not alone.valid
+    assert bool(jnp.all(jnp.isfinite(alone.image.data)))
+    assert float(jnp.abs(alone.image.data).sum()) < float(
+        jnp.abs(reference.image.data).sum()
+    )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 def test_masked_wrapper_matches_the_native_mask(tmp_path):
     """Fails if MaskedSceneOperator reads or reports a cell outside its mask."""
-    with jax.enable_x64():
-        package = write_synthetic_yip(
-            tmp_path / "wrapper",
-            kind="2dq",
-            npix=32,
-            max_offset_lod=3.0,
-            offset_step_lod=0.5,
-            psf_sigma_lod=0.4,
-            occulter_floor=1.0,
-        )
-        model = open_yip(package.path).prepare().with_scene_operator()
-        keep, _ = _disjoint_masks(model.scene_grid)
-        native = BlendSceneOperator.from_backend(
-            model._offaxis_backend, model.scene_grid, mask=keep
-        )
-        wrapped = MaskedSceneOperator(model.operators[0], keep)
-        flux = jnp.asarray(
-            np.random.default_rng(4).uniform(0.5, 1.5, model.scene_grid.shape)
-        )
-        image_n, covered_n = native.render(flux, model.scene_grid)
-        image_w, covered_w = wrapped.render(flux, model.scene_grid)
-        np.testing.assert_allclose(image_w, image_n, rtol=0, atol=1e-12)
-        assert bool(jnp.all(covered_w == covered_n & keep))
+    package = write_synthetic_yip(
+        tmp_path / "wrapper",
+        kind="2dq",
+        npix=32,
+        max_offset_lod=3.0,
+        offset_step_lod=0.5,
+        psf_sigma_lod=0.4,
+        occulter_floor=1.0,
+    )
+    model = open_yip(package.path).prepare().with_scene_operator()
+    keep, _ = _disjoint_masks(model.scene_grid)
+    native = BlendSceneOperator.from_backend(
+        model._offaxis_backend, model.scene_grid, mask=keep
+    )
+    wrapped = MaskedSceneOperator(model.operators[0], keep)
+    flux = jnp.asarray(
+        np.random.default_rng(4).uniform(0.5, 1.5, model.scene_grid.shape)
+    )
+    image_n, covered_n = native.render(flux, model.scene_grid)
+    image_w, covered_w = wrapped.render(flux, model.scene_grid)
+    np.testing.assert_allclose(image_w, image_n, rtol=0, atol=1e-12)
+    assert bool(jnp.all(covered_w == covered_n & keep))
 
 
 def test_nonfinite_flux_is_zero_and_invalid(syn_coro_2d):
@@ -328,41 +334,39 @@ def test_nonfinite_flux_is_zero_and_invalid(syn_coro_2d):
 
 
 @pytest.fixture(scope="module")
-def wide_x64(tmp_path_factory):
-    """A float64 package whose nodes reach 3 times the stamp half-width.
+def wide_coro(tmp_path_factory):
+    """A package whose nodes reach 3 times the stamp half-width.
 
     Its Gaussian PSFs (sigma 2 lambda/D on a 16 lambda/D stamp) are nonzero at
     the stamp edge, so a translated node carries its truncation into the image.
     """
-    with jax.enable_x64():
-        package = write_synthetic_yip(
-            tmp_path_factory.mktemp("wide") / "wide",
-            kind="2dq",
-            npix=64,
-            pixscale=0.25,
-            max_offset_lod=24.0,
-            offset_step_lod=1.0,
-            psf_sigma_lod=2.0,
-            occulter_floor=1.0,
-        )
-        return open_yip(package.path).prepare().with_scene_operator()
+    package = write_synthetic_yip(
+        tmp_path_factory.mktemp("wide") / "wide",
+        kind="2dq",
+        npix=64,
+        pixscale=0.25,
+        max_offset_lod=24.0,
+        offset_step_lod=1.0,
+        psf_sigma_lod=2.0,
+        occulter_floor=1.0,
+    )
+    return open_yip(package.path).prepare().with_scene_operator()
 
 
 @pytest.fixture(scope="module")
 def eac1_x64():
     """The shipped 2D package in float64 with its scene operator."""
-    with jax.enable_x64():
-        return open_yip(fetch_yip("eac1_aavc_2d")).prepare().with_scene_operator()
+    return open_yip(fetch_yip("eac1_aavc_2d")).prepare().with_scene_operator()
 
 
-def test_scene_grid_reaches_the_node_hull(wide_x64):
+def test_scene_grid_reaches_the_node_hull(wide_coro):
     """Fails if sources between the stamp edge and the outermost node are dropped.
 
     The nodes reach 3 times the stamp half-width. The scene grid must hold the
     cells out to the hull, and the operator covers exactly the cells inside the
     hull.
     """
-    model = wide_x64
+    model = wide_coro
     stamp = model.grid
     grid = model.scene_grid
     assert grid.shape[0] > stamp.shape[0] and grid.shape[1] > stamp.shape[1]
@@ -381,12 +385,15 @@ def test_scene_grid_reaches_the_node_hull(wide_x64):
 _EAC1 = pytest.mark.medium(reason="float64 load and scene operator of eac1_aavc_2d")
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 @pytest.mark.parametrize(
     ("model_name", "cell_lod"),
     [
-        ("wide_x64", (2.1, 1.4)),
-        ("wide_x64", (-7.9, 3.1)),
-        ("wide_x64", (23.9, -0.9)),
+        ("wide_coro", (2.1, 1.4)),
+        ("wide_coro", (-7.9, 3.1)),
+        ("wide_coro", (23.9, -0.9)),
         pytest.param("eac1_x64", (10.125, 5.125), marks=_EAC1),
         pytest.param("eac1_x64", (-31.875, 0.125), marks=_EAC1),
         pytest.param("eac1_x64", (61.875, 0.125), marks=_EAC1),
@@ -419,20 +426,22 @@ def test_a_point_read_is_the_clipped_render_of_its_cell(model_name, cell_lod, re
     cell = np.unravel_index(
         np.argmin((x - cell_lod[0]) ** 2 + (y - cell_lod[1]) ** 2), x.shape
     )
-    with jax.enable_x64():
-        flux = jnp.zeros(grid.shape).at[cell].set(1.0)
-        image, covered = (np.asarray(a) for a in model.operators[0].render(flux, grid))
-        read = np.asarray(
-            model._offaxis_backend._create_psfs(
-                jnp.asarray([x[cell]]), jnp.asarray([y[cell]])
-            )[0]
-        )
+    flux = jnp.zeros(grid.shape).at[cell].set(1.0)
+    image, covered = (np.asarray(a) for a in model.operators[0].render(flux, grid))
+    read = np.asarray(
+        model._offaxis_backend._create_psfs(
+            jnp.asarray([x[cell]]), jnp.asarray([y[cell]])
+        )[0]
+    )
     assert covered[cell]
     peak = read.max()
     assert peak > 0
     np.testing.assert_allclose(read, np.maximum(image, 0.0), rtol=0, atol=1e-12 * peak)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 @pytest.mark.parametrize(
     ("kind", "source_lod", "outside"),
     [
@@ -457,23 +466,22 @@ def test_a_read_is_zero_beyond_the_stored_windows(tmp_path, kind, source_lod, ou
     Summing the shifted spectra before one inverse transform left the Fourier
     tail of each truncated PSF there, 7e-3 to 7e-2 of the peak.
     """
-    with jax.enable_x64():
-        package = write_synthetic_yip(
-            tmp_path / kind,
-            kind=kind,
-            npix=32,
-            psf_sigma_lod=4.0,
-            occulter_floor=1.0,
-            min_offset_lod=4.0 if kind == "1d" else 0.0,
-            max_offset_lod=8.0,
-            offset_step_lod=4.0,
-        )
-        backend = open_yip(package.path).prepare()._offaxis_backend
-        read = np.asarray(
-            backend._create_psfs(
-                jnp.asarray([source_lod[0]]), jnp.asarray([source_lod[1]])
-            )[0]
-        )
+    package = write_synthetic_yip(
+        tmp_path / kind,
+        kind=kind,
+        npix=32,
+        psf_sigma_lod=4.0,
+        occulter_floor=1.0,
+        min_offset_lod=4.0 if kind == "1d" else 0.0,
+        max_offset_lod=8.0,
+        offset_step_lod=4.0,
+    )
+    backend = open_yip(package.path).prepare()._offaxis_backend
+    read = np.asarray(
+        backend._create_psfs(
+            jnp.asarray([source_lod[0]]), jnp.asarray([source_lod[1]])
+        )[0]
+    )
     peak = read.max()
     assert peak > 0
     np.testing.assert_allclose(read[outside], 0.0, rtol=0, atol=1e-12 * peak)

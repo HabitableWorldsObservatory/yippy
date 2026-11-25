@@ -215,6 +215,7 @@ def test_shuffled_coordinates_and_float32_offsets(full_delivery):
     assert "exact_quotient_floor_v1" in result.receipt.profile_id
 
 
+@pytest.mark.float64_only(reason="Float64 reference roundoff for empirical residuals")
 def test_checkset_is_empirical(full_delivery):
     """Fails if independent residuals become a bound or lose their scope."""
     positions = jnp.array([[0.13, -0.21], [-0.21, 0.13]])
@@ -254,6 +255,9 @@ def test_checkset_is_empirical(full_delivery):
     assert bool(jnp.all(jnp.isinf(result.abs_error_bound)))
 
 
+@pytest.mark.float64_only(
+    reason="Compares a float64 reader with and without float64 available"
+)
 def test_precision_and_allocation_limits(full_delivery, full_reader):
     """Fails if x64-off silently truncates or batches allocate past byte ceilings."""
     with jax.enable_x64(False):

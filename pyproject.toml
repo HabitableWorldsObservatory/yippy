@@ -127,7 +127,8 @@ markers = [
     "slow: tests with a 300-second default time budget, run nightly",
 ]
 # The sinc docs scripts write committed evidence by hand; they are not doc examples.
-addopts = "-m 'not network' --ignore=docs/sinc/scripts"
+addopts = "-p hwoutils.testing.precision -m 'not network' --ignore=docs/sinc/scripts"
+default_precision = "float32"
 
 [tool.testbudget]
 library = "yippy"

@@ -13,7 +13,6 @@ XCENTER, which counts pixels from the array's outer corner.
 
 from dataclasses import replace
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -121,6 +120,9 @@ def test_a_tabulated_offset_is_returned_without_interpolation(
         )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 def test_the_separation_map_is_measured_about_the_optical_axis(
     syn_coro_1d, synthetic_1d
 ):
@@ -131,19 +133,18 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
     sqrt(2) / 2 pixels, not zero, and the map is point-symmetric about the
     array's middle, the same axis the core mean intensity profile uses.
     """
-    with jax.enable_x64():
-        npix = synthetic_1d.npix
-        pixel_lod = synthetic_1d.pixscale
-        axis = (npix - 1) / 2.0
-        rows, columns = np.indices((npix, npix))
-        expected = np.hypot(rows - axis, columns - axis) * pixel_lod
+    npix = synthetic_1d.npix
+    pixel_lod = synthetic_1d.pixscale
+    axis = (npix - 1) / 2.0
+    rows, columns = np.indices((npix, npix))
+    expected = np.hypot(rows - axis, columns - axis) * pixel_lod
 
-        separation_map = np.asarray(syn_coro_1d.grid.radius())
+    separation_map = np.asarray(syn_coro_1d.grid.radius())
 
-        np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
-        middle = npix // 2
-        central = separation_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
-        np.testing.assert_allclose(central, np.sqrt(0.5) * pixel_lod, rtol=1e-12)
+    np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
+    middle = npix // 2
+    central = separation_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
+    np.testing.assert_allclose(central, np.sqrt(0.5) * pixel_lod, rtol=1e-12)
 
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
@@ -262,6 +263,9 @@ def test_core_mean_intensity_is_measured_about_the_optical_axis(axis_ring_coro):
     )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     axis_concentrated_coro,
 ):
@@ -273,24 +277,23 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     header's XCENTER instead puts one of those pixels on zero separation and
     the other three at different radii, so they disagree.
     """
-    with jax.enable_x64():
-        coro = axis_concentrated_coro
-        pixel_lod = float(coro.grid.step)
-        intensity_map = np.asarray(
-            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-                np.hypot(*coro.stellar_grid.coordinates())
-            )
+    coro = axis_concentrated_coro
+    pixel_lod = float(coro.grid.step)
+    intensity_map = np.asarray(
+        stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+            np.hypot(*coro.stellar_grid.coordinates())
         )
-        middle = intensity_map.shape[0] // 2
-        central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
+    )
+    middle = intensity_map.shape[0] // 2
+    central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
 
-        expected = float(
-            stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-                np.sqrt(0.5) * pixel_lod
-            )
+    expected = float(
+        stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
+            np.sqrt(0.5) * pixel_lod
         )
-        np.testing.assert_allclose(central, expected, rtol=1e-10)
-        np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
+    )
+    np.testing.assert_allclose(central, expected, rtol=1e-10)
+    np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
 
 
 @pytest.mark.parametrize("npix,kind", [(8, "2dq"), (9, "2dq"), (8, "1d")])

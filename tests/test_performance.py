@@ -4,7 +4,6 @@ Uses a real coronagraph YIP via the session-scoped ``coro`` fixture from
 conftest.py (downloaded via pooch).
 """
 
-import jax
 import numpy as np
 import pytest
 from conftest import requires_available_yip
@@ -130,23 +129,22 @@ class TestCoreMeanIntensityCurve:
         The log/exp round trip amplifies ordinate rounding by abs(log(level));
         four such errors allow spline arithmetic and ring summation.
         """
-        with jax.enable_x64():
-            coro, _ = performance_interpolation
-            diameters = np.r_[0.0, np.asarray(coro._stellar_ln_interp.x)[1:]]
-            assert len(diameters) == len(coro._stellar_ln_interp.x)
-            for diameter in diameters:
-                profile = stellar_intensity_curves(coro, diameter)
-                assert profile.quantity == "stellar_ring_mean_per_pixel"
-                assert profile.frame == coro.stellar_grid.frame
-                nodes = profile.separation_lod
-                queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
-                actual = profile.evaluate(queries)
-                tol = (
-                    4
-                    * max(1.0, abs(np.log(synthetic_1d.stellar_level)))
-                    * np.finfo(np.asarray(coro._stellar_ln_interp.c).dtype).eps
-                )
-                np.testing.assert_allclose(actual, synthetic_1d.stellar_level, rtol=tol)
+        coro, _ = performance_interpolation
+        diameters = np.r_[0.0, np.asarray(coro._stellar_ln_interp.x)[1:]]
+        assert len(diameters) == len(coro._stellar_ln_interp.x)
+        for diameter in diameters:
+            profile = stellar_intensity_curves(coro, diameter)
+            assert profile.quantity == "stellar_ring_mean_per_pixel"
+            assert profile.frame == coro.stellar_grid.frame
+            nodes = profile.separation_lod
+            queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
+            actual = profile.evaluate(queries)
+            tol = (
+                4
+                * max(1.0, abs(np.log(synthetic_1d.stellar_level)))
+                * np.finfo(np.asarray(coro._stellar_ln_interp.c).dtype).eps
+            )
+            np.testing.assert_allclose(actual, synthetic_1d.stellar_level, rtol=tol)
 
 
 @requires_available_yip
@@ -191,8 +189,7 @@ class TestPreparedPerformanceCurves:
 @pytest.fixture(scope="module")
 def performance_interpolation(synthetic_1d):
     """The one record evaluator on real measured tables."""
-    with jax.enable_x64():
-        coro = open_yip(synthetic_1d.path).prepare()
+    coro = open_yip(synthetic_1d.path).prepare()
     return (coro, coro.curves())
 
 
@@ -207,11 +204,13 @@ def test_cached_record_retains_the_host_sky_profile(
         pytest.fail("the cached photometry was recomputed")
 
     monkeypatch.setattr("yippy._yip.performance_curves", reject_recomputation)
-    with jax.enable_x64():
-        record = host._prepare_record()
+    record = host._prepare_record()
     assert record.uniform_sky is host.uniform_sky_profile
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_performance_interpolation_default_and_legacy(performance_interpolation):
     """Fails if a curve's PCHIP or declared interpolation space changes.
 
@@ -221,64 +220,64 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
     coro, record = performance_interpolation
     with pytest.raises(TypeError, match="interp_order"):
         coro.package.prepare(interp_order=1)
-    with jax.enable_x64():
-        for name in (
-            "throughput",
-            "throughput_variance",
-            "core_area_lod2",
-            "core_area_variance_lod2",
-            "raw_contrast",
-            "leakage_fraction",
-            "leakage_fraction_variance",
-            "leakage_density_lod2",
-            "leakage_density_variance_lod2",
-        ):
-            # A leakage quantity is read at the first tabulated diameter, a point star.
-            by_diameter = name in DIAMETER_QUANTITIES
-            values = getattr(record, name)[0] if by_diameter else getattr(record, name)
-            is_log = record.interpolation[name] == "log"
-            y = np.log10(np.maximum(values, 1e-300)) if is_log else values
-            nodes = record.separation_lod
-            grid = np.linspace(nodes[0], nodes[-1], 301)
-            expected = PchipInterpolator(nodes, y)(grid)
-            if is_log:
-                expected = 10**expected
-            np.testing.assert_allclose(
-                record.evaluate(name, grid, 0.0 if by_diameter else None),
-                expected,
-                rtol=1e-13,
-                atol=0,
-            )
+    for name in (
+        "throughput",
+        "throughput_variance",
+        "core_area_lod2",
+        "core_area_variance_lod2",
+        "raw_contrast",
+        "leakage_fraction",
+        "leakage_fraction_variance",
+        "leakage_density_lod2",
+        "leakage_density_variance_lod2",
+    ):
+        # A leakage quantity is read at the first tabulated diameter, a point star.
+        by_diameter = name in DIAMETER_QUANTITIES
+        values = getattr(record, name)[0] if by_diameter else getattr(record, name)
+        is_log = record.interpolation[name] == "log"
+        y = np.log10(np.maximum(values, 1e-300)) if is_log else values
+        nodes = record.separation_lod
+        grid = np.linspace(nodes[0], nodes[-1], 301)
+        expected = PchipInterpolator(nodes, y)(grid)
+        if is_log:
+            expected = 10**expected
+        np.testing.assert_allclose(
+            record.evaluate(name, grid, 0.0 if by_diameter else None),
+            expected,
+            rtol=1e-13,
+            atol=0,
+        )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_performance_interpolation_linear_tails(performance_interpolation):
     """Fails if tail extrapolation uses the end cubic (float64 bound 1e-13)."""
     coro, record = performance_interpolation
-    with jax.enable_x64():
-        for name in ("throughput", "core_area_lod2", "raw_contrast"):
-            by_diameter = name in DIAMETER_QUANTITIES
-            values, nodes = (
-                np.asarray(
-                    getattr(record, name)[0] if by_diameter else getattr(record, name)
-                ),
-                np.asarray(record.separation_lod),
-            )
-            is_log = record.interpolation[name] == "log"
-            y = np.log10(np.maximum(values, 1e-300)) if is_log else values
-            grid = np.array([nodes[0] - 0.1, nodes[-1] + 0.1, np.nan])
-            expected = make_interp_spline(nodes, y, k=1)(grid)
-            if is_log:
-                expected = 10**expected
-            np.testing.assert_allclose(
-                record.evaluate(name, grid, 0.0 if by_diameter else None),
-                expected,
-                rtol=1e-13,
-            )
-
-    with jax.enable_x64():
-        assert np.isnan(
-            stellar_intensity_curves(coro, 0.3, interpolation="keys").evaluate(2.0)
+    for name in ("throughput", "core_area_lod2", "raw_contrast"):
+        by_diameter = name in DIAMETER_QUANTITIES
+        values, nodes = (
+            np.asarray(
+                getattr(record, name)[0] if by_diameter else getattr(record, name)
+            ),
+            np.asarray(record.separation_lod),
         )
+        is_log = record.interpolation[name] == "log"
+        y = np.log10(np.maximum(values, 1e-300)) if is_log else values
+        grid = np.array([nodes[0] - 0.1, nodes[-1] + 0.1, np.nan])
+        expected = make_interp_spline(nodes, y, k=1)(grid)
+        if is_log:
+            expected = 10**expected
+        np.testing.assert_allclose(
+            record.evaluate(name, grid, 0.0 if by_diameter else None),
+            expected,
+            rtol=1e-13,
+        )
+
+    assert np.isnan(
+        stellar_intensity_curves(coro, 0.3, interpolation="keys").evaluate(2.0)
+    )
 
 
 def test_default_preserves_a_steep_monotone_rise():

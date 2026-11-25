@@ -14,7 +14,6 @@ package instead, in ``test_analytic_yip.py``.
 """
 
 import astropy.io.fits as pyfits
-import jax
 import numpy as np
 import pytest
 from lod_unit import lod
@@ -46,24 +45,26 @@ EAC1_AAVC_IWA_LOD = 4.054787
 EAC1_AAVC_IWA_TOL = 5e-3
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 def test_eac1_band_average_uses_one_scale(shipped_coro):
     """EAC1 declares 0.95 to 1.05 microns, to float64 unit-conversion roundoff.
 
     A flat average is the same native map at both edges and selects the
     observing centre exactly (Stark and Krist 2019).
     """
-    with jax.enable_x64():
-        assert shipped_coro.band_averaged is True
-        band = shipped_coro.bandpass
-        np.testing.assert_allclose(
-            [band.low_nm, band.high_nm], [950, 1050], rtol=2e-16, atol=0
-        )
-        assert shipped_coro.scale_wavelength_nm(950, 980) == 980
-        assert shipped_coro.scale_wavelength_nm(1050, 980) == 980
-        np.testing.assert_array_equal(
-            shipped_coro.stellar_map(950, 0.1).data,
-            shipped_coro.stellar_map(1050, 0.1).data,
-        )
+    assert shipped_coro.band_averaged is True
+    band = shipped_coro.bandpass
+    np.testing.assert_allclose(
+        [band.low_nm, band.high_nm], [950, 1050], rtol=2e-16, atol=0
+    )
+    assert shipped_coro.scale_wavelength_nm(950, 980) == 980
+    assert shipped_coro.scale_wavelength_nm(1050, 980) == 980
+    np.testing.assert_array_equal(
+        shipped_coro.stellar_map(950, 0.1).data,
+        shipped_coro.stellar_map(1050, 0.1).data,
+    )
 
 
 @pytest.fixture
@@ -82,11 +83,10 @@ def test_equal_or_absent_edges_declare_one_wavelength(spectral_package, omit_edg
                     del hdus[0].header[key]
                 else:
                     hdus[0].header[key] = (500.0, "nm")
-    with jax.enable_x64():
-        coro = open_yip(spectral_package).prepare()
-        assert coro.bandpass is None
-        assert coro.band_averaged is False
-        assert coro.scale_wavelength_nm(515.0, 500.0) == 515.0
+    coro = open_yip(spectral_package).prepare()
+    assert coro.bandpass is None
+    assert coro.band_averaged is False
+    assert coro.scale_wavelength_nm(515.0, 500.0) == 515.0
 
 
 @pytest.mark.parametrize("stellar_low_nm", [None, 480.0])
@@ -97,7 +97,7 @@ def test_stellar_band_must_agree_with_offaxis(spectral_package, stellar_low_nm):
             del hdus[0].header["MINLAM"]
         else:
             hdus[0].header["MINLAM"] = (stellar_low_nm, "nm")
-    with jax.enable_x64(), pytest.raises(ValueError) as exc:
+    with pytest.raises(ValueError) as exc:
         open_yip(spectral_package).prepare()
     message = str(exc.value)
     for label in ("offax_psf.fits", "stellar_intens.fits", "500", str(stellar_low_nm)):
@@ -116,7 +116,7 @@ def test_one_sample_warns_and_keeps_declared_band(spectral_package):
     with pyfits.open(spectral_package / "stellar_intens.fits", mode="update") as hdus:
         hdus[0].header["MINLAM"] = (0.45 * (1 + 5e-10), "microns")
         hdus[0].header["MAXLAM"] = (0.55, "microns")
-    with jax.enable_x64(), pytest.warns(UserWarning, match=r"N_LAM = 1.*declared band"):
+    with pytest.warns(UserWarning, match="N_LAM = 1.*declared band"):
         coro = open_yip(spectral_package).prepare()
     assert coro.band_averaged is True
     assert (coro.bandpass.low_nm, coro.bandpass.high_nm) == (450, 550)
@@ -392,28 +392,26 @@ def test_detector_aperture_converges_to_encircled_flux(syn_coro_1d, synthetic_1d
     The observed-order band permits aperture-edge phase and reference quadrature
     error, while rejecting the nonvanishing linear-reconstruction bias.
     """
-    import jax
     from optixstuff.apertures import Circular
 
-    with jax.enable_x64():
-        rule, separation = Circular(0.7), 2.0
-        expected = synthetic_1d.expected_throughput(separation, rule.radius_lod)
-        errors, sums = [], []
-        pitches = (0.24, 0.12, 0.06)
-        for pitch, size in zip(pitches, (32, 64, 128), strict=True):
-            target = PixelGrid.regular(
-                (size, size), pitch, "lod", frame=syn_coro_1d.grid.frame
-            )
-            psf = syn_coro_1d.off_axis_psf(None, separation, target)
-            assert psf.reconstruction == "band_limited"
-            weights = rule.weights(psf, (separation, 0.0))
-            sums.append(float(np.sum(np.asarray(psf.data) * np.asarray(weights))))
-            errors.append(abs(sums[-1] - expected))
-            assert errors[-1] < 0.18 * pitch**2
-        orders = np.log2(np.array(errors[:-1]) / errors[1:])
-        assert np.all((orders > 1.7) & (orders < 2.3))
-        print(f"detector sums={sums}; throughput={expected}; errors={errors}")
-        print(f"observed orders={orders.tolist()}")
+    rule, separation = Circular(0.7), 2.0
+    expected = synthetic_1d.expected_throughput(separation, rule.radius_lod)
+    errors, sums = [], []
+    pitches = (0.24, 0.12, 0.06)
+    for pitch, size in zip(pitches, (32, 64, 128), strict=True):
+        target = PixelGrid.regular(
+            (size, size), pitch, "lod", frame=syn_coro_1d.grid.frame
+        )
+        psf = syn_coro_1d.off_axis_psf(None, separation, target)
+        assert psf.reconstruction == "band_limited"
+        weights = rule.weights(psf, (separation, 0.0))
+        sums.append(float(np.sum(np.asarray(psf.data) * np.asarray(weights))))
+        errors.append(abs(sums[-1] - expected))
+        assert errors[-1] < 0.18 * pitch**2
+    orders = np.log2(np.array(errors[:-1]) / errors[1:])
+    assert np.all((orders > 1.7) & (orders < 2.3))
+    print(f"detector sums={sums}; throughput={expected}; errors={errors}")
+    print(f"observed orders={orders.tolist()}")
 
 
 def test_public_package_optical_axis_evidence(shipped_coro):
