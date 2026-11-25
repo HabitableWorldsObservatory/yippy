@@ -29,8 +29,7 @@ def write_delivery(root, *, full=False):
     )
     for name in ("stellar_intens.fits", "sky_trans.fits"):
         with fits.open(root / "legacy" / name, mode="update") as hdus:
-            for key in ("LAMBDA", "MINLAM", "MAXLAM"):
-                hdus[0].header[key] = (400.0, "nm")
+            hdus[0].header["LAMBDA"] = (400.0, "nm")
     axis = np.arange(-16, 17) if full else np.arange(18)
     ix, iy = np.meshgrid(axis, axis, indexing="xy")
     indices = np.column_stack((ix.ravel(), iy.ravel()))

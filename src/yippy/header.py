@@ -19,6 +19,14 @@ class HeaderData:
     Use pixel_grid() for pixel-center coordinates and the reference frame.
     D_INSC remains metadata; it does not change the native circumscribed frame.
 
+    In offax_psf.fits, MINLAM below MAXLAM declares the flat spectral average
+    over those limits on the lambda/D grid at LAMBDA. Place the grid at each
+    observing band's centre, as described by Stark and Krist (2019),
+    "Standardized Coronagraph Parameters for Input into Yield Calculations".
+    A producer computing one wavelength must write equal limits. Absent limits
+    also indicate one wavelength. stellar_intens.fits must declare matching
+    edges, while sky_trans.fits may differ.
+
     Attributes:
         simple: FITS SIMPLE flag.
         bitpix: FITS BITPIX data type code.
@@ -38,7 +46,8 @@ class HeaderData:
         ycenter: Optical axis in y, in pixel corner counts (YCENTER).
         obscured: Obscured aperture-area fraction from OBSCURED.
         jitter: RMS jitter per axis from JITTER (default unit mas).
-        n_lam: Number of wavelength samples from N_LAM.
+        n_lam: Number of wavelength samples from N_LAM, an optional consistency
+            check outside the specification.
         n_star: Number of stellar samples from N_STAR.
         zernike: Aberration set name from ZERNIKE.
         wfe: Wavefront error from WFE (default unit pm).

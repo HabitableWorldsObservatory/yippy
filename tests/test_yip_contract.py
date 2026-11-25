@@ -14,10 +14,14 @@ package instead, in ``test_analytic_yip.py``.
 """
 
 import astropy.io.fits as pyfits
+import jax
 import numpy as np
 import pytest
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
+from synthetic_yip import write_synthetic_yip
+
+from yippy import open_yip
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -40,6 +44,82 @@ FAR_FIELD_SEPARATIONS_LOD = (20.0, 25.0)
 # Every record uses the same PCHIP half-maximum crossing.
 EAC1_AAVC_IWA_LOD = 4.054787
 EAC1_AAVC_IWA_TOL = 5e-3
+
+
+def test_eac1_band_average_uses_one_scale(shipped_coro):
+    """EAC1 declares 0.95 to 1.05 microns, to float64 unit-conversion roundoff.
+
+    A flat average is the same native map at both edges and selects the
+    observing centre exactly (Stark and Krist 2019).
+    """
+    with jax.enable_x64():
+        assert shipped_coro.band_averaged is True
+        band = shipped_coro.bandpass
+        np.testing.assert_allclose(
+            [band.low_nm, band.high_nm], [950, 1050], rtol=2e-16, atol=0
+        )
+        assert shipped_coro.scale_wavelength_nm(950, 980) == 980
+        assert shipped_coro.scale_wavelength_nm(1050, 980) == 980
+        np.testing.assert_array_equal(
+            shipped_coro.stellar_map(950, 0.1).data,
+            shipped_coro.stellar_map(1050, 0.1).data,
+        )
+
+
+@pytest.fixture
+def spectral_package(tmp_path):
+    """Small, written single-wavelength product for FITS declaration checks."""
+    return write_synthetic_yip(tmp_path, npix=8, max_offset_lod=0.75).path
+
+
+@pytest.mark.parametrize("omit_edges", [False, True])
+def test_equal_or_absent_edges_declare_one_wavelength(spectral_package, omit_edges):
+    """Equal written edges or absent keys select the node wavelength exactly."""
+    for filename in ("offax_psf.fits", "stellar_intens.fits"):
+        with pyfits.open(spectral_package / filename, mode="update") as hdus:
+            for key in ("MINLAM", "MAXLAM"):
+                if omit_edges:
+                    del hdus[0].header[key]
+                else:
+                    hdus[0].header[key] = (500.0, "nm")
+    with jax.enable_x64():
+        coro = open_yip(spectral_package).prepare()
+        assert coro.bandpass is None
+        assert coro.band_averaged is False
+        assert coro.scale_wavelength_nm(515.0, 500.0) == 515.0
+
+
+@pytest.mark.parametrize("stellar_low_nm", [None, 480.0])
+def test_stellar_band_must_agree_with_offaxis(spectral_package, stellar_low_nm):
+    """An absent or discrepant FITS edge fails outside the relative 1e-9 bound."""
+    with pyfits.open(spectral_package / "stellar_intens.fits", mode="update") as hdus:
+        if stellar_low_nm is None:
+            del hdus[0].header["MINLAM"]
+        else:
+            hdus[0].header["MINLAM"] = (stellar_low_nm, "nm")
+    with jax.enable_x64(), pytest.raises(ValueError) as exc:
+        open_yip(spectral_package).prepare()
+    message = str(exc.value)
+    for label in ("offax_psf.fits", "stellar_intens.fits", "500", str(stellar_low_nm)):
+        assert label in message
+
+
+def test_one_sample_warns_and_keeps_declared_band(spectral_package):
+    """Written band and sample count conflict exactly; 5e-10 edge drift is allowed.
+
+    The off-axis limits are the exact truth in nm even when the stellar
+    header uses microns and the sky header declares a single wavelength.
+    """
+    with pyfits.open(spectral_package / "offax_psf.fits", mode="update") as hdus:
+        hdus[0].header["MINLAM"] = (450, "nm")
+        hdus[0].header["MAXLAM"] = (550, "nm")
+    with pyfits.open(spectral_package / "stellar_intens.fits", mode="update") as hdus:
+        hdus[0].header["MINLAM"] = (0.45 * (1 + 5e-10), "microns")
+        hdus[0].header["MAXLAM"] = (0.55, "microns")
+    with jax.enable_x64(), pytest.warns(UserWarning, match=r"N_LAM = 1.*declared band"):
+        coro = open_yip(spectral_package).prepare()
+    assert coro.band_averaged is True
+    assert (coro.bandpass.low_nm, coro.bandpass.high_nm) == (450, 550)
 
 
 def test_the_header_declares_a_usable_pixel_scale(shipped_coro):

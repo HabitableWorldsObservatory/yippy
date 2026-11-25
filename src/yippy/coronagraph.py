@@ -1,6 +1,7 @@
 """Immutable YIP tables implementing the shared coronagraph contract."""
 
 import math
+import warnings
 from copy import copy
 from dataclasses import fields, replace
 from math import pi
@@ -71,6 +72,33 @@ def _stellar_exp(log_values):
     return jnp.where(overflow, jnp.inf, jnp.exp(safe_log))
 
 
+def _declared_band(offaxis_header, stellar_header):
+    """Read the off-axis band after comparing both intensity headers in nm."""
+
+    def edges_nm(header):
+        return tuple(
+            None if edge is None else float(edge.to_value("nm"))
+            for edge in (header.minlam, header.maxlam)
+        )
+
+    offaxis, stellar = edges_nm(offaxis_header), edges_nm(stellar_header)
+    if offaxis == stellar == (None, None):
+        return None
+    if (
+        None in offaxis
+        or None in stellar
+        or not all(
+            math.isclose(a, b, rel_tol=1e-9)
+            for a, b in zip(offaxis, stellar, strict=True)
+        )
+    ):
+        raise ValueError(
+            "Both intensity headers must declare matching (MINLAM, MAXLAM) in nm: "
+            f"offax_psf.fits has {offaxis}, stellar_intens.fits has {stellar}"
+        )
+    return None if offaxis[0] == offaxis[1] else Band(*offaxis)
+
+
 class Coronagraph(AbstractTableCoronagraph):
     """A frozen, JAX-compatible coronagraph loaded from a Yield Input Package.
 
@@ -78,6 +106,15 @@ class Coronagraph(AbstractTableCoronagraph):
     characterization record for each aperture rule is prepared at construction,
     before JIT queries.
     The default photometric rule is a circle of radius 0.7 lambda/D.
+
+    In offax_psf.fits, MINLAM below MAXLAM declares a flat average over that
+    interval on a lambda/D grid at LAMBDA. Place this grid once per observing
+    band at its centre (Stark and Krist 2019, "Standardized Coronagraph
+    Parameters for Input into Yield Calculations"). Producers computing one
+    wavelength must write equal limits. Missing limits also indicate a
+    single wavelength. The limits in stellar_intens.fits must agree with
+    offax_psf.fits, while sky_trans.fits may differ. N_LAM is an optional
+    consistency check outside the specification.
 
     Attributes:
         grid: Native pixel grid of the off-axis PSFs, in lambda/D.
@@ -87,6 +124,8 @@ class Coronagraph(AbstractTableCoronagraph):
         interpolation_info: Routing and provenance of the off-axis interpolation.
         bandpass: Spectral band recorded by the YIP in nm, or None when it holds a
             single wavelength.
+        band_averaged: True for a flat band average placed at the observing band
+            centre. A single-wavelength product is placed at each node wavelength.
         uniform_sky_profile: Radial profile of the uniform-sky response.
     """
 
@@ -96,6 +135,7 @@ class Coronagraph(AbstractTableCoronagraph):
     header: HeaderData = eqx.field(static=True)
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
+    band_averaged: bool = eqx.field(static=True)
     _offaxis_backend: object
     _stellar_ln_interp: interpax.CubicSpline
     _stellar_linear_interp: interpax.PchipInterpolator | None
@@ -167,15 +207,15 @@ class Coronagraph(AbstractTableCoronagraph):
         self.stellar_grid = host.stellar_intens.grid
         self.interpolation_info = host.interpolation_info
         spectral_header = host.offaxis_header
-        self.bandpass = None
-        if spectral_header.minlam is not None and spectral_header.maxlam is not None:
-            low_nm, high_nm = (
-                spectral_header.minlam.to_value("nm"),
-                spectral_header.maxlam.to_value("nm"),
+        self.bandpass = _declared_band(spectral_header, host.header)
+        self.band_averaged = self.bandpass is not None
+        if self.band_averaged and spectral_header.n_lam == 1:
+            warnings.warn(
+                "N_LAM = 1 contradicts the declared band in offax_psf.fits. "
+                "The band declaration is used.",
+                UserWarning,
+                stacklevel=2,
             )
-            # A single recorded wavelength has no finite-width spectral band.
-            if low_nm != high_nm:
-                self.bandpass = Band(low_nm, high_nm)
         self._offaxis_backend = host.offax
         stellar = host.stellar_intens
         diams_lod = jnp.asarray(stellar.diams.value, dtype=float_dtype())
@@ -337,7 +377,7 @@ class Coronagraph(AbstractTableCoronagraph):
         samples.
 
         Args:
-            wavelength_nm: Wavelength in nm; ignored by this monochromatic table.
+            wavelength_nm: Wavelength in nm. This product returns its fixed table.
             stellar_diameter_lod: Angular diameter of the star in lambda/D.
             grid: Grid the Image is returned on; None keeps the native samples.
 

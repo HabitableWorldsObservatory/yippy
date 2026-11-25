@@ -33,7 +33,12 @@ def test_yippy_diameter_forwarding(cached_diameter_coro):
 def test_multiband_forwards_diameter(cached_diameter_coro):
     """Exact image dispatch; monochromatic records ignore wavelength."""
     c = cached_diameter_coro
-    mb = MultiBandCoronagraph([c, eqx.tree_at(lambda m: m.bandpass, c, Band(800, 900))])
+    mb = MultiBandCoronagraph(
+        [
+            eqx.tree_at(lambda m: m.bandpass, c, band, is_leaf=lambda x: x is None)
+            for band in (Band(450, 550), Band(800, 900))
+        ]
+    )
     for wl in (500.0, 850.0):
         np.testing.assert_array_equal(
             mb.coronagraph_at(wl).stellar_map(wl, 0.1, grid=c.grid).data,
