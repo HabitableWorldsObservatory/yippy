@@ -62,6 +62,16 @@ $\lambda_0/D$ grid is not rescaled with wavelength. The yippy parser of version
 0.1 requires every plane to be monochromatic, so a band-mean plane is not
 supported and a band product is assembled from the planes after the read.
 
+When writing the assembled flat average as a native yield input package,
+record its interval as `MINLAM < MAXLAM` in `offax_psf.fits` and its grid
+wavelength as `LAMBDA`. Place this grid once per observing band at its centre
+(Stark and Krist 2019, *Standardized Coronagraph Parameters for Input into Yield
+Calculations*). A producer computing one wavelength must write equal limits.
+A package with both limits absent also represents a single wavelength. The limits in
+`stellar_intens.fits` must agree with the off-axis limits. The sky product
+can have different limits in `sky_trans.fits`. The optional `N_LAM` sample
+count serves only as a consistency check outside the specification.
+
 The sampling limit is set by the shortest contributing wavelength, because
 $\sigma_{\max}=\lambda_0/\lambda_{\min}$ sets the bandwidth. A filter with
 tails has no sharp shortest wavelength, so declare it as the wavelength below

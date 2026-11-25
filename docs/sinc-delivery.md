@@ -343,6 +343,16 @@ Every PSF cube carries these keywords. The parser compares each with the manifes
 | `NAXIS1`, `NAXIS2` | detector columns, rows | Equal to `detector_shape_yx`. |
 | `BUNIT` | `incident_fraction_per_pixel` or `incident_fraction_per_lod2` | Not read by the parser, but required by the request. |
 
+For a native yield input package, `MINLAM < MAXLAM` in `offax_psf.fits` declares
+a flat average over that interval on the $\lambda/D$ grid at `LAMBDA`. Place this
+grid at the centre of each observing band (Stark and Krist 2019, *Standardized
+Coronagraph Parameters for Input into Yield Calculations*). A producer computing
+one wavelength must write equal limits, as required above for a monochromatic
+delivery plane. A native package with both keys absent also represents one
+wavelength. The limits in `stellar_intens.fits` must agree with the off-axis
+limits. The limits in `sky_trans.fits` may differ. `N_LAM` serves only as a
+consistency check and falls outside the yield input package specification.
+
 The unit of `LAMBDA`, `MINLAM`, `MAXLAM` and `D` is read from the header comment (words
 such as `m`, `nm` or `micron`). With no recognizable unit the parser assumes meters and
 logs a warning, so write meters and put `m` in the comment. For `PIXSCALE` an empty
