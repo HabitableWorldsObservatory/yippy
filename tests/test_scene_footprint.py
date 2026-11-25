@@ -3,7 +3,6 @@
 from dataclasses import replace
 
 import equinox as eqx
-import jax
 import numpy as np
 from optixstuff.grids import Image, Measure
 
@@ -40,7 +39,9 @@ def test_render_checks_lit_input_cell_corners(cached_diameter_coro):
             assert np.asarray(result.image.data).sum() > 0
 
 
-def test_render_ignores_subnormal_float32_flux_outside_grid(cached_diameter_coro):
+def test_render_ignores_subnormal_float32_flux_outside_grid(
+    cached_diameter_coro, precision
+):
     """Only the normal float32 sample makes the out-of-grid scene invalid."""
     coro = cached_diameter_coro
     source = coro.grid
@@ -49,13 +50,14 @@ def test_render_ignores_subnormal_float32_flux_outside_grid(cached_diameter_coro
     larger = replace(source, shape=(ny, nx + 2), center_x=source.center_x + 1)
     tiny = np.finfo(np.float32).tiny
     subnormal = np.nextafter(tiny, np.float32(0))
-    with jax.enable_x64():
-        for render in (model.render_scene, eqx.filter_jit(model.render_scene)):
-            for sample, valid in ((subnormal, True), (tiny, False)):
-                flux = np.zeros(larger.shape, dtype=np.float32)
-                flux[ny // 2, -1] = sample
-                # The cutoff also applies when float64 arithmetic preserves
-                # the subnormal float32 input rather than flushing it to zero.
-                for data in (flux, flux.astype(np.float64)):
-                    scene = Image(data, larger, (), Measure.integral(), "flux")
-                    assert bool(render(scene, None, grid=source).valid) is valid
+    for render in (model.render_scene, eqx.filter_jit(model.render_scene)):
+        for sample, valid in ((subnormal, True), (tiny, False)):
+            flux = np.zeros(larger.shape, dtype=np.float32)
+            flux[ny // 2, -1] = sample
+            # The cutoff also applies when float64 arithmetic preserves
+            # the subnormal float32 input rather than flushing it to zero.
+            for dtype in {np.dtype("float32"), precision}:
+                scene = Image(
+                    flux.astype(dtype), larger, (), Measure.integral(), "flux"
+                )
+                assert bool(render(scene, None, grid=source).valid) is valid

@@ -24,24 +24,16 @@ H = 1e-7
 
 @pytest.fixture(scope="module")
 def coros(tmp_path_factory):
-    """Double-precision coronagraphs on a stamp narrower than the node hull."""
+    """Coronagraphs on a stamp narrower than the node hull."""
     root = tmp_path_factory.mktemp("domain")
-    with jax.enable_x64():
-        out = {
-            kind: open_yip(
-                write_synthetic_yip(root / kind, kind=kind, npix=16).path
-            ).prepare()
-            for kind in KINDS
-        }
+    out = {
+        kind: open_yip(
+            write_synthetic_yip(root / kind, kind=kind, npix=16).path
+        ).prepare()
+        for kind in KINDS
+    }
     yield out
     jax.clear_caches()
-
-
-@pytest.fixture(autouse=True)
-def x64():
-    """Run every test in double precision."""
-    with jax.enable_x64():
-        yield
 
 
 def _read(coro, x, y):
@@ -118,6 +110,7 @@ POINTS = {
 }
 
 
+@pytest.mark.float64_only(reason="Finite differences at a 1e-7 step")
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("name", list(POINTS))
 def test_gradient_matches_central_differences(coros, kind, name):

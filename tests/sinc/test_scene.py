@@ -39,6 +39,9 @@ def case(request):
     return request.getfixturevalue(request.param)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 @pytest.mark.medium(reason="compiles the render and a batch read per table, 4 s")
 def test_points_equal_summed_reads(case):
     """Fails if the fold drops, double counts or mis-flips a touched node.
@@ -63,6 +66,9 @@ def test_points_equal_summed_reads(case):
     assert not np.any(np.asarray(result.ledger.evidence))
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 @pytest.mark.medium(reason="compiles raster, point and batch paths per table, 4 s")
 def test_raster_equals_points_and_summed_reads(case):
     """Fails if the separable raster fold swaps axes or loses a pixel.
@@ -163,6 +169,7 @@ def test_refusals_padding_and_margin(tone_quadrant):
     assert not bool(refused.accepted) and bool(refused.sampling_ok)
 
 
+@pytest.mark.float64_only(reason="Float64 reference accumulation from float32 storage")
 @pytest.mark.medium(reason="admits and builds a float32 table, 5 s")
 def test_float32_storage_renders_like_summed_reads(tone_full):
     """Fails if a float32 table is contracted in float32.
@@ -232,6 +239,7 @@ def test_construction_refusals(tone_full):
         sc.SceneRenderer(lean, 0, points)
 
 
+@pytest.mark.float64_only(reason="Finite differences at a 1e-6 step")
 @pytest.mark.medium(reason="reverse-mode compile of the render, 4 s")
 def test_gradients_through_the_render(tone_quadrant):
     """Fails if flux or position gradients are wrong, or NaN on a refused render.
@@ -256,6 +264,7 @@ def test_gradients_through_the_render(tone_quadrant):
     assert all(bool(jnp.all(jnp.isfinite(g))) for g in gradient)
 
 
+@pytest.mark.float64_only(reason="Float64 reference accumulation from float32 storage")
 @pytest.mark.medium(reason="admits a float32 quadrant and renders it twice, 5 s")
 def test_float32_table_accumulation(tone_quadrant, monkeypatch):
     """Fails if a float32 table is contracted in the wrong precision or block order.

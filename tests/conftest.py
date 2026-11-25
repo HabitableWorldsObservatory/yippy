@@ -3,16 +3,12 @@
 import importlib.util
 import os
 
-import jax.numpy as jnp
-import numpy as np
 import pytest
 from hypothesis import settings
 from synthetic_yip import synthetic_coronagraph
 
 from yippy import open_yip
-from yippy._precision import float_dtype
 from yippy.datasets import yip_info
-from yippy.performance import stellar_intensity_curves
 
 pytest_plugins = []
 # Released hwoutils versions may not include the optional budget plugin yet.
@@ -24,33 +20,6 @@ if importlib.util.find_spec("hwoutils.internal_refs") is not None:
 settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
-
-
-def assert_eqx_arrays_match_active_dtype(eqx_coro):
-    """Assert every stored/forward float array on an Coronagraph is the active dtype.
-
-    Checks a directly stored array (``sky_trans``) plus forward evaluations that
-    exercise the stellar-intensity spline, a performance interpolator, and a
-    radial intensity record with JAX inputs. The forward-output dtype doubles as the
-    no-float32-leak guard. Shared by the float32 and float64 precision suites.
-
-    Args:
-        eqx_coro: An ``Coronagraph`` built under the active x64 setting.
-    """
-    expected = np.dtype(float_dtype())
-    assert np.dtype(eqx_coro.sky_trans.data.dtype) == expected, "sky_trans"
-    assert (
-        np.dtype(eqx_coro.stellar_map(None, 0.0, grid=None).data.dtype) == expected
-    ), "stellar_intens"
-    assert (
-        np.dtype(eqx_coro.curves().evaluate("throughput", jnp.asarray(5.0)).dtype)
-        == expected
-    ), "throughput"
-    if len(eqx_coro._stellar_ln_interp.x) > 1:
-        out_2d = stellar_intensity_curves(
-            eqx_coro, 1e-3, interpolation="keys"
-        ).evaluate(jnp.asarray(5.0))
-        assert np.dtype(out_2d.dtype) == expected, "core_mean_intensity_2d"
 
 
 requires_available_yip = pytest.mark.skipif(

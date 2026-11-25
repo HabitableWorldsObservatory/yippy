@@ -8,7 +8,6 @@ closest in an inverse-distance sense.
 
 from unittest.mock import patch
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -45,22 +44,24 @@ def test_a_source_between_rings_reads_the_analytic_throughput_ramp(
     backend = open_yip(synthetic_rings.path).prepare()._offaxis_backend
     radius = RING_LO + FRACTIONS * (RING_HI - RING_LO)
     phi = np.radians(azimuth_deg)
-    with jax.enable_x64():
-        sums = np.asarray(
-            backend.create_psfs(
-                jnp.asarray(radius * np.cos(phi)), jnp.asarray(radius * np.sin(phi))
-            ).data.sum(axis=(-1, -2))
-        )
-        node = float(
-            backend.create_psfs(jnp.asarray([RING_LO]), jnp.asarray([0.0]))
-            .data.sum(axis=(-1, -2))
-            .item()
-        )
+    sums = np.asarray(
+        backend.create_psfs(
+            jnp.asarray(radius * np.cos(phi)), jnp.asarray(radius * np.sin(phi))
+        ).data.sum(axis=(-1, -2))
+    )
+    node = float(
+        backend.create_psfs(jnp.asarray([RING_LO]), jnp.asarray([0.0]))
+        .data.sum(axis=(-1, -2))
+        .item()
+    )
     expected = synthetic_rings.occulter(radius) / synthetic_rings.occulter(RING_LO)
     np.testing.assert_allclose(sums / node, expected, rtol=RAMP_TOL, atol=0.0)
     assert np.all(np.diff(sums) > 0)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for FFT shifts and scene contraction"
+)
 def test_whole_pixel_shift_beyond_padding(tmp_path):
     """Match a large-pad read when an integer shift wraps bright edge pixels.
 
@@ -79,14 +80,13 @@ def test_whole_pixel_shift_beyond_padding(tmp_path):
     )
     package = open_yip(fixture.path)
     x = 4.0 - 7 * fixture.pixscale
-    with jax.enable_x64():
-        with patch("yippy._offjax.blend_pad", return_value=2):
-            actual = package.prepare().source_psfs(None, x, 0.0)
-        with patch("yippy._offjax.blend_pad", return_value=48):
-            expected = package.prepare().source_psfs(None, x, 0.0)
-        assert bool(actual.valid[0]) and bool(expected.valid[0])
-        peak = float(expected.image.data.max())
-        assert peak > 0
-        np.testing.assert_allclose(
-            actual.image.data, expected.image.data, rtol=0, atol=1e-12 * peak
-        )
+    with patch("yippy._offjax.blend_pad", return_value=2):
+        actual = package.prepare().source_psfs(None, x, 0.0)
+    with patch("yippy._offjax.blend_pad", return_value=48):
+        expected = package.prepare().source_psfs(None, x, 0.0)
+    assert bool(actual.valid[0]) and bool(expected.valid[0])
+    peak = float(expected.image.data.max())
+    assert peak > 0
+    np.testing.assert_allclose(
+        actual.image.data, expected.image.data, rtol=0, atol=1e-12 * peak
+    )

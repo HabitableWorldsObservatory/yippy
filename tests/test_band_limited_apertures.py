@@ -138,6 +138,9 @@ def test_circle_fractional_boundary_has_analytic_area():
     assert area == pytest.approx(np.pi * 0.7**2, rel=1e-6)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 @pytest.mark.parametrize("radius_lod", [0.7 * 575 / 553.4715922101486, 0.7, 1.3])
 @pytest.mark.parametrize("centre", [(0.0, 0.0), (0.5, 0.5), (0.3, -0.1)])
 def test_circle_weights_tile_the_disk_to_float64_rounding(radius_lod, centre):
@@ -150,12 +153,11 @@ def test_circle_weights_tile_the_disk_to_float64_rounding(radius_lod, centre):
     step = 0.05
     radius_pix = radius_lod / step
     n = 2 * int(radius_pix) + 8
-    with jax.enable_x64(True):
-        rows, cols = np.indices((n, n), dtype=np.float64) - (n - 1) / 2
-        weights = _circle_square_weights(
-            jnp.asarray(rows - centre[1]), jnp.asarray(cols - centre[0]), radius_pix
-        )
-        area = float(jnp.sum(weights)) * step**2
+    rows, cols = np.indices((n, n), dtype=np.float64) - (n - 1) / 2
+    weights = _circle_square_weights(
+        jnp.asarray(rows - centre[1]), jnp.asarray(cols - centre[0]), radius_pix
+    )
+    area = float(jnp.sum(weights)) * step**2
     assert area == pytest.approx(np.pi * radius_lod**2, rel=64 * np.finfo(float).eps)
 
 
@@ -181,6 +183,7 @@ def test_circle_matches_independently_sampled_airy(pixel_lod, shift_pix, radius_
 
 @pytest.mark.parametrize("pixel_lod", [0.25, 0.5])
 @pytest.mark.parametrize("shift_pix", [0.0, 0.3])
+@pytest.mark.float64_only(reason="Float64 independently sampled Airy reference")
 def test_truncation_matches_independently_sampled_airy(pixel_lod, shift_pix):
     """Threshold membership and flux agree with directly sampled Airy values."""
     rows, cols = np.mgrid[-100:100, -100:100] + 0.5
@@ -195,17 +198,17 @@ def test_truncation_matches_independently_sampled_airy(pixel_lod, shift_pix):
     weights = reference_level_weights(intensity - np.pi / 8, grad_y * h, grad_x * h)
     expected_area = weights.sum() * h**2
     expected_flux = (intensity * weights).sum() * h**2
-    with jax.enable_x64():
-        flux, area = truncation_core(
-            airy_psf(pixel_lod, shift_pix),
-            0.5,
-            pixel_lod,
-            half_width_pix=core_window_half_width_pix(pixel_lod),
-        )
+    flux, area = truncation_core(
+        airy_psf(pixel_lod, shift_pix),
+        0.5,
+        pixel_lod,
+        half_width_pix=core_window_half_width_pix(pixel_lod),
+    )
     assert float(area) == pytest.approx(expected_area, rel=1e-6)
     assert float(flux) == pytest.approx(expected_flux, rel=2e-6)
 
 
+@pytest.mark.float64_only(reason="Float64 shipped subpixel quadrature benchmark")
 @pytest.mark.parametrize(
     "aperture",
     [
@@ -222,27 +225,26 @@ def test_shipped_ten_against_forty_subpixels(shipped_coro, aperture, metric):
     for pos in _iter_xaxis_positions(_YIPData(coro.package)):
         values = []
         for factor in (10, 40):
-            with jax.enable_x64():
-                psf = jnp.asarray(pos.image.integrated().data, dtype=jnp.float64)
-                if aperture == "circle":
-                    result = circular_aperture(
-                        psf,
-                        0.7 / pixel_lod,
-                        pixel_lod,
-                        oversample=factor,
-                        half_width_pix=int(np.ceil(1.7 / pixel_lod)) + 1,
-                        nominal_center=(pos.py, pos.px),
-                    )
-                else:
-                    result = truncation_core(
-                        psf,
-                        0.3,
-                        pixel_lod,
-                        oversample=factor,
-                        half_width_pix=core_window_half_width_pix(pixel_lod),
-                        nominal_center=(pos.py, pos.px),
-                    )
-                values.append(float(result[0 if metric == "throughput" else 1]))
+            psf = jnp.asarray(pos.image.integrated().data, dtype=jnp.float64)
+            if aperture == "circle":
+                result = circular_aperture(
+                    psf,
+                    0.7 / pixel_lod,
+                    pixel_lod,
+                    oversample=factor,
+                    half_width_pix=int(np.ceil(1.7 / pixel_lod)) + 1,
+                    nominal_center=(pos.py, pos.px),
+                )
+            else:
+                result = truncation_core(
+                    psf,
+                    0.3,
+                    pixel_lod,
+                    oversample=factor,
+                    half_width_pix=core_window_half_width_pix(pixel_lod),
+                    nominal_center=(pos.py, pos.px),
+                )
+            values.append(float(result[0 if metric == "throughput" else 1]))
         assert values[0] == pytest.approx(values[1], rel=1e-3), (
             f"offset={pos.separation}, {aperture} {metric}: "
             f"10x={values[0]}, 40x={values[1]}"
@@ -273,10 +275,9 @@ def test_shipped_contrast_is_repeatable_for_faint_stellar_sums(shipped_coro):
 
 def test_circular_aperture_composes_under_jit():
     """The numerical kernel supports enclosing JIT with the active JAX precision."""
-    with jax.enable_x64(False):
-        flux, area, star_flux = jax.jit(
-            lambda psf: circular_aperture(psf, 2.0, 0.25, half_width_pix=3)
-        )(jnp.zeros((8, 8)))
+    flux, area, star_flux = jax.jit(
+        lambda psf: circular_aperture(psf, 2.0, 0.25, half_width_pix=3)
+    )(jnp.zeros((8, 8)))
     assert float(flux) == 0
     assert float(star_flux) == 0
     # The first subpixel is half a subpixel inside each image edge.
@@ -352,14 +353,16 @@ def reference_level_weights(level, gy, gx):
     return weights
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 def test_dft_gradients_match_periodic_modes():
     """The level-set normal is the spectral derivative, including both axes."""
     y, x = np.indices((24, 24))
     psf = 2 + np.sin(2 * np.pi * y / 24) + 0.3 * np.cos(4 * np.pi * x / 24)
-    with jax.enable_x64():
-        fine, sy, sx, gy, gx = core_subpixel_window(
-            psf, half_width_pix=3, return_gradient=True
-        )
+    fine, sy, sx, gy, gx = core_subpixel_window(
+        psf, half_width_pix=3, return_gradient=True
+    )
     yy = float(sy) + (np.arange(fine.shape[0]) + 0.5) / 10 - 0.5
     xx = float(sx) + (np.arange(fine.shape[1]) + 0.5) / 10 - 0.5
     np.testing.assert_allclose(
@@ -386,16 +389,15 @@ def test_truncation_peak_only_safeguard(value, ratio):
     assert float(flux) == pytest.approx(25 * value)
 
 
-def test_shipped_truncation_stays_near_nominal_source(shipped_coro):
+def test_shipped_truncation_stays_near_nominal_source(shipped_coro, precision):
     """The on-axis core excludes unrelated bright leakage outside its window."""
     pos = next(_iter_xaxis_positions(_YIPData(shipped_coro.package)))
-    with jax.enable_x64():
-        flux, _ = truncation_core(
-            jnp.asarray(pos.image.integrated().data, dtype=jnp.float64),
-            0.3,
-            0.25,
-            nominal_center=(pos.py, pos.px),
-        )
+    flux, _ = truncation_core(
+        jnp.asarray(pos.image.integrated().data, dtype=precision),
+        0.3,
+        0.25,
+        nominal_center=(pos.py, pos.px),
+    )
     assert float(flux) < 1e-8
 
 
@@ -422,11 +424,13 @@ def test_fractional_edge_search_excludes_competing_lobe(column):
     y, x = np.indices((32, 32))
     psf = 0.001 * np.exp(-((y - 16) ** 2 + (x - 31.4) ** 2) / 4)
     psf += np.exp(-((y - 16) ** 2 + (x - 19) ** 2) / 4)
-    with jax.enable_x64():
-        flux, _, _ = circular_aperture(psf, 2.8, 0.25, nominal_center=(16.0, column))
+    flux, _, _ = circular_aperture(psf, 2.8, 0.25, nominal_center=(16.0, column))
     assert float(flux) < 0.02
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 @pytest.mark.parametrize("nominal", [None, (16.0, 40.0)])
 def test_global_truncation_is_independent_of_window(nominal):
     """Retained off-image cores integrate every tile with fractional weights."""
@@ -434,20 +438,15 @@ def test_global_truncation_is_independent_of_window(nominal):
     psf = (
         2 + np.cos(2 * np.pi * (y - 16) / 32) + 0.7 * np.cos(2 * np.pi * (x - 16) / 32)
     )
-    with jax.enable_x64():
-        values = [
-            np.array(
-                truncation_core(
-                    psf, 0.65, 0.25, half_width_pix=h, nominal_center=nominal
-                )
-            )
-            for h in (3, 8, 16)
-        ]
-        reference = np.array(
-            truncation_core(
-                psf, 0.65, 0.25, half_width_pix=16, nominal_center=(16.0, 16.0)
-            )
+    values = [
+        np.array(
+            truncation_core(psf, 0.65, 0.25, half_width_pix=h, nominal_center=nominal)
         )
+        for h in (3, 8, 16)
+    ]
+    reference = np.array(
+        truncation_core(psf, 0.65, 0.25, half_width_pix=16, nominal_center=(16.0, 16.0))
+    )
     np.testing.assert_allclose(values, np.broadcast_to(reference, (3, 2)), rtol=1e-10)
 
 
@@ -455,22 +454,23 @@ def test_global_truncation_is_independent_of_window(nominal):
 def test_fixed_center_airy_photometry(pixel_lod):
     """A known centroid measures Airy energy without seeking another peak."""
     psf = airy_psf(pixel_lod, shift_pix=0.3)
-    with jax.enable_x64():
-        flux, area, _ = circular_aperture(
-            psf, 0.7 / pixel_lod, pixel_lod, fixed_center=(128.0, 128.3)
-        )
+    flux, area, _ = circular_aperture(
+        psf, 0.7 / pixel_lod, pixel_lod, fixed_center=(128.0, 128.3)
+    )
     assert float(flux) == pytest.approx(encircled_energy(0.7), rel=1e-3)
     assert float(area) == pytest.approx(np.pi * 0.7**2, rel=1e-6)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for geometry and photometry"
+)
 def test_fixed_center_ignores_a_brighter_remote_source():
     """Known-centroid photometry also works on arbitrary, non-PSF images."""
     y, x = np.indices((32, 32))
     image = 2 + np.exp(-((y - 24) ** 2 + (x - 24) ** 2) / 4) * 1e3
-    with jax.enable_x64():
-        flux, area, _ = circular_aperture(
-            image, 2.0, 1.0, half_width_pix=3, fixed_center=(8.2, 7.8)
-        )
+    flux, area, _ = circular_aperture(
+        image, 2.0, 1.0, half_width_pix=3, fixed_center=(8.2, 7.8)
+    )
     assert float(flux) == pytest.approx(2 * np.pi * 4, rel=1e-5)
     assert float(area) == pytest.approx(np.pi * 4, rel=1e-10)
 
@@ -480,14 +480,13 @@ def test_fixed_center_ignores_a_brighter_remote_source():
 @pytest.mark.parametrize("dtype", [float, int])
 def test_global_peak_only_safeguard_covers_the_image(value, ratio, nominal, dtype):
     """Degenerate global cores retain tied maxima across all integration tiles."""
-    with jax.enable_x64():
-        for half in (3, 8):
-            flux, area = truncation_core(
-                np.full((32, 32), value, dtype=dtype),
-                ratio,
-                0.25,
-                half_width_pix=half,
-                nominal_center=nominal,
-            )
-            assert float(area) == pytest.approx(32**2 * 0.25**2)
-            assert float(flux) == pytest.approx(32**2 * value)
+    for half in (3, 8):
+        flux, area = truncation_core(
+            np.full((32, 32), value, dtype=dtype),
+            ratio,
+            0.25,
+            half_width_pix=half,
+            nominal_center=nominal,
+        )
+        assert float(area) == pytest.approx(32**2 * 0.25**2)
+        assert float(flux) == pytest.approx(32**2 * value)

@@ -12,7 +12,7 @@ from yippy.sinc.reader import Interpolator, PrefilteredReader
 
 
 def analytic(source, asymmetric=False, shape=(8, 6)):
-    rows, columns = jnp.indices(shape, dtype=jnp.float64)
+    rows, columns = jnp.indices(shape, dtype=float)
     xpix = (columns - (shape[1] - 1) / 2) * 0.25
     ypix = (rows - (shape[0] - 1) / 2) * 0.25
     x = jnp.cos(2 * jnp.pi * 0.16 * (source[0] - xpix))
@@ -40,7 +40,7 @@ def delivery(
 
     # ``half`` and ``spacing`` are scalars or (x, y) pairs.
     half = jnp.broadcast_to(jnp.asarray(half), (2,))
-    spacing = jnp.broadcast_to(jnp.asarray(spacing, dtype=jnp.float64), (2,))
+    spacing = jnp.broadcast_to(jnp.asarray(spacing, dtype=float), (2,))
     count = tuple(int(n) + 1 if quadrant else 2 * int(n) + 1 for n in half)
     origin = jnp.zeros(2) if quadrant else -half * spacing
     lattice = source_grid(
@@ -129,7 +129,7 @@ def tone_truth(shape=(6, 5), symmetric=True, terms=6, seed=0):
     amplitude = jax.random.uniform(keys[1], (terms,), minval=0.2, maxval=1.0)
     phase = jax.random.uniform(keys[2], (terms, 2), maxval=2 * jnp.pi)
     phase = phase * (0.0 if symmetric else 1.0)
-    rows, columns = jnp.indices(shape, dtype=jnp.float64)
+    rows, columns = jnp.indices(shape, dtype=float)
     xpix = (columns - (shape[1] - 1) / 2) * 0.37
     ypix = (rows - (shape[0] - 1) / 2) * 0.41
     floor = float(jnp.sum(amplitude)) + 0.5

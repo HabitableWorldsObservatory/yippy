@@ -473,6 +473,7 @@ def test_downsampled_resolution_does_not_alias(tmp_path):
     _assert_same_metrics(warm, cold)
 
 
+@pytest.mark.float32_only(reason="Starts with the float32 cache entry")
 def test_float64_process_uses_separate_entries(tmp_path):
     """A float64 process neither reads nor overwrites the float32 entry."""
     path = _yip(tmp_path, "yip")
@@ -483,19 +484,17 @@ def test_float64_process_uses_separate_entries(tmp_path):
         "import json, logging, sys\n"
         "logging.disable(logging.CRITICAL)\n"
         "import jax\n"
-        "assert jax.config.jax_enable_x64\n"
         "import numpy as np\n"
         "from yippy._yip import _YIPData\n"
         "from yippy import open_yip\n"
-        "c = _YIPData(open_yip(sys.argv[1]))\n"
-        "seps = np.array([float(a) for a in sys.argv[2:]])\n"
-        "print(json.dumps({'name': c._perf_filename(),"
+        "with jax.enable_x64():\n"
+        "    c = _YIPData(open_yip(sys.argv[1]))\n"
+        "    seps = np.array([float(a) for a in sys.argv[2:]])\n"
+        "    print(json.dumps({'name': c._perf_filename(),"
         " 'thr': [float(v) for v in c.performance.evaluate('throughput', seps)]}))\n"
     )
-    env = dict(os.environ, JAX_ENABLE_X64="1")
     out = subprocess.run(
         [sys.executable, "-c", script, str(path), *map(str, SEPS)],
-        env=env,
         capture_output=True,
         text=True,
         check=True,

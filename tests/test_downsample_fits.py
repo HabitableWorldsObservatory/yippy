@@ -1,20 +1,12 @@
 """FITS byte order must be converted before JAX PSF downsampling."""
 
 import astropy.io.fits as fits
-import jax
 import numpy as np
 import pytest
 from optixstuff.grids import Frame, PixelGrid
 
 from yippy._offax import OffAx
 from yippy.header import HeaderData
-
-
-@pytest.fixture(autouse=True)
-def enable_x64():
-    """Keep the FITS precision test independent of other modules' array dtypes."""
-    with jax.enable_x64():
-        yield
 
 
 def test_downsample_fits_psfs(tmp_path):

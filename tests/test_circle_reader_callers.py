@@ -3,7 +3,6 @@
 from itertools import pairwise
 
 import equinox as eqx
-import jax
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -108,47 +107,48 @@ def reader_coro(request, tmp_path_factory):
             else (1 + np.arange(hdul[0].data.shape[0]))[:, None, None]
         )
         hdul[0].data[:] = image * levels
-    with jax.enable_x64():
-        coro = open_yip(package.path).prepare(leakage_rule=leakage_rule)
+    coro = open_yip(package.path).prepare(leakage_rule=leakage_rule)
     return coro
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 @pytest.mark.parametrize("diameter", [0.0, 0.03])
 def test_public_intensity_selects_reader(reader_coro, diameter):
     """Point and extended sources use the requested reader in both public views."""
     coro = reader_coro
     separation = np.array([1.0, 2.0, 3.0])
-    with jax.enable_x64():
-        keys_before = (
-            stellar_intensity_curves(
-                coro, getattr(diameter, "value", diameter), interpolation="keys"
-            )
-            .evaluate(separation)
-            .copy()
-        )
-        expected = quintic_ring_reference(
-            coro.stellar_map(None, diameter, grid=None).integrated().data,
-            (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
-            separation / coro.stellar_grid.step,
-        )
-        actual = stellar_intensity_curves(
-            coro, getattr(diameter, "value", diameter), interpolation="quintic"
-        ).evaluate(separation)
-        view = coro
-        traced = np.asarray(
-            eqx.filter_jit(
-                (
-                    lambda separation, diameter=0.0, interpolation="keys": (
-                        stellar_intensity_curves(
-                            view, diameter, interpolation=interpolation
-                        ).evaluate(separation)
-                    )
-                )
-            )(separation, diameter, interpolation="quintic")
-        )
-        keys_after = stellar_intensity_curves(
+    keys_before = (
+        stellar_intensity_curves(
             coro, getattr(diameter, "value", diameter), interpolation="keys"
-        ).evaluate(separation)
+        )
+        .evaluate(separation)
+        .copy()
+    )
+    expected = quintic_ring_reference(
+        coro.stellar_map(None, diameter, grid=None).integrated().data,
+        (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
+        separation / coro.stellar_grid.step,
+    )
+    actual = stellar_intensity_curves(
+        coro, getattr(diameter, "value", diameter), interpolation="quintic"
+    ).evaluate(separation)
+    view = coro
+    traced = np.asarray(
+        eqx.filter_jit(
+            (
+                lambda separation, diameter=0.0, interpolation="keys": (
+                    stellar_intensity_curves(
+                        view, diameter, interpolation=interpolation
+                    ).evaluate(separation)
+                )
+            )
+        )(separation, diameter, interpolation="quintic")
+    )
+    keys_after = stellar_intensity_curves(
+        coro, getattr(diameter, "value", diameter), interpolation="keys"
+    ).evaluate(separation)
     np.testing.assert_allclose(actual, expected, rtol=1e-12)
     np.testing.assert_allclose(traced, expected, rtol=1e-12)
     np.testing.assert_array_equal(
@@ -157,76 +157,80 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
     assert np.max(np.abs(keys_before / expected - 1)) > 1e-3
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_curve_and_noise_callers_forward_reader(reader_coro):
     """Every diameter record matches independent scipy rings and PCHIP at 1e-12."""
     coro = reader_coro
     grid = coro.stellar_grid
     diameters = np.r_[0.0, np.asarray(coro._stellar_ln_interp.x)[1:]]
-    with jax.enable_x64():
-        for diameter in diameters:
-            record = stellar_intensity_curves(coro, diameter, interpolation="quintic")
-            nodes = np.asarray(record.separation_lod)
-            expected = quintic_ring_reference(
-                coro.stellar_map(None, diameter).integrated().data,
-                (grid.center_y, grid.center_x),
-                nodes / grid.step,
-            )
-            queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
-            actual = record.evaluate(queries)
-            np.testing.assert_allclose(
-                actual, PchipInterpolator(nodes, expected)(queries), rtol=1e-12
-            )
+    for diameter in diameters:
+        record = stellar_intensity_curves(coro, diameter, interpolation="quintic")
+        nodes = np.asarray(record.separation_lod)
+        expected = quintic_ring_reference(
+            coro.stellar_map(None, diameter).integrated().data,
+            (grid.center_y, grid.center_x),
+            nodes / grid.step,
+        )
+        queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
+        actual = record.evaluate(queries)
+        np.testing.assert_allclose(
+            actual, PchipInterpolator(nodes, expected)(queries), rtol=1e-12
+        )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
     """Opt-in table construction keeps later Keys requests and JAX views distinct."""
     coro = reader_coro
     separation = np.array([1.0, 2.0, 3.0])
-    with jax.enable_x64():
-        diameter = float(coro._stellar_ln_interp.x[-1])
-        before = (
-            stellar_intensity_curves(
-                coro, getattr(diameter, "value", diameter), interpolation="keys"
-            )
-            .evaluate(separation)
-            .copy()
+    diameter = float(coro._stellar_ln_interp.x[-1])
+    before = (
+        stellar_intensity_curves(
+            coro, getattr(diameter, "value", diameter), interpolation="keys"
         )
-        # Opt-in spatial profiles and aperture records have separate meanings.
-        stellar_intensity_curves(coro, diameter, interpolation="quintic")
-        performance_curves(
-            lambda s: coro.off_axis_psf(None, s, grid=None),
-            coro.stellar_map(None, diameter, grid=None),
-            Circular(0.7),
-            separations_lod=separation,
-        )
-        view = coro
-        actual = np.asarray(
-            eqx.filter_jit(
-                (
-                    lambda separation, diameter=0.0, interpolation="keys": (
-                        stellar_intensity_curves(
-                            view, diameter, interpolation=interpolation
-                        ).evaluate(separation)
-                    )
+        .evaluate(separation)
+        .copy()
+    )
+    # Opt-in spatial profiles and aperture records have separate meanings.
+    stellar_intensity_curves(coro, diameter, interpolation="quintic")
+    performance_curves(
+        lambda s: coro.off_axis_psf(None, s, grid=None),
+        coro.stellar_map(None, diameter, grid=None),
+        Circular(0.7),
+        separations_lod=separation,
+    )
+    view = coro
+    actual = np.asarray(
+        eqx.filter_jit(
+            (
+                lambda separation, diameter=0.0, interpolation="keys": (
+                    stellar_intensity_curves(
+                        view, diameter, interpolation=interpolation
+                    ).evaluate(separation)
                 )
-            )(separation, diameter)
-        )
-        np.testing.assert_allclose(actual, before, rtol=1e-12)
-        np.testing.assert_allclose(
-            stellar_intensity_curves(
-                coro, getattr(diameter, "value", diameter), interpolation="keys"
-            ).evaluate(separation),
-            before,
-            rtol=1e-12,
-        )
-        np.testing.assert_allclose(
-            stellar_intensity_curves(coro, 0.0, interpolation="quintic").evaluate(
-                separation
-            ),
-            quintic_ring_reference(
-                coro.stellar_map(None, 0.0).integrated().data,
-                (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
-                separation / coro.stellar_grid.step,
-            ),
-            rtol=1e-12,
-        )
+            )
+        )(separation, diameter)
+    )
+    np.testing.assert_allclose(actual, before, rtol=1e-12)
+    np.testing.assert_allclose(
+        stellar_intensity_curves(
+            coro, getattr(diameter, "value", diameter), interpolation="keys"
+        ).evaluate(separation),
+        before,
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        stellar_intensity_curves(coro, 0.0, interpolation="quintic").evaluate(
+            separation
+        ),
+        quintic_ring_reference(
+            coro.stellar_map(None, 0.0).integrated().data,
+            (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
+            separation / coro.stellar_grid.step,
+        ),
+        rtol=1e-12,
+    )

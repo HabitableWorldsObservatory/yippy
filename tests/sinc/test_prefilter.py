@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.testing import ulps
 from optixstuff.grids import Frame
 
 import yippy.sinc as sc
@@ -68,6 +69,7 @@ def quadrant(tone_quadrant):
     return tone_quadrant
 
 
+@pytest.mark.float64_only(reason="Float64 prefilter reference and quadrature values")
 @pytest.mark.medium(reason="one filter design per tap count, up to 7 s")
 @pytest.mark.parametrize(
     "taps,half_width,tone,beta,filter_l1",
@@ -109,6 +111,7 @@ def test_design_figures_at_reference_band(taps, half_width, tone, beta, filter_l
     )
 
 
+@pytest.mark.float64_only(reason="Float64 prefilter reference and quadrature values")
 @pytest.mark.medium(reason="dense tone scan of an assembled design, 5 s")
 @pytest.mark.parametrize(
     "taps,half_width,band,size,reflected",
@@ -168,7 +171,7 @@ def test_assembled_filters_meet_recorded_tone_error(
 
 @pytest.mark.parametrize("taps", [5, 6, 7, 8, 9, 10])
 @pytest.mark.parametrize("reflected", [False, True])
-def test_covered_interval_endpoints(taps, reflected):
+def test_covered_interval_endpoints(taps, reflected, precision):
     """Fails on a halo or stencil off-by-one: the covered phases are exact.
 
     Phases are dyadic so every endpoint is representable. Covered reads need
@@ -189,8 +192,8 @@ def test_covered_interval_endpoints(taps, reflected):
     above = size - below - 1.0
     low = -above * spacing if reflected else below * spacing
     high = above * spacing
-    inside = [low, math.nextafter(high, -math.inf), 0.5 * (low + high)]
-    outside = [math.nextafter(low, -math.inf), high, math.inf, math.nan]
+    inside = [low, np.nextafter(high, -np.inf, dtype=precision), 0.5 * (low + high)]
+    outside = [np.nextafter(low, -np.inf, dtype=precision), high, math.inf, math.nan]
     middle = 0.5 * (low + high)
     for value, expected in [(v, True) for v in inside] + [(v, False) for v in outside]:
         for query in ([value, middle], [middle, value]):
@@ -198,6 +201,7 @@ def test_covered_interval_endpoints(taps, reflected):
             assert bool(covered) is expected, (value, query)
 
 
+@pytest.mark.float64_only(reason="Float64 stencil switch-point neighbors")
 @pytest.mark.parametrize("taps", [7, 8])
 def test_stencil_modes_agree_at_switch_points(full, taps):
     """Fails if eager, jit and vmap pick different taps where a stencil switches.
@@ -251,6 +255,7 @@ QUERIES = [
 ]
 
 
+@pytest.mark.float64_only(reason="Float64 prefilter reference and quadrature values")
 @pytest.mark.medium(reason="host quadrature oracle per query, 6 s")
 @pytest.mark.parametrize("fixture", ["full", "quadrant"])
 def test_reads_match_independent_oracle(fixture, request):
@@ -406,6 +411,9 @@ def test_minimum_table_size(half, quadrant_table, admitted):
         assert admission.reason_bits == Reason.INCOMPLETE_STENCIL
 
 
+@pytest.mark.float64_only(
+    reason="Compares a float64 reader with and without float64 available"
+)
 def test_margin_memory_policy_and_precision(full):
     """Fails if the 0.64 margin, byte budgets, bounded policy or x64 guard slip."""
     truth, _ = tone_truth((4, 4))
@@ -494,6 +502,7 @@ def test_batch_checks_and_node_reads(full):
     )
 
 
+@pytest.mark.float64_only(reason="Float64 reference accumulation from float32 storage")
 def test_float32_storage_stays_near_float64(full):
     """Fails if float32 coefficients are filtered in float32 or lose their scale.
 
@@ -552,10 +561,8 @@ def test_chunked_build_matches_single_chunk(fixture, request, monkeypatch):
     monkeypatch.setattr(prefilter, "BUILD_CHUNK_BYTES", 1)
     assert prefilter.build_chunk_rows(nodes, (6, 5)) == 1
     chunked = build_coefficients(samples, designs)
-    scale = float(jnp.max(jnp.abs(reader.coefficients)))
-    np.testing.assert_allclose(
-        chunked, reader.coefficients, rtol=0, atol=16 * np.finfo(float).eps * scale
-    )
+    allowance = float(ulps(16, jnp.max(jnp.abs(reader.coefficients))))
+    np.testing.assert_allclose(chunked, reader.coefficients, rtol=0, atol=allowance)
 
 
 def test_coefficient_grid_is_not_read_as_samples(full):

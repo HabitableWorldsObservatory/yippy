@@ -88,93 +88,91 @@ class TestPerformanceRecord:
         np.testing.assert_allclose(actual, expected, rtol=2e-6)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_synthetic_performance_agrees_in_float64(synthetic_1d):
     """Fails on host/JAX drift, including tails and diameter-dependent profiles.
 
     The 1e-12 bound allows float64 polynomial and ring-reader roundoff;
     1e-24 absolute tolerance remains far below the synthetic stellar flux.
     """
-    with jax.enable_x64():
-        coro = open_yip(synthetic_1d.path).prepare()
-        eqx_coro = coro
-        grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
-        for field, method in [
-            ("throughput", lambda x: coro.curves().evaluate("throughput", x)),
-            ("raw_contrast", lambda x: coro.curves().evaluate("raw_contrast", x, 0.0)),
-            ("core_area_lod2", lambda x: coro.curves().evaluate("core_area_lod2", x)),
-        ]:
-            expected = PchipInterpolator(
-                coro.curves().separation_lod,
-                np.log10(getattr(coro.curves(), field)[0])
-                if field == "raw_contrast"
-                else getattr(coro.curves(), field),
-            )
-            queries = jnp.array([0.13, 1.37, 3.29])
-            reference = expected(queries)
-            if field == "raw_contrast":
-                reference = 10**reference
-            np.testing.assert_allclose(
-                eqx.filter_jit(method)(queries), reference, rtol=1e-12, atol=1e-24
-            )
-        derivative = jax.grad(lambda x: eqx_coro.curves().evaluate("throughput", x))(
-            1.37
+    coro = open_yip(synthetic_1d.path).prepare()
+    eqx_coro = coro
+    grid = np.array([-2.0, -0.1, 0.0, 0.13, 1.37, 3.29, 6.0, 10.0, 15.0])
+    for field, method in [
+        ("throughput", lambda x: coro.curves().evaluate("throughput", x)),
+        ("raw_contrast", lambda x: coro.curves().evaluate("raw_contrast", x, 0.0)),
+        ("core_area_lod2", lambda x: coro.curves().evaluate("core_area_lod2", x)),
+    ]:
+        expected = PchipInterpolator(
+            coro.curves().separation_lod,
+            np.log10(getattr(coro.curves(), field)[0])
+            if field == "raw_contrast"
+            else getattr(coro.curves(), field),
         )
-        expected_derivative = PchipInterpolator(
-            coro.curves().separation_lod, coro.curves().throughput
-        )(1.37, nu=1)
-        np.testing.assert_allclose(derivative, expected_derivative, rtol=1e-12)
+        queries = jnp.array([0.13, 1.37, 3.29])
+        reference = expected(queries)
+        if field == "raw_contrast":
+            reference = 10**reference
         np.testing.assert_allclose(
-            eqx.filter_jit(lambda model, x: model.curves().evaluate("throughput", x))(
-                eqx_coro, grid
-            ),
-            coro.curves().evaluate("throughput", grid),
-            rtol=1e-12,
-            atol=1e-24,
+            eqx.filter_jit(method)(queries), reference, rtol=1e-12, atol=1e-24
         )
-        for removed in (
-            "IWA",
-            "OWA",
-            "_throughput_interp",
-            "_log_contrast_interp",
-            "_core_area_interp",
-        ):
-            assert not hasattr(eqx_coro, removed)
-        with pytest.raises(TypeError):
-            coro.package.prepare(interp_order=1)
+    derivative = jax.grad(lambda x: eqx_coro.curves().evaluate("throughput", x))(1.37)
+    expected_derivative = PchipInterpolator(
+        coro.curves().separation_lod, coro.curves().throughput
+    )(1.37, nu=1)
+    np.testing.assert_allclose(derivative, expected_derivative, rtol=1e-12)
+    np.testing.assert_allclose(
+        eqx.filter_jit(lambda model, x: model.curves().evaluate("throughput", x))(
+            eqx_coro, grid
+        ),
+        coro.curves().evaluate("throughput", grid),
+        rtol=1e-12,
+        atol=1e-24,
+    )
+    for removed in (
+        "IWA",
+        "OWA",
+        "_throughput_interp",
+        "_log_contrast_interp",
+        "_core_area_interp",
+    ):
+        assert not hasattr(eqx_coro, removed)
+    with pytest.raises(TypeError):
+        coro.package.prepare(interp_order=1)
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 def test_pchip_conversion_uses_original_nodes():
     """Fails on a cubic refit or halved endpoint gradients; float64 roundoff bound."""
-    with jax.enable_x64():
-        nodes = np.array([0.0, 0.1, 0.3, 0.7, 1.5, 4.0, 8.0])
-        values = np.array([0.0, 0.01, 0.03, 0.5, 0.9, 0.95, 1.0])
-        host = _record(nodes, values)
-        converted = jax.tree_util.tree_map(
-            lambda value: (
-                jnp.asarray(value) if isinstance(value, np.ndarray) else value
-            ),
-            host,
-        )
-        scipy_interp = PchipInterpolator(nodes, values)
-        grid = np.linspace(nodes[0], nodes[-1], 101)
-        np.testing.assert_allclose(
-            converted.evaluate("throughput", jnp.asarray(grid)),
-            scipy_interp(grid),
-            rtol=1e-12,
-            atol=1e-16,
-        )
-        np.testing.assert_allclose(
-            eqx.filter_jit(lambda record, x: record.evaluate("throughput", x))(
-                converted, jnp.asarray(grid)
-            ),
-            scipy_interp(grid),
-            rtol=1e-12,
-            atol=1e-16,
-        )
-        endpoints = nodes[[0, -1]]
-        derivatives = jax.vmap(jax.grad(lambda x: converted.evaluate("throughput", x)))(
-            endpoints
-        )
-        np.testing.assert_allclose(
-            derivatives, scipy_interp(endpoints, nu=1), rtol=1e-12
-        )
+    nodes = np.array([0.0, 0.1, 0.3, 0.7, 1.5, 4.0, 8.0])
+    values = np.array([0.0, 0.01, 0.03, 0.5, 0.9, 0.95, 1.0])
+    host = _record(nodes, values)
+    converted = jax.tree_util.tree_map(
+        lambda value: jnp.asarray(value) if isinstance(value, np.ndarray) else value,
+        host,
+    )
+    scipy_interp = PchipInterpolator(nodes, values)
+    grid = np.linspace(nodes[0], nodes[-1], 101)
+    np.testing.assert_allclose(
+        converted.evaluate("throughput", jnp.asarray(grid)),
+        scipy_interp(grid),
+        rtol=1e-12,
+        atol=1e-16,
+    )
+    np.testing.assert_allclose(
+        eqx.filter_jit(lambda record, x: record.evaluate("throughput", x))(
+            converted, jnp.asarray(grid)
+        ),
+        scipy_interp(grid),
+        rtol=1e-12,
+        atol=1e-16,
+    )
+    endpoints = nodes[[0, -1]]
+    derivatives = jax.vmap(jax.grad(lambda x: converted.evaluate("throughput", x)))(
+        endpoints
+    )
+    np.testing.assert_allclose(derivatives, scipy_interp(endpoints, nu=1), rtol=1e-12)

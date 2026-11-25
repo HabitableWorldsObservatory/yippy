@@ -168,61 +168,63 @@ def test_curve_follows_the_map_between_tabulated_diameters(ring_coro, diameter_l
     )
 
 
+@pytest.mark.float64_only(
+    reason="Float64 reference roundoff for independent interpolation"
+)
 @pytest.mark.parametrize("leakage_rule", ["aperture_mean", "azimuthal_ring_mean"])
 def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
     """A nonconstant radial profile agrees in float64, including linear tails."""
     from optixstuff.performance import azimuthal_mean_profile, profile_radii
     from scipy.interpolate import PchipInterpolator
 
-    with jax.enable_x64():
-        coro = ring_coro.package.prepare(leakage_rule=leakage_rule)
-        grid = coro.stellar_grid
-        radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
-        nodes = radii * grid.step
-        separations = np.array(
-            [
-                nodes[0] - 0.3,
-                nodes[0],
-                1.39,
-                2.03,
-                3.37,
-                nodes[-1],
-                nodes[-1] + 0.3,
-                nodes[-1] + 2.0,
-            ]
-        ).reshape(2, 4)
-        for diameter in (0.0, 0.075):
-            image = coro.stellar_map(None, diameter, grid=None).integrated().data
-            values = np.asarray(
-                azimuthal_mean_profile(image, (grid.center_y, grid.center_x), radii)
-            )
-            expected = PchipInterpolator(nodes, values)(separations)
-            expected = np.where(
-                separations < nodes[0],
-                values[0]
-                + (separations - nodes[0])
-                * (values[1] - values[0])
-                / (nodes[1] - nodes[0]),
-                expected,
-            )
-            expected = np.where(
-                separations > nodes[-1],
-                values[-1]
-                + (separations - nodes[-1])
-                * (values[-1] - values[-2])
-                / (nodes[-1] - nodes[-2]),
-                expected,
-            )
+    coro = ring_coro.package.prepare(leakage_rule=leakage_rule)
+    grid = coro.stellar_grid
+    radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
+    nodes = radii * grid.step
+    separations = np.array(
+        [
+            nodes[0] - 0.3,
+            nodes[0],
+            1.39,
+            2.03,
+            3.37,
+            nodes[-1],
+            nodes[-1] + 0.3,
+            nodes[-1] + 2.0,
+        ]
+    ).reshape(2, 4)
+    for diameter in (0.0, 0.075):
+        image = coro.stellar_map(None, diameter, grid=None).integrated().data
+        values = np.asarray(
+            azimuthal_mean_profile(image, (grid.center_y, grid.center_x), radii)
+        )
+        expected = PchipInterpolator(nodes, values)(separations)
+        expected = np.where(
+            separations < nodes[0],
+            values[0]
+            + (separations - nodes[0])
+            * (values[1] - values[0])
+            / (nodes[1] - nodes[0]),
+            expected,
+        )
+        expected = np.where(
+            separations > nodes[-1],
+            values[-1]
+            + (separations - nodes[-1])
+            * (values[-1] - values[-2])
+            / (nodes[-1] - nodes[-2]),
+            expected,
+        )
 
-            def method(s, d):
-                return stellar_intensity_curves(coro, d).evaluate(s)
+        def method(s, d):
+            return stellar_intensity_curves(coro, d).evaluate(s)
 
-            np.testing.assert_allclose(
-                method(separations, diameter), expected, rtol=1e-12, atol=1e-24
-            )
-            np.testing.assert_allclose(
-                jax.jit(method)(separations, diameter), expected, rtol=1e-12, atol=1e-24
-            )
+        np.testing.assert_allclose(
+            method(separations, diameter), expected, rtol=1e-12, atol=1e-24
+        )
+        np.testing.assert_allclose(
+            jax.jit(method)(separations, diameter), expected, rtol=1e-12, atol=1e-24
+        )
 
 
 def test_diameter_outside_the_tabulated_range_is_nan(ring_coro):
@@ -305,12 +307,11 @@ def test_corner_arcs_of_constant_maps(shape, center, dtype):
         for x in (0, shape[1] - 1)
     )
     radii = np.r_[44.75, 45.0, 45.25, corner - 0.001, corner]
-    with jax.enable_x64():
-        evaluate = jax.jit(
-            lambda r: azimuthal_mean_profile(jnp.ones(shape, dtype=dtype), center, r)
-        )
-        np.testing.assert_allclose(evaluate(radii), 1.0, atol=1e-12)
-        np.testing.assert_allclose(evaluate(np.array([corner + 0.01])), 0.0)
+    evaluate = jax.jit(
+        lambda r: azimuthal_mean_profile(jnp.ones(shape, dtype=dtype), center, r)
+    )
+    np.testing.assert_allclose(evaluate(radii), 1.0, atol=1e-12)
+    np.testing.assert_allclose(evaluate(np.array([corner + 0.01])), 0.0)
 
 
 # A modulated map I(r, phi) = I0(r) (1 + m cos 2 phi) has closed forms for every

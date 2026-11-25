@@ -4,7 +4,6 @@ import json
 from dataclasses import replace
 
 import equinox as eqx
-import jax
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -34,8 +33,7 @@ def unequal_product_grids(tmp_path_factory):
         hdus[0].header["PIXSCALE"] = 0.5
         for key in ("LAMBDA", "MINLAM", "MAXLAM"):
             hdus[0].header[key] = (500.0, "nm")
-    with jax.enable_x64():
-        yield open_yip(directory).prepare(interpolation="sinc")
+    yield open_yip(directory).prepare(interpolation="sinc")
 
 
 @pytest.mark.parametrize("units", ["LAMBDA/D", "arcsec"])

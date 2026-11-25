@@ -222,6 +222,7 @@ def test_negative_excursions_preserved(full_reader):
     assert bool(jnp.all(image.intensity < -0.1))
 
 
+@pytest.mark.float64_only(reason="Float64 reference accumulation from float32 storage")
 @pytest.mark.parametrize("profile", ["raw", "prefiltered"])
 def test_stencil_weights_reproduce_the_read(profile, full_reader, tone_full):
     """Fails if the stencil is a copy that drifts from the one a read contracts."""

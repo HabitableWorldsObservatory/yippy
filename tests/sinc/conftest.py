@@ -1,4 +1,4 @@
-"""Fixtures for the sinc tests, which run under binary64."""
+"""Fixtures for the sinc tests."""
 
 import gc
 
@@ -9,10 +9,9 @@ from .helpers import delivery, make_prefiltered, make_reader, tone_delivery
 
 
 @pytest.fixture(scope="module", autouse=True)
-def x64_and_cache_clear():
-    """Run each sinc test module under binary64, leaving the global setting alone."""
-    with jax.enable_x64(True):
-        yield
+def clear_jax_caches():
+    """Release compiled programs after each sinc test module."""
+    yield
     jax.clear_caches()
     gc.collect()
 
@@ -39,15 +38,13 @@ def quadrant_reader(quadrant_delivery):
 
 @pytest.fixture(scope="session")
 def tone_full():
-    with jax.enable_x64(True):
-        data, truth, norm = tone_delivery()
-        reader, receipt = make_prefiltered(data)
+    data, truth, norm = tone_delivery()
+    reader, receipt = make_prefiltered(data)
     return dict(data=data, truth=truth, norm=norm, reader=reader, receipt=receipt)
 
 
 @pytest.fixture(scope="session")
 def tone_quadrant():
-    with jax.enable_x64(True):
-        data, truth, norm = tone_delivery(quadrant=True)
-        reader, receipt = make_prefiltered(data)
+    data, truth, norm = tone_delivery(quadrant=True)
+    reader, receipt = make_prefiltered(data)
     return dict(data=data, truth=truth, norm=norm, reader=reader, receipt=receipt)

@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -24,6 +25,7 @@ def truth(q, origin, h):
 compiled_floor = eqx.filter_jit(exact_quotient_floor_v1)
 
 
+@pytest.mark.float64_only(reason="Float64 floor boundaries and subnormal bit patterns")
 def test_floor_edge_list():
     """Fails if reciprocal rounding changes cell ownership; integer truth is exact."""
     queries = []
@@ -67,6 +69,7 @@ def test_floor_fraction_property(q, origin, h):
     assert float(exact_quotient_floor_v1(*args)) == expected
 
 
+@pytest.mark.float64_only(reason="Finite differences at a 1e-5 step")
 def test_raw_kernel_and_gradient():
     """Fails on DC normalization, endpoint inclusion or inactive sqrt singularities.
 

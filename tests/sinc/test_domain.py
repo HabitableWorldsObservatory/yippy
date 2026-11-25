@@ -1,7 +1,5 @@
 """Signed geometric permission boundaries independent of interpolation coverage."""
 
-import math
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -22,7 +20,7 @@ from yippy.sinc.geometry import source_grid, spacing_xy
         ("annulus", "lower_closed_upper_open"),
     ],
 )
-def test_permission_boundaries(kind, boundary):
+def test_permission_boundaries(kind, boundary, precision):
     """Fails on expanded bounds, unsigned folding or annulus-box substitution."""
     domain = sc.Domain(
         kind,
@@ -35,8 +33,8 @@ def test_permission_boundaries(kind, boundary):
             [
                 [-2.0, -1.0],
                 [1.0, 0.0],
-                [math.nextafter(1.0, -math.inf), 0.0],
-                [math.nextafter(-2.0, -math.inf), 0.0],
+                [np.nextafter(1.0, -np.inf, dtype=precision), 0.0],
+                [np.nextafter(-2.0, -np.inf, dtype=precision), 0.0],
                 [0.0, 2.0],
             ]
         )
@@ -46,7 +44,7 @@ def test_permission_boundaries(kind, boundary):
             [
                 [1.0, 0.0],
                 [-2.0, 0.0],
-                [math.nextafter(2.0, math.inf), 0.0],
+                [np.nextafter(2.0, np.inf, dtype=precision), 0.0],
                 [0.0, 0.0],
                 [1.5, 1.5],
                 [0.0, -1.5],
@@ -61,15 +59,18 @@ def test_permission_boundaries(kind, boundary):
     )
 
 
-def test_subnormal_host_rejection(full_delivery):
+def test_subnormal_host_rejection(full_delivery, precision):
     """Fails if denormal hardware modes decide metadata admission."""
+    subnormal = np.nextafter(0.0, 1.0, dtype=precision)
     with pytest.raises(ValueError):
-        sc.Domain("box", "closed", jnp.array([[5e-324, 0.0], [1.0, 1.0]]), jnp.zeros(2))
+        sc.Domain(
+            "box", "closed", jnp.array([[subnormal, 0.0], [1.0, 1.0]]), jnp.zeros(2)
+        )
     grid = full_delivery["declared_lattice"]
     data = dict(
         full_delivery,
         declared_lattice=source_grid(
-            [5e-324, 0.0], spacing_xy(grid), grid.shape, grid.frame
+            [subnormal, 0.0], spacing_xy(grid), grid.shape, grid.frame
         ),
     )
     assert sc.admit_grid(**data).reason_bits & Reason.GRID_NONUNIFORM

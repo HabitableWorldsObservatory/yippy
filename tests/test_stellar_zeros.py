@@ -31,8 +31,7 @@ def zero_coro(tmp_path_factory):
         np.array([0.0, 0.1]),
         overwrite=True,
     )
-    with jax.enable_x64(False):
-        return open_yip(directory).prepare()
+    return open_yip(directory).prepare()
 
 
 def test_zero_stellar_samples_are_preserved(zero_coro):
@@ -57,6 +56,7 @@ def test_zero_stellar_samples_are_preserved(zero_coro):
     )
 
 
+@pytest.mark.float32_only(reason="Reads a float32 object with a float64 request")
 def test_final_knot_keeps_a_zero_sample_exact(zero_coro):
     """Endpoint rounding must preserve a delivered zero after a positive sample."""
     host = zero_coro._host.stellar_intens
@@ -81,12 +81,11 @@ def three_knot_coro(tmp_path_factory):
         hdus[0].data[:, 0, 3] = [np.finfo(np.float32).tiny, 1e-20, 1e-10]
         hdus[0].data[:, 0, 4] = [1e-2, -0.0, 1e-2]
         hdus[0].data[:, 0, 5] = [0.0, 0.01, 0.02]
-    with jax.enable_x64(False):
-        return open_yip(directory).prepare()
+    return open_yip(directory).prepare()
 
 
 @pytest.mark.parametrize("backend", ["scipy", "jax"])
-def test_pchip_stays_between_bracketing_samples(three_knot_coro, backend):
+def test_pchip_stays_between_bracketing_samples(three_knot_coro, backend, precision):
     """A query just below a zero knot can undershoot in either polynomial."""
     coro = three_knot_coro
     if backend == "scipy":
@@ -96,12 +95,11 @@ def test_pchip_stays_between_bracketing_samples(three_knot_coro, backend):
         values = image.integrated().data
         column = 2
     else:
-        knot = np.float32(0.1)
-        near = np.nextafter(knot, np.float32(0))
-        with jax.enable_x64(False):
-            values = jax.jit(lambda d: coro.stellar_map(None, d).integrated().data)(
-                np.array([near, knot])
-            )
+        knot = precision.type(0.1)
+        near = np.nextafter(knot, precision.type(0))
+        values = jax.jit(lambda d: coro.stellar_map(None, d).integrated().data)(
+            np.array([near, knot])
+        )
         column = 0
     sample = coro.package.stellar_intensity[0, 0, column]
     assert 0 <= values[0, 0, column] <= sample
@@ -109,17 +107,16 @@ def test_pchip_stays_between_bracketing_samples(three_knot_coro, backend):
     assert np.signbit(np.asarray(values)[1, 0, 4])
 
 
-def test_bound_keeps_unit_slope_at_a_monotone_knot(three_knot_coro):
+def test_bound_keeps_unit_slope_at_a_monotone_knot(three_knot_coro, precision):
     """Selecting the bound must not halve the derivative where it is reached."""
     coro = three_knot_coro
 
     def read(d):
         return coro.stellar_map(None, d).integrated().data[0, 5]
 
-    with jax.enable_x64(False):
-        slope = jax.jit(jax.grad(read))
-        at = float(slope(np.float32(0.1)))
-        beside = float(slope(np.float32(0.0999)))
+    slope = jax.jit(jax.grad(read))
+    at = float(slope(precision.type(0.1)))
+    beside = float(slope(precision.type(0.0999)))
     assert at == pytest.approx(beside, rel=1e-2)
 
 
@@ -143,18 +140,17 @@ def test_smallest_normal_stellar_sample_uses_log_spline(three_knot_coro):
     diameters = coro.package.stellar_diameters_lod
     expected = np.exp(CubicSpline(diameters, np.log(samples))(0.05))
     host = coro._host.stellar_intens(0.05 * lod).integrated().data[0, 3]
-    with jax.enable_x64(False):
-        actual = coro.stellar_map(None, 0.05).integrated().data[0, 3]
+    actual = coro.stellar_map(None, 0.05).integrated().data[0, 3]
     np.testing.assert_allclose([host, actual], expected, rtol=1e-5, atol=0)
 
 
+@pytest.mark.float32_only(reason="Exercises float32 overflow in the neighboring pixel")
 def test_reverse_mode_ignores_overflow_in_adjacent_stellar_pixel(three_knot_coro):
     """The clamped masked pixel has zero derivative even beside an infinite one."""
     coro = three_knot_coro
-    with jax.enable_x64(False):
-        assert np.isposinf(coro.stellar_map(None, 1.0).data[0, 1])
-        grad = jax.jit(jax.grad(lambda d: coro.stellar_map(None, d).data[0, 0]))
-        assert grad(np.float32(1.0)) == 0
+    assert np.isposinf(coro.stellar_map(None, 1.0).data[0, 1])
+    grad = jax.jit(jax.grad(lambda d: coro.stellar_map(None, d).data[0, 0]))
+    assert grad(np.float32(1.0)) == 0
 
 
 @pytest.mark.parametrize("backend", ["scipy", "jax"])
@@ -169,9 +165,8 @@ def test_masked_stellar_pixels_are_constant_outside_knots(zero_coro, backend):
         def read(diameter):
             return zero_coro.stellar_map(None, diameter).integrated().data[..., 0, :4]
 
-        with jax.enable_x64(False):
-            pixels = np.asarray(jax.jit(read)(diameters))
-            gradients = np.asarray(jax.vmap(jax.jacfwd(read))(diameters))
+        pixels = np.asarray(jax.jit(read)(diameters))
+        gradients = np.asarray(jax.vmap(jax.jacfwd(read))(diameters))
         assert np.all(np.isfinite(gradients))
         np.testing.assert_array_equal(gradients[[0, 1, 4, 5], :3], 0)
     assert np.all(pixels[:, :3] >= 0)
@@ -181,37 +176,36 @@ def test_masked_stellar_pixels_are_constant_outside_knots(zero_coro, backend):
     assert pixels[5, 3] > pixels[3, 3]
 
 
-def test_final_knot_keeps_a_small_positive_sample_exact(tmp_path):
+def test_final_knot_keeps_a_small_positive_sample_exact(tmp_path, precision):
     """Keep the last sample exact after a bright neighboring knot."""
     write_synthetic_yip(tmp_path, npix=24, max_offset_lod=2.0)
     with fits.open(tmp_path / "stellar_intens.fits", mode="update") as hdus:
         hdus[0].data[:, 0, 0] = [0.0, 1e-2, 1e-12]
 
-    with jax.enable_x64(False):
-        coro = open_yip(tmp_path).prepare()
-        read = jax.jit(lambda d: coro.stellar_map(None, d).integrated().data[0, 0])
-        final = read(np.float32(0.2))
-    assert final.dtype == np.float32
-    assert final == np.float32(1e-12)
+    coro = open_yip(tmp_path).prepare()
+    read = jax.jit(lambda d: coro.stellar_map(None, d).integrated().data[0, 0])
+    final = read(precision.type(0.2))
+    assert final.dtype == precision
+    assert final == precision.type(1e-12)
     assert coro._host.stellar_intens._evaluate_array(0.2 * lod)[0, 0] == 1e-12
 
 
-def test_subnormal_stellar_sample_requires_wider_working_dtype(tmp_path):
+def test_subnormal_stellar_sample_requires_wider_working_dtype(tmp_path, precision):
     """A positive 1e-39 sample is subnormal in float32 and normal in float64."""
     write_synthetic_yip(tmp_path, npix=24, max_offset_lod=2.0)
     with fits.open(tmp_path / "stellar_intens.fits", mode="update") as hdus:
         hdus[0].data[:, 0, 0] = [1e-2, 1e-39, 1e-2]
 
-    with jax.enable_x64(False):
+    if precision == np.dtype("float32"):
         with pytest.raises(ValueError, match=r"1 positive stellar sample.*float32"):
             open_yip(tmp_path).prepare()
-    with jax.enable_x64():
+    else:
         coro = open_yip(tmp_path).prepare()
         assert coro._stellar_linear_interp is None
         image = coro.stellar_map(None, 0.1).integrated()
         value = np.asarray(image.data)[0, 0]
-    assert value.dtype == np.float64
-    assert value == np.float64(1e-39)
+        assert value.dtype == precision
+        assert value == np.float64(1e-39)
 
 
 def test_stellar_diameter_gradient_is_finite(zero_coro):
@@ -234,7 +228,7 @@ def test_invalid_stellar_sample_names_the_file(tmp_path, sample):
         package.prepare()
 
 
-def test_positive_aavc_stellar_map_uses_log_cubic_spline(shipped_coro):
+def test_positive_aavc_stellar_map_uses_log_cubic_spline(shipped_coro, precision):
     """Check exact delivered knots and a pixel with a 74% log/PCHIP gap."""
     diameters = shipped_coro.package.stellar_diameters_lod
     delivered = shipped_coro.package.stellar_intensity
@@ -245,10 +239,11 @@ def test_positive_aavc_stellar_map_uses_log_cubic_spline(shipped_coro):
     # The measured relative gap is 0.7394, well above float32 rtol=2e-5.
     np.testing.assert_allclose(abs(linear - expected) / expected, 0.7394, atol=1e-4)
 
-    with jax.enable_x64(False):
-        knots = np.asarray(shipped_coro.stellar_map(None, diameters).integrated().data)
-        expected_bits = delivered.astype(np.float32).view(np.uint32)
-        assert knots.dtype == np.float32
-        np.testing.assert_array_equal(knots.view(np.uint32), expected_bits)
-        pixel = shipped_coro.stellar_map(None, diameter).integrated().data[row, column]
+    knots = np.asarray(shipped_coro.stellar_map(None, diameters).integrated().data)
+    bits = np.dtype(f"u{precision.itemsize}")
+    assert knots.dtype == precision
+    np.testing.assert_array_equal(
+        knots.view(bits), delivered.astype(precision).view(bits)
+    )
+    pixel = shipped_coro.stellar_map(None, diameter).integrated().data[row, column]
     np.testing.assert_allclose(pixel, expected, rtol=2e-5, atol=0)

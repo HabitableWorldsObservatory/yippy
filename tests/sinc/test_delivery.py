@@ -36,25 +36,24 @@ from yippy.sinc.evidence import Reason, Status
 @pytest.fixture(scope="module")
 def admitted(tmp_path_factory):
     """One tiny admitted quadrant and real performance cache for all reads."""
-    with jax.enable_x64():
-        root = tmp_path_factory.mktemp("sinc")
-        metadata = write_delivery(root)
-        # Independent-check intake has its own test. Keep the shared reader's
-        # cold setup small by admitting only the mandatory mirror evidence.
-        metadata["checks"] = []
-        metadata["served"]["bounds_lod"] = [[-0.2, 0.2], [-0.2, 0.5]]
-        save_manifest(root, metadata)
-        with fits.open(root / "legacy" / "stellar_intens.fits", mode="update") as hdus:
-            columns = np.arange(4) - 1.5
-            hdus[0].data *= 1 + 0.2 * np.cos(2 * np.pi * columns / 4)
+    root = tmp_path_factory.mktemp("sinc")
+    metadata = write_delivery(root)
+    # Independent-check intake has its own test. Keep the shared reader's
+    # cold setup small by admitting only the mandatory mirror evidence.
+    metadata["checks"] = []
+    metadata["served"]["bounds_lod"] = [[-0.2, 0.2], [-0.2, 0.5]]
+    save_manifest(root, metadata)
+    with fits.open(root / "legacy" / "stellar_intens.fits", mode="update") as hdus:
+        columns = np.arange(4) - 1.5
+        hdus[0].data *= 1 + 0.2 * np.cos(2 * np.pi * columns / 4)
 
-        def reject_legacy(*args, **kwargs):
-            raise AssertionError("versioned delivery entered legacy OffJAX intake")
+    def reject_legacy(*args, **kwargs):
+        raise AssertionError("versioned delivery entered legacy OffJAX intake")
 
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr("yippy._yip.OffJAX", reject_legacy)
-            coro = open_yip(root).prepare(interpolation="sinc")
-        yield coro
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("yippy._yip.OffJAX", reject_legacy)
+        coro = open_yip(root).prepare(interpolation="sinc")
+    yield coro
     jax.clear_caches()
 
 
@@ -375,7 +374,7 @@ def test_quadrant_precedence(tmp_path, defect):
             route_interpolation(tmp_path, "auto", None, None)
         assert not isinstance(caught.value, sc.AdmissionRefused)
     else:
-        with jax.enable_x64(), pytest.raises(sc.AdmissionRefused) as caught:
+        with pytest.raises(sc.AdmissionRefused) as caught:
             route_interpolation(tmp_path, "auto", None, None)
         assert caught.value.reason_bits & int(expected[defect])
         assert not caught.value.reason_bits & int(
@@ -385,6 +384,7 @@ def test_quadrant_precedence(tmp_path, defect):
         route_interpolation(tmp_path, "blend", None, None)
 
 
+@pytest.mark.float64_only(reason="Float64 reference roundoff for empirical residuals")
 def test_independent_checks(admitted, tmp_path):
     """Fails if independent images join training or empirical units are lost."""
     write_delivery(tmp_path)
@@ -435,12 +435,17 @@ def test_auto_fallback_and_bounded(tmp_path):
     result = bounded.create_psf_with_info(0.2, 0.0)
     assert not result.accepted
     assert result.selected_backend == 1
-    with jax.enable_x64(False):
-        _, precision_fallback, info = route_interpolation(tmp_path, "auto", None, None)
-        assert info.reasons == ("PRECISION_UNAVAILABLE",)
-        assert precision_fallback.create_psf_with_info(0.0, 0.0).accepted
-        with pytest.raises(sc.PrecisionUnavailable):
-            route_interpolation(tmp_path, "sinc", None, None)
+
+
+@pytest.mark.float32_only(reason="Exercises x64-off sinc fallback and refusal")
+def test_x64_off_auto_falls_back_and_explicit_sinc_refuses(tmp_path):
+    """Auto remains available when an explicit sinc request refuses x64-off."""
+    write_delivery(tmp_path, full=True)
+    _, precision_fallback, info = route_interpolation(tmp_path, "auto", None, None)
+    assert info.reasons == ("PRECISION_UNAVAILABLE",)
+    assert precision_fallback.create_psf_with_info(0.0, 0.0).accepted
+    with pytest.raises(sc.PrecisionUnavailable):
+        route_interpolation(tmp_path, "sinc", None, None)
 
 
 def test_table_consumer(admitted):
@@ -589,119 +594,112 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
     metadata["sample_kind"] = "mean"
     metadata["checks"] = []
     save_manifest(tmp_path, metadata)
-    with jax.enable_x64():
-        prepared = open_yip(tmp_path).prepare(interpolation="sinc")
-        # Every route is admitted by estimate, the prefiltered one included.
-        with pytest.raises(MemoryLimit, match="max_bytes"):
-            prepared.with_scene_operator(max_bytes=1)
-        model = prepared.with_scene_operator()
-        assert isinstance(model.operators[0], sc.SceneRenderer)
-        assert isinstance(model.operators[0], AbstractSceneOperator)
-        flux = jnp.zeros(model.grid.shape).at[2, 1].set(2.0)
-        scene = Image(flux, model.grid, (), Measure.integral(), "flux")
-        result = eqx.filter_jit(model.render_scene)(scene, None, grid=model.grid)
-        point = model.source_psfs(None, -0.125, 0.125)
-        assert result.valid and point.valid[0]
-        expected = 2.0 * point.image.data[0]
-        np.testing.assert_allclose(
-            result.image.data, expected, rtol=0, atol=1e-12 * expected.max()
+    prepared = open_yip(tmp_path).prepare(interpolation="sinc")
+    # Every route is admitted by estimate, the prefiltered one included.
+    with pytest.raises(MemoryLimit, match="max_bytes"):
+        prepared.with_scene_operator(max_bytes=1)
+    model = prepared.with_scene_operator()
+    assert isinstance(model.operators[0], sc.SceneRenderer)
+    assert isinstance(model.operators[0], AbstractSceneOperator)
+    flux = jnp.zeros(model.grid.shape).at[2, 1].set(2.0)
+    scene = Image(flux, model.grid, (), Measure.integral(), "flux")
+    result = eqx.filter_jit(model.render_scene)(scene, None, grid=model.grid)
+    point = model.source_psfs(None, -0.125, 0.125)
+    assert result.valid and point.valid[0]
+    expected = 2.0 * point.image.data[0]
+    np.testing.assert_allclose(
+        result.image.data, expected, rtol=0, atol=1e-12 * expected.max()
+    )
+    x, y = model.grid.coordinates()
+    raster = model.operators[0].render_raster(flux, x[0], y[:, 0])
+    direct = raster.intensity * model._offaxis_backend.conversion
+    data, covered = model.operators[0].render(flux, model.grid)
+    assert covered[2, 1] and bool(raster.accepted)
+    np.testing.assert_array_equal(data, direct)
+    assert not covered[0, 0] and bool(jnp.all(jnp.isfinite(data)))
+    lit = replace(scene, data=flux.at[0, 0].set(1.0))
+    assert not model.render_scene(lit, None, grid=model.grid).valid
+
+    bounded = (
+        open_yip(tmp_path)
+        .prepare(
+            interpolation="sinc",
+            sinc_options=SincOptions(policy=sc.ReadPolicy("bounded", jnp.asarray(1.0))),
         )
-        x, y = model.grid.coordinates()
-        raster = model.operators[0].render_raster(flux, x[0], y[:, 0])
-        direct = raster.intensity * model._offaxis_backend.conversion
-        data, covered = model.operators[0].render(flux, model.grid)
-        assert covered[2, 1] and bool(raster.accepted)
-        np.testing.assert_array_equal(data, direct)
-        assert not covered[0, 0] and bool(jnp.all(jnp.isfinite(data)))
-        lit = replace(scene, data=flux.at[0, 0].set(1.0))
-        assert not model.render_scene(lit, None, grid=model.grid).valid
-
-        bounded = (
-            open_yip(tmp_path)
-            .prepare(
-                interpolation="sinc",
-                sinc_options=SincOptions(
-                    policy=sc.ReadPolicy("bounded", jnp.asarray(1.0))
-                ),
-            )
-            .with_scene_operator()
-        )
-        assert isinstance(bounded.operators[0], sc.SceneRenderer)
-        dark = replace(scene, data=jnp.zeros_like(flux))
-        result = bounded.render_scene(dark, None, grid=bounded.grid)
-        assert result.valid
-        np.testing.assert_array_equal(result.image.data, 0.0)
-        assert not bounded.render_scene(scene, None, grid=bounded.grid).valid
+        .with_scene_operator()
+    )
+    assert isinstance(bounded.operators[0], sc.SceneRenderer)
+    dark = replace(scene, data=jnp.zeros_like(flux))
+    result = bounded.render_scene(dark, None, grid=bounded.grid)
+    assert result.valid
+    np.testing.assert_array_equal(result.image.data, 0.0)
+    assert not bounded.render_scene(scene, None, grid=bounded.grid).valid
 
 
+@pytest.mark.float64_only(reason="Float64 independent delivery validation")
 @pytest.mark.slow
 def test_public_delivery(tmp_path):
     """Fails if independent images disagree by over 1e-5 of their local peaks."""
     configured = os.environ.get("YIPPY_SINC_DELIVERY")
     if not configured or not (Path(configured) / "sinc-delivery.json").exists():
         pytest.skip("Set YIPPY_SINC_DELIVERY to an independent intensity delivery")
-    with jax.enable_x64():
-        root = tmp_path / "delivery"
-        shutil.copytree(configured, root, ignore=shutil.ignore_patterns("yippy_cache"))
-        coro = open_yip(root).prepare(interpolation="sinc")
-        host = _YIPData(open_yip(root), interpolation="sinc")
-        np.testing.assert_allclose(
-            coro.source_psfs(None, 4.0, 5.5).image.data[0],
-            host.offax.create_psf(4.0, 5.5).data,
-            rtol=1e-14,
-        )
-        np.testing.assert_allclose(
-            coro.stellar_map(None, 0.0).data,
-            host.stellar_intens(0.0 * lod).data,
-            rtol=1e-14,
-        )
-        assert coro.stellar_grid.frame != coro.grid.frame
-        np.testing.assert_allclose(
-            coro.uniform_sky_map(500.0, grid=coro.sky_trans.grid).data,
-            resample(host.sky_trans, coro.sky_trans.grid).data,
-            atol=1e-14,
-        )
-        np.testing.assert_allclose(
-            coro.stellar_map(500.0, 0.0, grid=coro.stellar_grid).data,
-            resample(
-                host.stellar_intens(0.0 * lod).integrated(), coro.stellar_grid
-            ).data,
-            atol=1e-14,
-        )
-        x, y = jnp.array([4.0]), jnp.array([5.5])
-        np.testing.assert_allclose(
-            coro.source_psfs(500.0, x, y, grid=coro.grid).image.data,
-            resample(host.offax.create_psfs(x, y).integrated(), coro.grid).data,
-            rtol=1e-14,
-        )
-        metadata = json.loads((root / "sinc-delivery.json").read_text())
-        coords = np.genfromtxt(root / "starter_checks.csv", names=True, delimiter=",")
-        points = np.column_stack((coords["x_lod"], coords["y_lod"]))
-        path = root / "checks" / "mono-000-float64.fits"
-        if not path.exists():
-            path = root / "checks" / "mono-000.fits"
-        truth = fits.getdata(path)
-        assert len(points) == 16
-        pitch = np.array(metadata["pixel_scale_lod_xy"])
-        center = np.array(metadata["detector_center_xy"])
-        yy, xx = np.indices(truth.shape[-2:])
-        for q, image in zip(points, truth, strict=True):
-            region = ((xx - center[0]) * pitch[0] - q[0]) ** 2 + (
-                (yy - center[1]) * pitch[1] - q[1]
-            ) ** 2 <= 1.0
-            peak = image[region].max()
-            assert peak > 0
-            assert (
-                np.max(
-                    np.abs(
-                        np.asarray(
-                            coro.source_psfs(None, *q).image.integrated().data[0]
-                        )
-                        - image
-                    )
+    root = tmp_path / "delivery"
+    shutil.copytree(configured, root, ignore=shutil.ignore_patterns("yippy_cache"))
+    coro = open_yip(root).prepare(interpolation="sinc")
+    host = _YIPData(open_yip(root), interpolation="sinc")
+    np.testing.assert_allclose(
+        coro.source_psfs(None, 4.0, 5.5).image.data[0],
+        host.offax.create_psf(4.0, 5.5).data,
+        rtol=1e-14,
+    )
+    np.testing.assert_allclose(
+        coro.stellar_map(None, 0.0).data,
+        host.stellar_intens(0.0 * lod).data,
+        rtol=1e-14,
+    )
+    assert coro.stellar_grid.frame != coro.grid.frame
+    np.testing.assert_allclose(
+        coro.uniform_sky_map(500.0, grid=coro.sky_trans.grid).data,
+        resample(host.sky_trans, coro.sky_trans.grid).data,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        coro.stellar_map(500.0, 0.0, grid=coro.stellar_grid).data,
+        resample(host.stellar_intens(0.0 * lod).integrated(), coro.stellar_grid).data,
+        atol=1e-14,
+    )
+    x, y = jnp.array([4.0]), jnp.array([5.5])
+    np.testing.assert_allclose(
+        coro.source_psfs(500.0, x, y, grid=coro.grid).image.data,
+        resample(host.offax.create_psfs(x, y).integrated(), coro.grid).data,
+        rtol=1e-14,
+    )
+    metadata = json.loads((root / "sinc-delivery.json").read_text())
+    coords = np.genfromtxt(root / "starter_checks.csv", names=True, delimiter=",")
+    points = np.column_stack((coords["x_lod"], coords["y_lod"]))
+    path = root / "checks" / "mono-000-float64.fits"
+    if not path.exists():
+        path = root / "checks" / "mono-000.fits"
+    truth = fits.getdata(path)
+    assert len(points) == 16
+    pitch = np.array(metadata["pixel_scale_lod_xy"])
+    center = np.array(metadata["detector_center_xy"])
+    yy, xx = np.indices(truth.shape[-2:])
+    for q, image in zip(points, truth, strict=True):
+        region = ((xx - center[0]) * pitch[0] - q[0]) ** 2 + (
+            (yy - center[1]) * pitch[1] - q[1]
+        ) ** 2 <= 1.0
+        peak = image[region].max()
+        assert peak > 0
+        assert (
+            np.max(
+                np.abs(
+                    np.asarray(coro.source_psfs(None, *q).image.integrated().data[0])
+                    - image
                 )
-                <= 1e-5 * peak
             )
+            <= 1e-5 * peak
+        )
 
 
 def test_bounded_legacy_refuses(tmp_path):
@@ -709,10 +707,7 @@ def test_bounded_legacy_refuses(tmp_path):
     legacy = write_synthetic_yip(
         tmp_path / "legacy", npix=4, max_offset_lod=1.0, offset_step_lod=0.5
     )
-    with (
-        jax.enable_x64(),
-        pytest.raises(ValueError, match=r"[Bb]ounded"),
-    ):
+    with pytest.raises(ValueError, match=r"[Bb]ounded"):
         open_yip(legacy.path).prepare(
             interpolation="auto",
             sinc_options=SincOptions(
@@ -761,7 +756,21 @@ def test_header_invalid_angular_units(tmp_path, unit):
         route_interpolation(tmp_path, "auto", None, None)
 
 
-@pytest.mark.parametrize("gate", ["precision", "memory"])
+@pytest.mark.parametrize(
+    "gate",
+    [
+        pytest.param(
+            "precision",
+            marks=pytest.mark.float32_only(
+                reason="Exercises x64-off fallback precedence"
+            ),
+        ),
+        pytest.param(
+            "memory",
+            marks=pytest.mark.float64_only(reason="Isolates the memory fallback gate"),
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "defect",
     [
@@ -815,7 +824,7 @@ def test_validation_precedes_fallback(tmp_path, gate, defect):
     options = (
         SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1)) if gate == "memory" else None
     )
-    with jax.enable_x64(gate != "precision"), pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         route_interpolation(tmp_path, "auto", options, None)
 
 
@@ -837,13 +846,12 @@ def test_missing_admission_metadata(tmp_path, field):
     m = write_delivery(tmp_path, full=True)
     del (m["planes"][0] if field == "sampling_min_wavelength_m" else m)[field]
     save_manifest(tmp_path, m)
-    with jax.enable_x64():
-        _, backend, info = route_interpolation(tmp_path, "auto", None, None)
-        assert info.reasons == ("METADATA_MISSING",)
-        assert backend.create_psf_with_info(0.0, 0.0).accepted
-        with pytest.raises(sc.AdmissionRefused) as caught:
-            route_interpolation(tmp_path, "sinc", None, None)
-        assert caught.value.reason_bits == int(Reason.METADATA_MISSING)
+    _, backend, info = route_interpolation(tmp_path, "auto", None, None)
+    assert info.reasons == ("METADATA_MISSING",)
+    assert backend.create_psf_with_info(0.0, 0.0).accepted
+    with pytest.raises(sc.AdmissionRefused) as caught:
+        route_interpolation(tmp_path, "sinc", None, None)
+    assert caught.value.reason_bits == int(Reason.METADATA_MISSING)
 
 
 def test_campaign_claim_refuses(tmp_path):
@@ -851,107 +859,111 @@ def test_campaign_claim_refuses(tmp_path):
     m = write_delivery(tmp_path, full=True)
     m["spectral_sampling"]["campaign_sampling_min_m"] = 450e-9
     save_manifest(tmp_path, m)
-    with jax.enable_x64():
-        with pytest.raises(ValueError, match=r"campaign.*revised manifest"):
-            route_interpolation(tmp_path, "auto", None, None)
-        m["spectral_sampling"]["campaign_sampling_min_m"] = None
-        save_manifest(tmp_path, m)
-        assert route_interpolation(tmp_path, "auto", None, None)[2].effective == "sinc"
+    with pytest.raises(ValueError, match=r"campaign.*revised manifest"):
+        route_interpolation(tmp_path, "auto", None, None)
+    m["spectral_sampling"]["campaign_sampling_min_m"] = None
+    save_manifest(tmp_path, m)
+    assert route_interpolation(tmp_path, "auto", None, None)[2].effective == "sinc"
 
 
-@pytest.mark.parametrize("gate", ["sampling", "precision"])
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "sampling",
+        pytest.param(
+            "precision",
+            marks=pytest.mark.float32_only(
+                reason="Exercises x64-off fallback precedence"
+            ),
+        ),
+    ],
+)
 def test_fallback_options_cache(tmp_path, monkeypatch, gate):
     """Distinct fallback domains/options generate and reload separate artifacts."""
     m = write_delivery(tmp_path, full=True)
     if gate == "sampling":
         m["support_extent_D"] = [2.0, 2.0]
     save_manifest(tmp_path, m)
-    with jax.enable_x64():
-        domains = [
-            sc.Domain("box", "closed", jnp.array([[-r, -r], [r, r]]), jnp.zeros(2))
-            for r in (0.09, 0.08)
+    domains = [
+        sc.Domain("box", "closed", jnp.array([[-r, -r], [r, r]]), jnp.zeros(2))
+        for r in (0.09, 0.08)
+    ]
+    requests = [SincOptions(domain=d) for d in domains]
+    requests.extend(
+        [
+            SincOptions(domain=domains[0], product_id="mono"),
+            SincOptions(
+                domain=domains[0],
+                memory=sc.MemoryBudget(10000000, 10000000, 10000000, 10000000),
+            ),
         ]
-        requests = [SincOptions(domain=d) for d in domains]
-        requests.extend(
-            [
-                SincOptions(domain=domains[0], product_id="mono"),
-                SincOptions(
-                    domain=domains[0],
-                    memory=sc.MemoryBudget(10000000, 10000000, 10000000, 10000000),
-                ),
-            ]
+    )
+    objects = [
+        _YIPData(open_yip(tmp_path), interpolation="auto", sinc_options=o)
+        for o in requests
+    ]
+    assert all(c.interpolation_info.effective == "blend" for c in objects)
+    assert len({c._datacube_cache_path for c in objects}) == len(objects)
+    assert len({c._perf_filename() for c in objects}) == len(objects)
+    for i, coro in enumerate(objects):
+        entry = reload = coro._create_delivery_datacube
+        assert not coro._datacube_cache_path.exists()
+        entry(4)
+        before = np.asarray(coro.psf_datacube)
+        assert np.isfinite(before).all()
+        assert (coro._perf_dir / coro._perf_filename()).exists()
+
+        def no_reads(*args, **kwargs):
+            raise AssertionError("cache reload performed source reads")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(coro, "create_psfs_with_info", no_reads)
+            reload(4)
+        np.testing.assert_array_equal(coro.psf_datacube, before)
+        # Reconstructing the same request also reuses its performance entry.
+        perf_path = coro._perf_dir / coro._perf_filename()
+        stamp = perf_path.stat().st_mtime_ns
+        again = _YIPData(
+            open_yip(tmp_path), interpolation="auto", sinc_options=requests[i]
         )
-        with jax.enable_x64(gate != "precision"):
-            objects = [
-                _YIPData(open_yip(tmp_path), interpolation="auto", sinc_options=o)
-                for o in requests
-            ]
-            assert all(c.interpolation_info.effective == "blend" for c in objects)
-            assert len({c._datacube_cache_path for c in objects}) == len(objects)
-            assert len({c._perf_filename() for c in objects}) == len(objects)
-            for i, coro in enumerate(objects):
-                entry = reload = coro._create_delivery_datacube
-                assert not coro._datacube_cache_path.exists()
-                entry(4)
-                before = np.asarray(coro.psf_datacube)
-                assert np.isfinite(before).all()
-                assert (coro._perf_dir / coro._perf_filename()).exists()
-
-                def no_reads(*args, **kwargs):
-                    raise AssertionError("cache reload performed source reads")
-
-                with monkeypatch.context() as patch:
-                    patch.setattr(coro, "create_psfs_with_info", no_reads)
-                    reload(4)
-                np.testing.assert_array_equal(coro.psf_datacube, before)
-                # Reconstructing the same request also reuses its performance entry.
-                perf_path = coro._perf_dir / coro._perf_filename()
-                stamp = perf_path.stat().st_mtime_ns
-                again = _YIPData(
-                    open_yip(tmp_path), interpolation="auto", sinc_options=requests[i]
-                )
-                assert again._perf_filename() == coro._perf_filename()
-                assert again._datacube_cache_path == coro._datacube_cache_path
-                assert perf_path.stat().st_mtime_ns == stamp
+        assert again._perf_filename() == coro._perf_filename()
+        assert again._datacube_cache_path == coro._datacube_cache_path
+        assert perf_path.stat().st_mtime_ns == stamp
 
 
+@pytest.mark.float64_only(reason="Float64 reference roundoff for empirical residuals")
 @pytest.mark.parametrize(
     "measure,factor", [("point", 2.0), ("integral", 2.0), ("mean", 0.125)]
 )
 def test_intake_finite_error_units(tmp_path, measure, factor):
     """Real intake scales nonzero finite empirical residuals with pixel values."""
     m = write_delivery(tmp_path)
-    with jax.enable_x64():
-        _, reference, _ = route_interpolation(tmp_path, "sinc", None, None)
-        raw = reference.create_psf_with_info(0.07, -0.04)
-        assert np.isfinite(raw.empirical_max_abs) and raw.empirical_max_abs > 0
-        m["sample_kind"] = measure
-        m["normalization"]["kind"] = "unocculted_peak"
-        m["normalization"]["denominator_definition"] = (
-            "Full incident reference intensity"
-        )
-        m["planes"][0]["photon_conversion"] = 2.0
-        save_manifest(tmp_path, m)
-        _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
-        converted = backend.create_psf_with_info(0.07, -0.04)
-        image = backend.create_psf(0.07, -0.04)
-        expected_measure = (
-            Measure.density("grid") if measure == "point" else Measure.integral()
-        )
-        assert image.measure == expected_measure == backend.reader.grid.products.measure
-        np.testing.assert_allclose(
-            image.integrated().data, raw.intensity * factor, rtol=1e-14
-        )
-        np.testing.assert_allclose(
-            converted.intensity, raw.intensity * factor, rtol=1e-14
-        )
-        np.testing.assert_allclose(
-            converted.empirical_max_abs, raw.empirical_max_abs * factor, rtol=1e-12
-        )
-        retained = dict(info.receipt.provenance)["manifest"]
-        assert json.loads(retained) == m
-        assert info.receipt.offset_dtype == "float64"
-        assert all(info.receipt.axis_exact)
+    _, reference, _ = route_interpolation(tmp_path, "sinc", None, None)
+    raw = reference.create_psf_with_info(0.07, -0.04)
+    assert np.isfinite(raw.empirical_max_abs) and raw.empirical_max_abs > 0
+    m["sample_kind"] = measure
+    m["normalization"]["kind"] = "unocculted_peak"
+    m["normalization"]["denominator_definition"] = "Full incident reference intensity"
+    m["planes"][0]["photon_conversion"] = 2.0
+    save_manifest(tmp_path, m)
+    _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
+    converted = backend.create_psf_with_info(0.07, -0.04)
+    image = backend.create_psf(0.07, -0.04)
+    expected_measure = (
+        Measure.density("grid") if measure == "point" else Measure.integral()
+    )
+    assert image.measure == expected_measure == backend.reader.grid.products.measure
+    np.testing.assert_allclose(
+        image.integrated().data, raw.intensity * factor, rtol=1e-14
+    )
+    np.testing.assert_allclose(converted.intensity, raw.intensity * factor, rtol=1e-14)
+    np.testing.assert_allclose(
+        converted.empirical_max_abs, raw.empirical_max_abs * factor, rtol=1e-12
+    )
+    retained = dict(info.receipt.provenance)["manifest"]
+    assert json.loads(retained) == m
+    assert info.receipt.offset_dtype == "float64"
+    assert all(info.receipt.axis_exact)
 
 
 def test_spatial_cross_frame_aperture():
@@ -959,35 +971,34 @@ def test_spatial_cross_frame_aperture():
     from optixstuff.performance import circular_aperture
     from scipy.special import j1
 
-    with jax.enable_x64():
-        n, radius, level = 12, 2.0, 1e-10
-        _, xx = np.indices((n, n))
-        center = (n - 1) / 2
-        star = level * (1 + 0.4 * np.cos(2 * np.pi * (xx - center) / n))
-        ratio = (0.25 * 500) / (0.4 * 400)
-        k = 2 * np.pi * ratio / n
-        expected = (
-            np.pi
-            * radius**2
-            * level
-            * ratio**2
-            * (1 + 0.4 * 2 * j1(k * radius) / (k * radius))
-        )
+    n, radius, level = 12, 2.0, 1e-10
+    _, xx = np.indices((n, n))
+    center = (n - 1) / 2
+    star = level * (1 + 0.4 * np.cos(2 * np.pi * (xx - center) / n))
+    ratio = (0.25 * 500) / (0.4 * 400)
+    k = 2 * np.pi * ratio / n
+    expected = (
+        np.pi
+        * radius**2
+        * level
+        * ratio**2
+        * (1 + 0.4 * 2 * j1(k * radius) / (k * radius))
+    )
 
-        def integrate(scale):
-            return circular_aperture(
-                jnp.ones((16, 16)),
-                radius,
-                0.25,
-                oversample=40,
-                half_width_pix=4,
-                fixed_center=(7.5, 7.5),
-                star_psf=jnp.array(star),
-                star_frame=(center, center, 7.5, 7.5, scale),
-            )[2]
+    def integrate(scale):
+        return circular_aperture(
+            jnp.ones((16, 16)),
+            radius,
+            0.25,
+            oversample=40,
+            half_width_pix=4,
+            fixed_center=(7.5, 7.5),
+            star_psf=jnp.array(star),
+            star_frame=(center, center, 7.5, 7.5, scale),
+        )[2]
 
-        assert abs(float(integrate(ratio)) / expected - 1) < 5e-6
-        assert abs(float(integrate(0.25 / 0.4)) / expected - 1) > 0.1
+    assert abs(float(integrate(ratio)) / expected - 1) < 5e-6
+    assert abs(float(integrate(0.25 / 0.4)) / expected - 1) > 0.1
 
 
 @pytest.mark.parametrize("budget", [1e-5, 1e-6])
@@ -1020,15 +1031,30 @@ def test_original_offset_precision(tmp_path):
     fits.writeto(path, values, overwrite=True)
     m["planes"][0]["offsets_sha256"] = file_sha256(path)
     save_manifest(tmp_path, m)
-    with jax.enable_x64():
-        _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
-        assert info.receipt.offset_dtype == "float32"
-        assert info.receipt.offset_tolerance_xy[0] > 1e-6
-        assert backend.create_psf_with_info(0.07, -0.04).accepted
+    _, backend, info = route_interpolation(tmp_path, "sinc", None, None)
+    assert info.receipt.offset_dtype == "float32"
+    assert info.receipt.offset_tolerance_xy[0] > 1e-6
+    assert backend.create_psf_with_info(0.07, -0.04).accepted
 
 
 @pytest.mark.parametrize(
-    "gate", ["normal", "blend", "precision", "memory", "metadata", "sampling"]
+    "gate",
+    [
+        "normal",
+        "blend",
+        pytest.param(
+            "precision",
+            marks=pytest.mark.float32_only(
+                reason="Exercises x64-off fallback precedence"
+            ),
+        ),
+        pytest.param(
+            "memory",
+            marks=pytest.mark.float64_only(reason="Isolates the memory fallback gate"),
+        ),
+        "metadata",
+        "sampling",
+    ],
 )
 @pytest.mark.parametrize(
     "defect",
@@ -1110,7 +1136,7 @@ def test_admission_declaration_errors(tmp_path, gate, defect):
     options = (
         SincOptions(memory=sc.MemoryBudget(1, 1, 1, 1)) if gate == "memory" else None
     )
-    with jax.enable_x64(gate != "precision"), pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         route_interpolation(
             tmp_path, "blend" if gate == "blend" else "auto", options, None
         )
@@ -1118,24 +1144,20 @@ def test_admission_declaration_errors(tmp_path, gate, defect):
 
 @pytest.mark.medium
 @pytest.mark.parametrize("peak", ["absent", None, 0.001])
-def test_peak_reference_controls(tmp_path, peak):
+def test_peak_reference_controls(tmp_path, peak, precision):
     """Fails if unknown or positive peak evidence prevents admission or fallback.
 
-    Cold independent-check admission and finite reads cover all six routes.
+    Cold independent-check admission and finite reads cover the available routes.
     """
     m = write_delivery(tmp_path, full=True)
     if peak == "absent":
         del m["checks"][0]["local_peak_reference"]
     else:
         m["checks"][0]["local_peak_reference"] = peak
-    for gate in (
-        "normal",
-        "blend",
-        "precision",
-        "memory",
-        "metadata",
-        "sampling",
-    ):
+    gates = ["blend", "memory", "metadata", "sampling", "normal"]
+    if precision == np.dtype("float32"):
+        gates.insert(0, "precision")
+    for gate in gates:
         metadata = copy.deepcopy(m)
         if gate == "metadata":
             del metadata["coordinate_model"]
@@ -1147,13 +1169,12 @@ def test_peak_reference_controls(tmp_path, peak):
             if gate == "memory"
             else None
         )
-        with jax.enable_x64(gate != "precision"):
-            _, backend, info = route_interpolation(
-                tmp_path, "blend" if gate == "blend" else "auto", options, None
-            )
-            assert info.effective == ("sinc" if gate == "normal" else "blend")
-            result = backend.create_psf_with_info(0.0, 0.0)
-            assert result.accepted and np.isfinite(result.intensity).all()
+        _, backend, info = route_interpolation(
+            tmp_path, "blend" if gate == "blend" else "auto", options, None
+        )
+        assert info.effective == ("sinc" if gate == "normal" else "blend")
+        result = backend.create_psf_with_info(0.0, 0.0)
+        assert result.accepted and np.isfinite(result.intensity).all()
 
 
 def test_override_domain_excludes_unreadable_checks(tmp_path):
@@ -1161,18 +1182,17 @@ def test_override_domain_excludes_unreadable_checks(tmp_path):
     m = write_delivery(tmp_path, full=True)
     save_manifest(tmp_path, m)
     check_ids = [r["id"] for r in m["checks"]]
-    with jax.enable_x64():
-        narrow = sc.Domain(
-            "box", "closed", jnp.array([[-0.05, -0.05], [0.05, 0.05]]), jnp.zeros(2)
-        )
-        _, backend, info = route_interpolation(
-            tmp_path, "sinc", SincOptions(domain=narrow), None
-        )
-        provenance = dict(info.receipt.provenance)
-        excluded = json.loads(provenance["excluded_checks"])
-        assert excluded and set(excluded) <= set(check_ids)
-        result = backend.create_psf_with_info(0.0, 0.0)
-        assert bool(result.accepted)
+    narrow = sc.Domain(
+        "box", "closed", jnp.array([[-0.05, -0.05], [0.05, 0.05]]), jnp.zeros(2)
+    )
+    _, backend, info = route_interpolation(
+        tmp_path, "sinc", SincOptions(domain=narrow), None
+    )
+    provenance = dict(info.receipt.provenance)
+    excluded = json.loads(provenance["excluded_checks"])
+    assert excluded and set(excluded) <= set(check_ids)
+    result = backend.create_psf_with_info(0.0, 0.0)
+    assert bool(result.accepted)
 
 
 @pytest.mark.parametrize("kind", ["integral", "mean"])
@@ -1181,14 +1201,13 @@ def test_measured_detector_cells_survive_explicit_native_grid(tmp_path, kind):
     m = write_delivery(tmp_path, full=True)
     m["sample_kind"] = kind
     save_manifest(tmp_path, m)
-    with jax.enable_x64():
-        model = open_yip(tmp_path).prepare(interpolation="blend")
-        source = model.source_psfs(None, 0.0, 0.0, grid=model.grid).image
-        native = model.source_psfs(None, 0.0, 0.0).image
-        assert np.ptp(native.data) > 0
-        assert native.measure == source.measure == Measure.integral()
-        assert native.reconstruction == "nearest"
-        np.testing.assert_array_equal(native.data, source.data)
-        stored = model.package.offaxis_psfs[16 * 33 + 16]
-        expected = stored if kind == "integral" else stored * 0.25**2
-        np.testing.assert_allclose(source.data[0], expected, rtol=2e-7)
+    model = open_yip(tmp_path).prepare(interpolation="blend")
+    source = model.source_psfs(None, 0.0, 0.0, grid=model.grid).image
+    native = model.source_psfs(None, 0.0, 0.0).image
+    assert np.ptp(native.data) > 0
+    assert native.measure == source.measure == Measure.integral()
+    assert native.reconstruction == "nearest"
+    np.testing.assert_array_equal(native.data, source.data)
+    stored = model.package.offaxis_psfs[16 * 33 + 16]
+    expected = stored if kind == "integral" else stored * 0.25**2
+    np.testing.assert_allclose(source.data[0], expected, rtol=2e-7)
