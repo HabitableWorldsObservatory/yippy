@@ -723,9 +723,13 @@ class PrefilteredReader(AbstractGridReader):
             block = table[jnp.abs(ky)[:, None], jnp.abs(kx)[None, :]]
             block = jnp.where((kx < 0)[None, :, None, None], block[..., ::-1], block)
             block = jnp.where((ky < 0)[:, None, None, None], block[..., ::-1, :], block)
-        image = jnp.einsum(
-            "j,i,jirc->rc", weight[1], weight[0], block.astype(jnp.float64)
-        )
+        # One axis at a time: the single three-operand contraction of the
+        # stencil, gather and weights is miscompiled by the XLA CPU fusion
+        # emitters on x86 with AVX2 or wider (jax 0.10.2 and later), returning a
+        # read off by about a tenth of the signal at a query on a cell midpoint.
+        # The two-stage form is exact to rounding on every platform tested.
+        along_y = jnp.einsum("j,jirc->irc", weight[1], block.astype(jnp.float64))
+        image = jnp.einsum("i,irc->rc", weight[0], along_y)
         # Stored-sample errors reach a read through the composite of filter and
         # bump, so the gain reported to the error model is the design figure.
         return image, self._gain_xy
