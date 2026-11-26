@@ -7,6 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.precision import like
 from scipy.fft import next_fast_len
 
 from ._jax_funcs import (
@@ -64,7 +65,7 @@ class _DenseSceneOperator(AbstractSceneOperator):
         """
         if flux.shape != grid.shape:
             raise ValueError("source flux must match the native grid")
-        flux = jnp.where(jnp.isfinite(flux), flux, 0.0)
+        flux = jnp.where(jnp.isfinite(flux), flux, like(0, flux))
         if self.valid.shape == grid.shape:
             return jnp.einsum("ij,ijyx->yx", flux, self.psfs), self.valid
         ny, nx = grid.shape
@@ -133,7 +134,9 @@ class MaskedSceneOperator(AbstractSceneOperator):
         """
         if flux.shape != self.mask.shape:
             raise ValueError("source flux must match the mask")
-        image, covered = self.operator.render(jnp.where(self.mask, flux, 0.0), grid)
+        image, covered = self.operator.render(
+            jnp.where(self.mask, flux, like(0, flux)), grid
+        )
         return image, covered & self.mask
 
 
@@ -478,7 +481,7 @@ class BlendSceneOperator(AbstractSceneOperator):
         ny, nx = self.out_shape
         dtype = self.weight.dtype
         n, planes = self.n_fft, len(self.flips)
-        lit = jnp.where(jnp.isfinite(flux), flux, 0.0).astype(dtype).ravel()
+        lit = jnp.where(jnp.isfinite(flux), flux, like(0, flux)).astype(dtype).ravel()
 
         def add_term(acc, term):
             table, source, weight, reflection, shift = term

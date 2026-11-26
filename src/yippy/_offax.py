@@ -47,7 +47,6 @@ class OffAx:
             sample_kind: How stored pixel values sample the image: ``"point"``,
                 ``"integral"`` or ``"mean"``.
         """
-        self.pixel_scale_arcsec = grid.step * lod / u.pix
         self.x_symmetric = x_symmetric
         self.y_symmetric = y_symmetric
         self.grid = grid
@@ -113,10 +112,6 @@ class OffAx:
             logger.info("Off-axis response is full 2D")
             self.type = "2df"
 
-        # A lambda/D offset that represents the greatest separation where the PSF's
-        # center is within the image. This applies to all coronagraph types.
-        self.max_offset_in_image = psfs.shape[1] / 2 * u.pix * self.pixel_scale_arcsec
-
         # Downsample PSFs if requested
         if downsample_shape is not None:
             ny, nx = grid.shape
@@ -136,12 +131,6 @@ class OffAx:
             source = fraction_image(psfs, grid, ("source",), self.measure)
             rebinned = integrate_footprints(source, footprint_overlap(grid, self.grid))
             psfs, self.measure = np.asarray(rebinned.data), rebinned.measure
-            self.pixel_scale_arcsec = self.grid.step * lod / u.pix
-
-            # Update max_offset_in_image after downsampling
-            self.max_offset_in_image = (
-                psfs.shape[1] / 2 * u.pix * self.pixel_scale_arcsec
-            )
 
         self.flat_psfs = psfs
         self.flat_offsets = offsets
@@ -170,6 +159,24 @@ class OffAx:
 
         # Store PSF shape for convenience
         self.psf_shape = self.flat_psfs.shape[1:]
+
+    @property
+    def pixel_scale_arcsec(self):
+        """Return the detector pixel pitch.
+
+        Returns:
+            The pitch in lambda/D per pixel.
+        """
+        return self.grid.step * lod / u.pix
+
+    @property
+    def max_offset_in_image(self):
+        """Return the positive source extent of the detector stamp.
+
+        Returns:
+            The offset in lambda/D.
+        """
+        return self.psf_shape[0] / 2 * u.pix * self.pixel_scale_arcsec
 
     def get_psf_by_offset_idx(self, x_idx: int, y_idx: int) -> Image | None:
         """Get PSF at the given offset indices.

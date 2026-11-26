@@ -464,7 +464,8 @@ def test_table_consumer(admitted, precision):
     on its end condition; the truth implements the documented restriction of
     the spline to the table footprint, and the comparison guards scale and
     frame, not the edge physics. The exported scalar allows 32 epsilon
-    units for knot lookup and the unit conversion.
+    units for knot lookup and the unit conversion. The sky read returns the
+    original samples exactly at the native 0.4 pitch.
     """
     host = _YIPData(admitted.package, interpolation="sinc")
     # The record stores density per (lambda/D)^2: no pitch factor.
@@ -475,6 +476,7 @@ def test_table_consumer(admitted, precision):
         rtol=32 * eps(precision),
     )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
+    native_sky = admitted.sky_trans
     for pitch in (0.25, 0.4):
         stellar = admitted.stellar_map(None, 0.0)
         grid = PixelGrid.focal(4, pitch, stellar.grid.frame)
@@ -484,10 +486,11 @@ def test_table_consumer(admitted, precision):
             stellar.grid,
             grid,
         )
-        grid = PixelGrid.focal(4, pitch, admitted.sky_trans.grid.frame)
+        grid = PixelGrid.focal(4, pitch, native_sky.grid.frame)
+        expected_sky = native_sky if pitch == 0.4 else resample(native_sky, grid)
         np.testing.assert_array_equal(
             admitted.uniform_sky_map(500.0, grid=grid).data,
-            resample(admitted.sky_trans, grid).data,
+            expected_sky.data,
         )
         grid = PixelGrid.focal(4, pitch, admitted.grid.frame)
         expected = resample(

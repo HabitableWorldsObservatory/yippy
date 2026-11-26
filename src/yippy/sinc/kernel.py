@@ -292,7 +292,8 @@ def exact_quotient_floor_v1(query, origin, spacing):
     difference = flush_subnormal(query) - origin
     remainder = jnp.fmod(difference, spacing)
     quotient = jnp.round((difference - remainder) / spacing)
-    return quotient - jnp.where((remainder != 0) & (difference < 0), 1.0, 0.0)
+    below = (remainder != 0) & (difference < 0)
+    return quotient - below.astype(quotient.dtype)
 
 
 def upper_half_cell(query, origin, spacing):
@@ -316,7 +317,7 @@ def upper_half_cell(query, origin, spacing):
     upper = jnp.where(
         difference >= 0, doubled >= spacing, (remainder != 0) & (doubled >= -spacing)
     )
-    return jnp.where(upper, 1.0, 0.0)
+    return upper.astype(difference.dtype)
 
 
 def _float32_ceiling(value):
@@ -394,9 +395,8 @@ def float32_stencil_start(profile, query, origin, spacing, size, reflected):
         )
         index = jnp.searchsorted(like(edges, query), query[..., axis], side="right")
         tail = jnp.floor(_relative_phase(query[..., axis], np.asarray(o), h) - shift)
-        starts.append(
-            jnp.where((index > 0) & (index < edges.size), first + index - 1, tail)
-        )
+        interior = (first + index - 1).astype(tail.dtype)
+        starts.append(jnp.where((index > 0) & (index < edges.size), interior, tail))
     return jnp.stack(starts, axis=-1)
 
 
@@ -411,9 +411,9 @@ def weights(argument):
         Weights, shaped like ``argument``.
     """
     active = jnp.abs(argument) < 16.0
-    inside = jnp.where(active, 1.0 - (argument / 16.0) ** 2, 1.0)
+    inside = jnp.where(active, 1.0 - (argument / 16.0) ** 2, like(1, argument))
     window = jnp.i0(12.0 * jnp.sqrt(inside)) / jnp.i0(like(12.0, argument))
-    return jnp.where(active, jnp.sinc(argument) * window, 0.0)
+    return jnp.where(active, jnp.sinc(argument) * window, like(0, argument))
 
 
 def stencil(query, origin, spacing):
@@ -456,8 +456,10 @@ def bump(argument, taps, beta):
     """
     half = taps / 2.0
     active = jnp.abs(argument) < half
-    inside = jnp.where(active, 1.0 - (argument / half) ** 2, 1.0)
-    return jnp.where(active, jnp.i0(beta * jnp.sqrt(inside)) / jnp.i0(beta), 0.0)
+    inside = jnp.where(active, 1.0 - (argument / half) ** 2, like(1, argument))
+    return jnp.where(
+        active, jnp.i0(beta * jnp.sqrt(inside)) / jnp.i0(beta), like(0, argument)
+    )
 
 
 def bump_stencil(query, origin, spacing, profile, beta, scale):

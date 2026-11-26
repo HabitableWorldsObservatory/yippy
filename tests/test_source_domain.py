@@ -70,6 +70,50 @@ def test_nonfinite_source_is_zero_and_flagged(coros, kind):
     assert np.isfinite(np.asarray(result.image.data)).all()
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_host_coordinates_keep_hull_admission(coros, kind):
+    """The radius-6 disk and square hull allow 1e-6 of the circumradius.
+
+    These host coordinates straddle the slack limit but round to the same
+    float32 number. A float32 reader must distinguish their masks.
+    """
+    coro = coros[kind]
+    radius = HULL if kind == "1d" else np.sqrt(2) * HULL
+    x = HULL + radius * 1e-6 + np.array([-1e-8, 2.5e-8])
+    y = np.zeros_like(x)
+    assert np.float32(x[0]) == np.float32(x[1])
+
+    def read():
+        return coro.source_psfs(None, x, y)
+
+    for result in (read(), jax.jit(read)()):
+        np.testing.assert_array_equal(result.valid, [True, False])
+        np.testing.assert_array_equal(result.image.data[1], 0)
+
+    def admission(y):
+        return coro.source_psfs(None, x, y).valid
+
+    # The concrete x values still retain host precision when y is traced.
+    masks = jax.jit(jax.vmap(admission))(jnp.zeros((2, x.size)))
+    np.testing.assert_array_equal(masks, [[True, False], [True, False]])
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_scalar_read_reuses_compiled_kernel(coros, kind, caplog):
+    """Changing Python scalar coordinates reuses one PSF read kernel."""
+    backend = coros[kind]._offaxis_backend
+    with jax.log_compiles():
+        images = [backend.create_psf(x, 0.17).data for x in (0.13, 0.14, 0.15, 0.14)]
+    compilations = [
+        record
+        for record in caplog.records
+        if "Compiling jit(_create_psf)" in record.message
+    ]
+    assert len(compilations) == 1
+    assert not np.array_equal(images[0], images[1])
+    np.testing.assert_array_equal(images[1], images[3])
+
+
 def test_one_dimensional_wing_between_stamp_and_hull_is_kept(coros):
     """Fails if the 1D read drops the tabulated wing past the stamp edge.
 

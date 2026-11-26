@@ -6,6 +6,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.precision import like
 
 from .sinc import Domain, MemoryBudget, ReadPolicy
 from .sinc.evidence import BoundKind, Reason, Status
@@ -153,17 +154,17 @@ def blend_read(
     )
     bits = bits | jnp.where(finite, jnp.uint32(0), jnp.uint32(Reason.NONFINITE_QUERY))
     return InterpolationRead(
-        jnp.where(valid, image, jnp.nan),
+        jnp.where(valid, image, like(jnp.nan, image)),
         valid,
         jnp.asarray(False),
         jnp.where(valid, jnp.int32(Status.FALLBACK), jnp.int32(Status.REFUSED)),
         bits,
         jnp.asarray(False),
         jnp.int32(BoundKind.UNKNOWN),
-        jnp.asarray(jnp.inf),
-        jnp.asarray(jnp.nan),
+        like(jnp.inf, image),
+        like(jnp.nan, image),
         ReadLedger(
-            jnp.array([jnp.inf]),
+            like([jnp.inf], image),
             jnp.zeros(1, jnp.int32),
             jnp.ones(1, bool),
             ("blend_error",),

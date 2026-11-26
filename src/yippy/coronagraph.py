@@ -11,7 +11,9 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import is_traced
 from hwoutils.memory import DEFAULT_MAX_BYTES, admit
+from hwoutils.precision import like
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -82,7 +84,7 @@ def _stellar_exp(log_values):
         max_log = np.nextafter(max_log, dtype.type(-np.inf))
     overflow = log_values > max_log
     safe_log = jnp.where(overflow, 0, log_values)
-    return jnp.where(overflow, jnp.inf, jnp.exp(safe_log))
+    return jnp.where(overflow, like(jnp.inf, log_values), jnp.exp(safe_log))
 
 
 def _declared_band(offaxis_header, stellar_header):
@@ -107,6 +109,14 @@ def _declared_band(offaxis_header, stellar_header):
             f"offax_psf.fits has {offaxis}, stellar_intens.fits has {stellar}"
         )
     return None if same_wavelength(*offaxis) else Band(*offaxis)
+
+
+class _StellarLogSpline(interpax.CubicSpline):
+    """Expose the fitted knot and coefficient arrays as model-owned leaves."""
+
+
+class _StellarLinearSpline(interpax.PchipInterpolator):
+    """Expose the bounded PCHIP arrays as model-owned leaves."""
 
 
 class Coronagraph(AbstractTableCoronagraph):
@@ -147,8 +157,8 @@ class Coronagraph(AbstractTableCoronagraph):
     bandpass: Band | None
     band_averaged: bool = eqx.field(static=True)
     _offaxis_backend: object
-    _stellar_ln_interp: interpax.CubicSpline
-    _stellar_linear_interp: interpax.PchipInterpolator | None
+    _stellar_ln_interp: _StellarLogSpline
+    _stellar_linear_interp: _StellarLinearSpline | None
     _stellar_samples: jax.Array
     _records: tuple[PerformanceCurves, ...]
     uniform_sky_profile: SampledProfile
@@ -234,9 +244,9 @@ class Coronagraph(AbstractTableCoronagraph):
         self._stellar_linear_interp = None
         log_samples = samples
         if stellar.zero_pixels.any():
-            self._stellar_linear_interp = interpax.PchipInterpolator(diams_lod, samples)
+            self._stellar_linear_interp = _StellarLinearSpline(diams_lod, samples)
             log_samples = jnp.where(jnp.asarray(stellar.zero_pixels), 1, samples)
-        self._stellar_ln_interp = interpax.CubicSpline(diams_lod, jnp.log(log_samples))
+        self._stellar_ln_interp = _StellarLogSpline(diams_lod, jnp.log(log_samples))
         records = tuple(host._prepare_record(rule) for rule in rules)
         self._records = tuple(_jax_record(record) for record in records)
         self.uniform_sky_profile = _jax_record(host.uniform_sky_profile)
@@ -321,8 +331,54 @@ class Coronagraph(AbstractTableCoronagraph):
             ratio = frame.lod_to_arcsec(
                 frame.reference_wavelength_nm
             ) / profile.frame.lod_to_arcsec(profile.frame.reference_wavelength_nm)
-            separation_lod = jnp.asarray(separation_lod) * ratio
+            dtype = jnp.result_type(
+                profile.values, profile.separation_lod, *jax.tree.leaves(separation_lod)
+            )
+            separation_lod = jnp.asarray(separation_lod, dtype=dtype)
+            separation_lod = separation_lod * like(ratio, separation_lod)
         return profile.evaluate(separation_lod)
+
+    def uniform_sky_map(self, wavelength_nm, *, grid: PixelGrid) -> Image:
+        """Return dimensionless transmission at the requested pixel centers.
+
+        Args:
+            wavelength_nm: Wavelength in nm. The fixed table ignores it.
+            grid: Grid on which to sample the transmission.
+
+        Returns:
+            The intensive transmission image on ``grid``.
+        """
+        sky = self.sky_trans
+        geometry = (grid.basis, getattr(grid.orientation, "pa_y_deg", None))
+        if grid is sky.grid or (
+            not any(map(is_traced, jax.tree.leaves(geometry))) and grid == sky.grid
+        ):
+            return sky
+        return super().uniform_sky_map(wavelength_nm, grid=grid)
+
+    def off_axis_psf(self, wavelength_nm, separation_lod, grid: PixelGrid) -> Image:
+        """Return cell-integrated source fractions for a source along +x.
+
+        Args:
+            wavelength_nm: Wavelength in nm. The fixed table ignores it.
+            separation_lod: Source separation along +x in lambda/D.
+            grid: Grid of the returned image.
+
+        Returns:
+            Flux fraction per cell, or zero for a source outside the domain.
+        """
+        xp = array_namespace(separation_lod)
+        offsets = self._offaxis_backend.x_offsets
+        dtype = jnp.result_type(offsets, *jax.tree.leaves(separation_lod))
+        result = self.source_psfs(
+            wavelength_nm, separation_lod, xp.zeros(1, dtype=dtype), grid=grid
+        )
+        data = result.image.data[0]
+        return replace(
+            result.image,
+            data=jnp.where(result.valid[0], data, like(0, data)),
+            leading_axes=(),
+        )
 
     def _find_record(self, rule, leakage_rule):
         return next(
@@ -402,13 +458,9 @@ class Coronagraph(AbstractTableCoronagraph):
         if hasattr(x_lod, "unit") or hasattr(y_lod, "unit"):
             raise TypeError("source coordinates must be floats in lambda/D")
         backend = self._offaxis_backend
-        xp = (
-            array_namespace(x_lod, y_lod)
-            if hasattr(backend, "create_psfs_with_info")
-            else jnp
-        )
-        x = xp.atleast_1d(xp.asarray(x_lod))
-        y = xp.atleast_1d(xp.asarray(y_lod))
+        xp_x, xp_y = array_namespace(x_lod), array_namespace(y_lod)
+        x = xp_x.atleast_1d(xp_x.asarray(x_lod))
+        y = xp_y.atleast_1d(xp_y.asarray(y_lod))
         if x.ndim != 1 or x.shape != y.shape:
             raise ValueError("Coordinates must be equal-length vectors")
         if hasattr(backend, "create_psfs_with_info"):
@@ -416,18 +468,24 @@ class Coronagraph(AbstractTableCoronagraph):
             # image of a source it refuses is zero here, not the NaN of its read.
             read = backend.create_psfs_with_info(x, y)
             accepted = jnp.asarray(read.accepted, bool)
-            intensity = jnp.where(accepted[:, None, None], read.intensity, 0.0)
+            intensity = jnp.where(
+                accepted[:, None, None], read.intensity, like(0, read.intensity)
+            )
             image = fraction_image(intensity, self.grid, ("source",), backend.measure)
             return SourcePSFs(image, accepted)
-        finite = jnp.isfinite(x) & jnp.isfinite(y)
-        x, y = jnp.where(finite, x, 0.0), jnp.where(finite, y, 0.0)
-        # The read clamps to the outermost ring, so it is finite and
-        # differentiable for any position; the source domain is the node hull.
+        # Admission uses the supplied coordinates before entering the working
+        # precision of the numerical read.
         inside = backend.in_source_domain(x, y)
+        dtype = backend._coordinate_dtype(x_lod, y_lod)
+        x, y = jnp.asarray(x, dtype=dtype), jnp.asarray(y, dtype=dtype)
+        x, y = jnp.where(inside, x, 0), jnp.where(inside, y, 0)
         image = backend.create_psfs(x, y)
-        valid = finite & inside & jnp.all(jnp.isfinite(image.data), axis=(-1, -2))
+        valid = inside & jnp.all(jnp.isfinite(image.data), axis=(-1, -2))
         return SourcePSFs(
-            replace(image, data=jnp.where(valid[:, None, None], image.data, 0.0)),
+            replace(
+                image,
+                data=jnp.where(valid[:, None, None], image.data, like(0, image.data)),
+            ),
             valid,
         )
 

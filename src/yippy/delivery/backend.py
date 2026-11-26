@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import canonical
+from hwoutils.precision import like
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
 
@@ -69,11 +70,11 @@ class DeliveryBackend(eqx.Module):
     blend_offsets: jax.Array | None
     x_offsets: jax.Array
     y_offsets: jax.Array
-    conversion: float
-    pitch_lod: float
+    conversion: float = eqx.field(static=True)
+    pitch_lod: float = eqx.field(static=True)
     measure: Measure = eqx.field(static=True)
     grid: PixelGrid
-    psf_shape: tuple[int, int]
+    psf_shape: tuple[int, int] = eqx.field(static=True)
     requested: str = eqx.field(static=True)
     fallback_reasons: int = eqx.field(static=True)
     n_psfs: int = eqx.field(static=True)
@@ -172,23 +173,20 @@ class DeliveryBackend(eqx.Module):
         if (size + 2 * pad) % 2:
             pad += 1
         fft_size = size + 2 * pad
-        return (
-            synthesize_psf_idw(
-                query[0],
-                query[1],
-                self.pitch_lod,
-                self.blend_nodes,
-                self.blend_offsets[:, 0],
-                self.blend_offsets[:, 1],
-                jnp.fft.rfftfreq(fft_size),
-                jnp.fft.fftfreq(fft_size),
-                pad,
-                False,
-                False,
-                "2d",
-            )
-            * self.conversion
-        )
+        return synthesize_psf_idw(
+            query[0],
+            query[1],
+            like(self.pitch_lod, query),
+            self.blend_nodes,
+            self.blend_offsets[:, 0],
+            self.blend_offsets[:, 1],
+            jnp.fft.rfftfreq(fft_size, dtype=query.dtype),
+            jnp.fft.fftfreq(fft_size, dtype=query.dtype),
+            pad,
+            False,
+            False,
+            "2d",
+        ) * like(self.conversion, query)
 
     def create_psf_with_info(self, x_lod, y_lod):
         """Read a fixed product and return photon-unit image and diagnostics.
@@ -217,7 +215,7 @@ class DeliveryBackend(eqx.Module):
     def _read_query(self, query, prepared):
         finite = jnp.all(jnp.isfinite(query)) if prepared is None else prepared.finite
         if self.reader is None:
-            safe = jnp.where(finite, query, jnp.zeros(2))
+            safe = jnp.where(finite, query, jnp.zeros_like(query))
             return blend_read(
                 self._blend_image(safe),
                 finite,
@@ -228,7 +226,7 @@ class DeliveryBackend(eqx.Module):
             )
         result = self.reader._read_prepared(prepared, jnp.int32(0))
         ledger = result.ledger
-        factor = self.conversion
+        factor = like(self.conversion, result.intensity)
         converted = InterpolationRead(
             result.intensity * factor,
             result.accepted,
@@ -246,7 +244,7 @@ class DeliveryBackend(eqx.Module):
                 ledger.term_ids,
                 "incident_photon_per_pixel:" + self.product_identity,
                 "absolute_max_pixel",
-                ledger.profile_id + f":photon-per-pixel:conversion-{factor}",
+                ledger.profile_id + f":photon-per-pixel:conversion-{self.conversion}",
                 ledger.bound_kind,
             ),
             jnp.int32(1),
@@ -277,7 +275,7 @@ class DeliveryBackend(eqx.Module):
 
             def fallback():
                 fallback_result = blend_read(
-                    self._blend_image(jnp.where(finite, query, jnp.zeros(2))),
+                    self._blend_image(jnp.where(finite, query, jnp.zeros_like(query))),
                     finite,
                     fallback=True,
                 )
@@ -298,7 +296,7 @@ class DeliveryBackend(eqx.Module):
                         fallback_result.status,
                         bits | jnp.uint32(Reason.FALLBACK_USED),
                         jnp.int32(0),
-                        jnp.asarray(jnp.nan),
+                        like(jnp.nan, result.intensity),
                     ),
                 )
 
