@@ -432,7 +432,11 @@ class AbstractGridReader(AbstractImageReader):
         grid = self.grid.source
         reflected = self.grid.reflection.kind != "none"
         finite = xp.isfinite(points)
-        clean = xp.where(finite, points, 0.0)
+        clean = xp.where(
+            finite,
+            points,
+            jnp.zeros((), dtype=points.dtype) if xp is jnp else 0.0,
+        )
         if xp is jnp:
             if not jnp.issubdtype(clean.dtype, jnp.floating):
                 clean = like(clean, self._safe_query)
@@ -572,7 +576,7 @@ class AbstractGridReader(AbstractImageReader):
             self._safe_query, temporary_product, gain, grid=self.grid
         )
         return ImageRead(
-            jnp.where(accepted, image, jnp.nan),
+            jnp.where(accepted, image, like(jnp.nan, image)),
             accepted,
             sampling_ok,
             jnp.asarray(
@@ -676,7 +680,7 @@ class Interpolator(AbstractGridReader):
             values = jax.lax.fori_loop(
                 0, 32, source_row, jnp.zeros(tile_size, dtype=weight.dtype)
             )
-            values = jnp.where(mask, values, 0.0)
+            values = jnp.where(mask, values, like(0, values))
             return jax.lax.dynamic_update_slice(output, values, (tile * tile_size,))
 
         output = jax.lax.fori_loop(

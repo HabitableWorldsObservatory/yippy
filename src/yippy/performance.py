@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.precision import like
 from optixstuff.grids import Image
 from optixstuff.performance import (
     CORE_WINDOW_LOD,
@@ -172,25 +173,26 @@ def stellar_intensity_curves(
         raise ValueError("interpolation must be 'keys' or 'quintic'")
     grid = backend.stellar_grid
     radii = profile_radii(grid.shape, (grid.center_y, grid.center_x))
-    nodes = radii * grid.step
     knots = backend._stellar_ln_interp.x
-    diameter = jnp.asarray(stellar_diameter_lod)
+    nodes = like(radii * grid.step, knots)
+    diameter = like(stellar_diameter_lod, knots)
     valid = (diameter >= 0) & (diameter <= knots[-1])
     image = (
-        backend.stellar_map(None, jnp.clip(diameter, 0.0, knots[-1]), grid=None)
+        backend.stellar_map(
+            None, jnp.clip(diameter, like(0, diameter), knots[-1]), grid=None
+        )
         .integrated()
         .data
     )
-    image = jnp.asarray(image, dtype=jnp.asarray(nodes).dtype)
     profile = azimuthal_mean_profile(
         image,
         (grid.center_y, grid.center_x),
-        jnp.asarray(radii),
+        like(radii, image),
         interpolation=interpolation,
     )
     return SampledProfile(
         nodes,
-        jnp.where(valid, profile, jnp.nan),
+        jnp.where(valid, profile, like(jnp.nan, profile)),
         quantity="stellar_ring_mean_per_pixel",
         frame=grid.frame,
         interpolation="linear",

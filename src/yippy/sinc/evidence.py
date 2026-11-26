@@ -444,7 +444,11 @@ class UnknownErrorModel(AbstractErrorModel):
             jnp.ones(8, dtype=jnp.bool_).at[-1].set(grid.reflection.kind != "none")
         )
         return Ledger(
-            jnp.where(applicable, jnp.full((), jnp.inf, source_xy_lod.dtype), 0.0),
+            jnp.where(
+                applicable,
+                jnp.full((), jnp.inf, source_xy_lod.dtype),
+                jnp.zeros((), source_xy_lod.dtype),
+            ),
             jnp.zeros(8, dtype=jnp.int32),
             applicable,
             terms,

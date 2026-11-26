@@ -14,6 +14,7 @@ from hwoutils.fft import (
     fft_shift_x,
     fft_shift_y,
 )
+from hwoutils.precision import like
 from jax import lax
 
 
@@ -369,7 +370,8 @@ def _safe_hypot(x, y):
     """
     r2 = x**2 + y**2
     positive = r2 > 0
-    return jnp.where(positive, jnp.sqrt(jnp.where(positive, r2, 1.0)), 0.0)
+    safe_radius = jnp.sqrt(jnp.where(positive, r2, like(1, r2)))
+    return jnp.where(positive, safe_radius, like(0, r2))
 
 
 def clamp_to_radius(x, y, radius):
@@ -392,7 +394,8 @@ def clamp_to_radius(x, y, radius):
     """
     r = _safe_hypot(x, y)
     outside = r > radius
-    scale = jnp.where(outside, radius / jnp.where(outside, r, 1.0), 1.0)
+    one = like(1, r)
+    scale = jnp.where(outside, radius / jnp.where(outside, r, one), one)
     return x * scale, y * scale
 
 
@@ -616,10 +619,18 @@ def _blend_windows(spec, weights, shift_x, shift_y, n_pad, shape):
     # Rows are cut before the x transform: each row's inverse is independent.
     planes = jnp.fft.ifft(spec, axis=1)[:, n_pad : n_pad + h, :]
     planes = jnp.fft.irfft(planes, n=w_pad, axis=2)[:, :, n_pad : n_pad + w]
-    rows = jnp.arange(h)[None, :, None] - _whole_pixel_shift(shift_y)[:, None, None]
-    cols = jnp.arange(w)[None, None, :] - _whole_pixel_shift(shift_x)[:, None, None]
+    rows = (
+        jnp.arange(h, dtype=shift_y.dtype)[None, :, None]
+        - _whole_pixel_shift(shift_y)[:, None, None]
+    )
+    cols = (
+        jnp.arange(w, dtype=shift_x.dtype)[None, None, :]
+        - _whole_pixel_shift(shift_x)[:, None, None]
+    )
     inside = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
-    return jnp.sum(jnp.where(inside, planes, 0.0) * weights[:, None, None], axis=0)
+    return jnp.sum(
+        jnp.where(inside, planes, like(0, planes)) * weights[:, None, None], axis=0
+    )
 
 
 def separable_read_plan(
@@ -680,7 +691,7 @@ def separable_read_plan(
         span_x = x1 - x0
 
         # Avoid division by zero if query lands exactly on a node or grid is 1 point
-        span_x = jnp.where(span_x == 0, 1.0, span_x)
+        span_x = jnp.where(span_x == 0, like(1, span_x), span_x)
 
         # Normalize distance (0.0 to 1.0)
         u = (_x - x0) / span_x
@@ -690,7 +701,7 @@ def separable_read_plan(
         weights = jnp.array([1.0 - u, u])
 
         # Safety: If span was 0, force weight to [1, 0]
-        weights = jnp.where(x1 == x0, jnp.array([1.0, 0.0]), weights)
+        weights = jnp.where(x1 == x0, jnp.array([1.0, 0.0], weights.dtype), weights)
 
     else:  # 2D Case
         # Neighbors order from get_near_inds_offsets_2D is:
@@ -704,8 +715,8 @@ def separable_read_plan(
         span_y = y1 - y0
 
         # Avoid div by zero
-        span_x = jnp.where(span_x == 0, 1.0, span_x)
-        span_y = jnp.where(span_y == 0, 1.0, span_y)
+        span_x = jnp.where(span_x == 0, like(1, span_x), span_x)
+        span_y = jnp.where(span_y == 0, like(1, span_y), span_y)
 
         # Normalize coordinates (0.0 to 1.0)
         u = (_x - x0) / span_x
@@ -725,7 +736,9 @@ def separable_read_plan(
 
         # Safety for coincident nodes
         weights = jnp.where(
-            (x1 == x0) & (y1 == y0), jnp.array([1.0, 0.0, 0.0, 0.0]), weights
+            (x1 == x0) & (y1 == y0),
+            jnp.array([1.0, 0.0, 0.0, 0.0], weights.dtype),
+            weights,
         )
 
     # Shift in the canonical quadrant; reflect only after interpolation so
@@ -820,7 +833,8 @@ def synthesize_psf_separable(
     # Apply X-Shift
     # kx: (W_freq,). shift_x: (K,).
     # Broadcast: (K, 1, W_freq)
-    spec = spec * jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
+    phase_x = -2 * jnp.pi * shift_x[:, None, None] * kx[None, None, :]
+    spec = spec * jnp.exp(1j * phase_x)
 
     # FFT Y (Complex-to-Complex, Axis 1)
     spec = jnp.fft.fft(spec, axis=1)
@@ -828,7 +842,8 @@ def synthesize_psf_separable(
     # Apply Y-Shift
     # ky: (H_pad,). shift_y: (K,).
     # Broadcast: (K, H_pad, 1)
-    spec = spec * jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
+    phase_y = -2 * jnp.pi * shift_y[:, None, None] * ky[None, :, None]
+    spec = spec * jnp.exp(1j * phase_y)
 
     psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 
@@ -856,13 +871,15 @@ def _angular_bracket(theta_q, theta_n, member):
     and the linear weight of the first (the second gets ``1 - w_ahead``). The
     angle is periodic. A ring with one member returns it twice.
     """
-    inf = jnp.inf
-    d_ahead = jnp.where(member, (theta_n - theta_q) % (2.0 * jnp.pi), inf)
-    d_behind = jnp.where(member, (theta_q - theta_n) % (2.0 * jnp.pi), inf)
+    delta = theta_n - theta_q
+    inf = like(jnp.inf, delta)
+    turn = like(2 * jnp.pi, delta)
+    d_ahead = jnp.where(member, delta % turn, inf)
+    d_behind = jnp.where(member, -delta % turn, inf)
     ahead, behind = jnp.argmin(d_ahead), jnp.argmin(d_behind)
     span = d_ahead[ahead] + d_behind[behind]
-    w_ahead = d_behind[behind] / jnp.where(span > 0, span, 1.0)
-    return ahead, behind, jnp.where(span > 0, w_ahead, 0.5)
+    w_ahead = d_behind[behind] / jnp.where(span > 0, span, like(1, span))
+    return ahead, behind, jnp.where(span > 0, w_ahead, like(0.5, w_ahead))
 
 
 def idw_read_plan(
@@ -923,21 +940,20 @@ def idw_read_plan(
     # through _safe_hypot to keep the gradient finite there.
     r_q = _safe_hypot(_x, _y)
     at_origin = r_q == 0
-    theta_q = jnp.arctan2(_y, jnp.where(at_origin, 1.0, _x))
+    theta_q = jnp.arctan2(_y, jnp.where(at_origin, like(1, _x), _x))
     r_n = jnp.hypot(flat_x_offsets, flat_y_offsets)
     theta_n = jnp.arctan2(flat_y_offsets, flat_x_offsets)
 
     # Bracketing ring radii; a missing side repeats the other, giving t = 0.
-    inf = jnp.inf
+    inf = like(jnp.inf, r_n)
     below = r_n <= r_q + _RING_TOL * (1.0 + r_q)
     r_lo = jnp.max(jnp.where(below, r_n, -inf))
     r_hi = jnp.min(jnp.where(below, inf, r_n))
     r_lo = jnp.where(jnp.isfinite(r_lo), r_lo, r_hi)
     r_hi = jnp.where(jnp.isfinite(r_hi), r_hi, r_lo)
     gap = r_hi - r_lo
-    t = jnp.where(
-        gap > 0, jnp.clip((r_q - r_lo) / jnp.where(gap > 0, gap, 1.0), 0, 1), 0.0
-    )
+    safe_gap = jnp.where(gap > 0, gap, like(1, gap))
+    t = jnp.where(gap > 0, jnp.clip((r_q - r_lo) / safe_gap, 0, 1), like(0, gap))
 
     inds, weights = [], []
     for ring_r, ring_w in ((r_lo, 1.0 - t), (r_hi, t)):
@@ -1016,11 +1032,13 @@ def synthesize_psf_idw(
 
     # FFT X
     spec = jnp.fft.rfft(neighbors, axis=2)
-    spec = spec * jnp.exp(-2j * jnp.pi * shift_x[:, None, None] * kx[None, None, :])
+    phase_x = -2 * jnp.pi * shift_x[:, None, None] * kx[None, None, :]
+    spec = spec * jnp.exp(1j * phase_x)
 
     # FFT Y
     spec = jnp.fft.fft(spec, axis=1)
-    spec = spec * jnp.exp(-2j * jnp.pi * shift_y[:, None, None] * ky[None, :, None])
+    phase_y = -2 * jnp.pi * shift_y[:, None, None] * ky[None, :, None]
+    spec = spec * jnp.exp(1j * phase_y)
 
     psf = _blend_windows(spec, weights, shift_x, shift_y, n_pad, flat_psfs.shape[-2:])
 

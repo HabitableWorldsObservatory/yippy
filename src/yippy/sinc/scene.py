@@ -90,7 +90,6 @@ class SceneRenderer(AbstractSceneOperator):
             shape (n_nodes, 2) as (row, column).
         product_index: Index of the one product this renderer serves.
         margin_nodes: Lattice nodes added around the touched set.
-        accumulate: Contraction arithmetic, "float64" or "storage".
         scale: Constant multiplied into every rendered image.
     """
 
@@ -100,7 +99,7 @@ class SceneRenderer(AbstractSceneOperator):
     nodes: I32
     product_index: int = eqx.field(static=True)
     margin_nodes: int = eqx.field(static=True)
-    accumulate: str = eqx.field(static=True)
+    _storage_accumulation: bool = eqx.field(static=True)
     scale: float = eqx.field(static=True)
     _corner_xy: tuple[int, int] = eqx.field(static=True)
 
@@ -125,9 +124,8 @@ class SceneRenderer(AbstractSceneOperator):
             margin_nodes: Lattice nodes added around the touched set in every
                 direction, so positions may move by that many node spacings (in
                 a fit, for example) before a render refuses.
-            accumulate: ``"float64"`` (binary64 accumulation) or ``"storage"``
-                (accumulation in the table's storage dtype). None uses float64
-                with a float64 reader and storage precision otherwise.
+            accumulate: ``"float64"`` requires a binary64 reader; ``"storage"``
+                uses the table dtype. None uses the reader's working precision.
             scale: Constant that ``render`` multiplies into the image, for
                 example a photon-unit conversion.
         """
@@ -138,15 +136,11 @@ class SceneRenderer(AbstractSceneOperator):
             raise ValueError("product_index must be an available Python int")
         if type(margin_nodes) is not int or margin_nodes < 0:
             raise ValueError("margin_nodes must be a nonnegative integer")
-        if accumulate is None:
-            accumulate = (
-                "float64" if reader._safe_query.dtype == jnp.float64 else "storage"
-            )
-        if accumulate not in ("float64", "storage"):
+        if accumulate not in (None, "float64", "storage"):
             raise ValueError("accumulate must be 'float64' or 'storage'")
         if accumulate == "float64":
             require_float64("yippy.sinc scene float64 accumulation", reader._safe_query)
-        self.accumulate = accumulate
+        self._storage_accumulation = accumulate == "storage"
         self.scale = float(scale)
         positions = reader._prepare(source_xy_lod)
         if positions.phase.ndim != 2 or positions.phase.shape[0] == 0:
@@ -247,8 +241,18 @@ class SceneRenderer(AbstractSceneOperator):
         check_array(self.lookup, self.lookup.shape, (jnp.int32,))
         if self.table.ndim != 2 or not 0 < self.table.shape[0] <= count:
             raise ValueError("Scene table requires one row per stored touched node")
-        if self.accumulate not in ("float64", "storage"):
-            raise ValueError("accumulate must be 'float64' or 'storage'")
+
+    @property
+    def accumulate(self):
+        """Report the current contraction precision.
+
+        Returns:
+            "float64" for binary64 working precision, or "storage" for
+            storage accumulation or a float32 reader.
+        """
+        if self._storage_accumulation or self.reader._safe_query.dtype == jnp.float32:
+            return "storage"
+        return "float64"
 
     @property
     def _groups(self):
@@ -268,8 +272,9 @@ class SceneRenderer(AbstractSceneOperator):
         # Partial images per quadrant, then the image.
         working_bytes += (self._groups + 1) * pixels * 8
         # A narrower table is widened one block of detector columns at a time.
-        if self.table.dtype != jnp.float64 and self.accumulate == "float64":
-            working_bytes += rows * min(CONTRACT_COLUMNS, pixels) * 8
+        dtype = self.reader._safe_query.dtype
+        if not self._storage_accumulation and self.table.dtype != dtype:
+            working_bytes += rows * min(CONTRACT_COLUMNS, pixels) * dtype.itemsize
         limit = self.reader.memory.max_scratch_bytes
         if working_bytes > limit:
             raise MemoryLimit(f"scene scratch {working_bytes} bytes exceeds budget")
@@ -278,7 +283,10 @@ class SceneRenderer(AbstractSceneOperator):
         """Compute one stencil per coordinate along a raster axis."""
         reader = self.reader
         xp = array_namespace(values)
-        other = xp.broadcast_to(reader._safe_position[1 - axis], values.shape)
+        other = reader._safe_position[1 - axis]
+        if xp is jnp:
+            other = like(other, values)
+        other = xp.broadcast_to(other, values.shape)
         points = xp.stack((other, values) if axis else (values, other), axis=-1)
         prepared = reader._prepare(points)
         covered = covered_start(
@@ -301,11 +309,11 @@ class SceneRenderer(AbstractSceneOperator):
         )
 
     def _contract(self, amplitudes):
-        """Float64 partial images [groups, pixels] of amplitudes [groups, rows]."""
+        """Contract node amplitudes [groups, rows] to partial detector images."""
         table = self.table
         # Full precision keeps accelerator backends from a reduced-precision product.
         highest = jax.lax.Precision.HIGHEST
-        if table.dtype == jnp.float64 or self.accumulate == "storage":
+        if table.dtype == amplitudes.dtype or self._storage_accumulation:
             product = jnp.matmul(
                 amplitudes.astype(table.dtype), table, precision=highest
             )
@@ -322,7 +330,7 @@ class SceneRenderer(AbstractSceneOperator):
             return jax.lax.dynamic_update_slice_in_dim(partial, value, index * width, 1)
 
         partial = jax.lax.fori_loop(
-            0, blocks, block, jnp.zeros((amplitudes.shape[0], pixels))
+            0, blocks, block, jnp.zeros((amplitudes.shape[0], pixels), amplitudes.dtype)
         )
         if blocks * width < pixels:
             tail = table[:, blocks * width :].astype(amplitudes.dtype)
@@ -360,7 +368,7 @@ class SceneRenderer(AbstractSceneOperator):
             reader._safe_query, product, reader._gain_xy, grid=reader.grid
         )
         return ImageRead(
-            jnp.where(accepted, image, jnp.nan),
+            jnp.where(accepted, image, like(jnp.nan, image)),
             accepted,
             sampling_ok,
             jnp.asarray(
@@ -435,7 +443,7 @@ class SceneRenderer(AbstractSceneOperator):
         usable = readable & stored
         sampling_ok = jnp.all(usable | ~contributing)
         accepted = sampling_ok & (reader.policy.mode == "sampling")
-        amount = jnp.where(usable, flux, 0.0)
+        amount = jnp.where(usable, flux, like(0, flux))
         spread = amount[:, None, None] * weight[:, 1, :, None] * weight[:, 0, None, :]
         amplitudes = (
             jnp.zeros((groups, rows + 1), dtype=flux.dtype)
@@ -580,7 +588,7 @@ class SceneRenderer(AbstractSceneOperator):
         readable = finite_y[:, None] & finite_x[None, :] & member & covered & stored
         usable = finite & member & covered & stored
         sampling = reader.policy.mode == "sampling"
-        amount = jnp.where(usable & sampling, scene, 0.0)
+        amount = jnp.where(usable & sampling, scene, like(0, scene))
         across, down = spreading
         folded = down.T @ amount @ across
         index_y, index_x = self.nodes[:, 0], self.nodes[:, 1]
