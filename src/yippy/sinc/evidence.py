@@ -9,7 +9,14 @@ import equinox as eqx
 import jax.numpy as jnp
 from hwoutils.memory import MemoryLimit as _SizeLimit
 
-from yippy.sinc._types import F64, I32, Boolean, check_array, check_static
+from yippy.sinc._types import (
+    FLOAT_DTYPES,
+    I32,
+    Boolean,
+    RealArray,
+    check_array,
+    check_static,
+)
 from yippy.sinc.domain import Domain
 
 if TYPE_CHECKING:
@@ -232,9 +239,7 @@ class Admission:
         """
         if self.grid is None:
             exception = AdmissionRefused
-            if self.reason_bits & Reason.PRECISION_UNAVAILABLE:
-                exception = PrecisionUnavailable
-            elif self.reason_bits & Reason.MEMORY_LIMIT:
+            if self.reason_bits & Reason.MEMORY_LIMIT:
                 exception = MemoryLimit
             raise exception(self)
         return self.grid
@@ -273,10 +278,6 @@ class MemoryLimit(AdmissionRefused, _SizeLimit):
     Also a ``hwoutils.memory.MemoryLimit``, so one ``except`` serves every
     library's size refusal.
     """
-
-
-class PrecisionUnavailable(AdmissionRefused):
-    """The execution configuration does not support required float64 reads."""
 
 
 class PlanRefused(ValueError):
@@ -349,7 +350,7 @@ class Ledger(eqx.Module):
         bound_kind: BoundKind of the whole ledger, scalar.
     """
 
-    bound: F64
+    bound: RealArray
     evidence: I32
     applicable: Boolean
     term_ids: tuple[str, ...] = eqx.field(static=True)
@@ -362,7 +363,7 @@ class Ledger(eqx.Module):
         """Validate the declared structure before numerical use."""
         check_static(self)
         size = len(self.term_ids)
-        check_array(self.bound, (size,), (jnp.float64,))
+        check_array(self.bound, (size,), FLOAT_DTYPES)
         check_array(self.evidence, (size,), (jnp.int32,))
         check_array(self.applicable, (size,), (jnp.bool_,))
         check_array(self.bound_kind, (), (jnp.int32,))
@@ -380,9 +381,9 @@ class AbstractErrorModel(eqx.Module):
     @abstractmethod
     def evaluate(
         self,
-        source_xy_lod: F64,
+        source_xy_lod: RealArray,
         product_index: I32,
-        weight_l1_xy: F64,
+        weight_l1_xy: RealArray,
         *,
         grid: "yippy.sinc.grid.SampledGrid",
     ) -> Ledger:
@@ -411,9 +412,9 @@ class UnknownErrorModel(AbstractErrorModel):
 
     def evaluate(
         self,
-        source_xy_lod: F64,
+        source_xy_lod: RealArray,
         product_index: I32,
-        weight_l1_xy: F64,
+        weight_l1_xy: RealArray,
         *,
         grid: "yippy.sinc.grid.SampledGrid",
     ) -> Ledger:
@@ -443,7 +444,7 @@ class UnknownErrorModel(AbstractErrorModel):
             jnp.ones(8, dtype=jnp.bool_).at[-1].set(grid.reflection.kind != "none")
         )
         return Ledger(
-            jnp.where(applicable, jnp.inf, 0.0),
+            jnp.where(applicable, jnp.full((), jnp.inf, source_xy_lod.dtype), 0.0),
             jnp.zeros(8, dtype=jnp.int32),
             applicable,
             terms,

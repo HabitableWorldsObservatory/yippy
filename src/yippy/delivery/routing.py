@@ -3,14 +3,11 @@
 import json
 from dataclasses import asdict
 
-import jax
-
 from yippy._version import __version__
 from yippy.sinc.evidence import (
     Admission,
     AdmissionRefused,
     MemoryLimit,
-    PrecisionUnavailable,
     Reason,
     Receipt,
     reason_names,
@@ -142,16 +139,6 @@ def route_interpolation(path, requested, options, downsample_shape, *, package=N
         ):
             raise
         return blend_result(("MEMORY_LIMIT",), int(Reason.MEMORY_LIMIT))
-    if not jax.config.x64_enabled:
-        if (
-            requested != "auto"
-            or manifest["layout"] == "quadrant_rectangle"
-            or (options.policy is not None and options.policy.mode != "sampling")
-        ):
-            raise PrecisionUnavailable("Enable jax_enable_x64 before sinc construction")
-        return blend_result(
-            ("PRECISION_UNAVAILABLE",), int(Reason.PRECISION_UNAVAILABLE)
-        )
     admission, domain, memory = admit_delivery(delivery, options)
     base.update(receipt_id=admission.receipt.identity, receipt=admission.receipt)
     if not admission.admitted:

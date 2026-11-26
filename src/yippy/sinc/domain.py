@@ -6,10 +6,17 @@ import sys
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from hwoutils.precision import like
 
-from yippy.sinc._types import F64, check_array, check_static
-from yippy.sinc.geometry import origin_xy, spacing_xy
-from yippy.sinc.kernel import KernelProfile, flush_subnormal
+from yippy.sinc._types import check_static
+from yippy.sinc.geometry import array_namespace, origin_xy, spacing_xy
+from yippy.sinc.kernel import (
+    KernelProfile,
+    _float32_ceiling,
+    flush_subnormal,
+    lattice_phase_start,
+)
 
 _RAW_PROFILE = KernelProfile()
 
@@ -20,22 +27,50 @@ class Domain(eqx.Module):
     Attributes:
         kind: Either "box" or "annulus".
         boundary: Either "closed" or "lower_closed_upper_open".
-        limits_xy_lod: Box limits, shape (2, 2): row 0 holds the lower (x, y)
-            and row 1 the upper (x, y), in lambda/D. Zero for an annulus.
-        radii_lod: Inner and outer radius, shape (2,), in lambda/D. Zero for
-            a box.
+
+    The box limits (``limits_xy_lod``, shape (2, 2): row 0 the lower (x, y),
+    row 1 the upper, in lambda/D, zero for an annulus) and the annulus radii
+    (``radii_lod``, shape (2,), inner and outer in lambda/D, zero for a box)
+    are host properties stored as immutable tuples.
     """
 
     kind: str = eqx.field(static=True)
     boundary: str = eqx.field(static=True)
-    limits_xy_lod: F64 = eqx.field(converter=jnp.asarray)
-    radii_lod: F64 = eqx.field(converter=jnp.asarray)
+    _limits: tuple = eqx.field(static=True)
+    _radii: tuple = eqx.field(static=True)
+
+    def __init__(self, kind, boundary, limits_xy_lod, radii_lod):
+        """Preserve the declared boundaries as immutable host floats.
+
+        Args:
+            kind: Either "box" or "annulus".
+            boundary: Either "closed" or "lower_closed_upper_open".
+            limits_xy_lod: Box limits, shape (2, 2): row 0 holds the lower (x, y)
+                and row 1 the upper (x, y), in lambda/D. Zero for an annulus.
+            radii_lod: Inner and outer radius, shape (2,), in lambda/D. Zero for
+                a box.
+        """
+        self.kind, self.boundary = kind, boundary
+        limits = np.asarray(limits_xy_lod, dtype=np.float64)
+        radii = np.asarray(radii_lod, dtype=np.float64)
+        if limits.shape != (2, 2) or radii.shape != (2,):
+            raise ValueError("Domain requires box limits [2, 2] and radii [2]")
+        self._limits = tuple(map(tuple, limits.tolist()))
+        self._radii = tuple(radii.tolist())
+
+    @property
+    def limits_xy_lod(self):
+        """Return the host box limits."""
+        return np.asarray(self._limits)
+
+    @property
+    def radii_lod(self):
+        """Return the host annular radii."""
+        return np.asarray(self._radii)
 
     def __check_init__(self):
         """Validate the declared structure before numerical use."""
         check_static(self)
-        check_array(self.limits_xy_lod, (2, 2), (jnp.float64,))
-        check_array(self.radii_lod, (2,), (jnp.float64,))
         if self.kind not in ("box", "annulus"):
             raise ValueError("Domain kind must be box or annulus")
         if self.boundary not in ("closed", "lower_closed_upper_open"):
@@ -47,13 +82,13 @@ class Domain(eqx.Module):
             ordered = self.limits_xy_lod[0] <= self.limits_xy_lod[1]
             if self.boundary != "closed":
                 ordered = self.limits_xy_lod[0] < self.limits_xy_lod[1]
-            if not bool(jnp.all(ordered)):
+            if not bool(np.all(ordered)):
                 raise ValueError("Box limits must be ordered and nonempty")
-            if bool(jnp.any(self.radii_lod != 0)):
+            if bool(np.any(self.radii_lod != 0)):
                 raise ValueError("Unused radii must be zero")
         else:
             inner, outer = self.radii_lod.tolist()
-            if not 0 <= inner < outer or bool(jnp.any(self.limits_xy_lod != 0)):
+            if not 0 <= inner < outer or bool(np.any(self.limits_xy_lod != 0)):
                 raise ValueError("Annulus requires ordered radii and zero box limits")
 
     def contains(self, source_xy_lod):
@@ -65,19 +100,99 @@ class Domain(eqx.Module):
         Returns:
             Scalar boolean, True if the query is inside the domain.
         """
-        query = flush_subnormal(source_xy_lod)
+        if array_namespace(source_xy_lod) is np:
+            return self._contains_host(source_xy_lod)
+        if source_xy_lod.ndim > 1:
+            return jax.vmap(self.contains)(source_xy_lod.reshape(-1, 2)).reshape(
+                source_xy_lod.shape[:-1]
+            )
+        query = flush_subnormal(
+            jax.lax.stop_gradient(source_xy_lod).astype(jnp.float32)
+        )
         if self.kind == "box":
-            low = jnp.all(query >= self.limits_xy_lod[0])
-            upper = query <= self.limits_xy_lod[1]
-            if self.boundary != "closed":
-                upper = query < self.limits_xy_lod[1]
-            return low & jnp.all(upper)
-        radius2 = jnp.sum(query * query)
-        lower = radius2 >= self.radii_lod[0] ** 2
-        upper = radius2 <= self.radii_lod[1] ** 2
-        if self.boundary != "closed":
-            upper = radius2 < self.radii_lod[1] ** 2
-        return lower & upper
+            lower, upper = self.limits_xy_lod
+            # Round a boundary toward the first allowed representable value.
+            # This preserves membership for the same represented query.
+            low = query >= like(_float32_ceiling(lower), query)
+            if self.boundary == "closed":
+                high = query <= like(-_float32_ceiling(-upper), query)
+            else:
+                high = query < like(_float32_ceiling(upper), query)
+            return jnp.all(low & high)
+        lower, upper = self.radii_lod**2
+        below_lower = _rounded_sum_below(query, lower, inclusive=False)
+        below_upper = _rounded_sum_below(
+            query, upper, inclusive=self.boundary == "closed"
+        )
+        return jnp.all(jnp.isfinite(query)) & ~below_lower & below_upper
+
+    def _within_radii(self, radius2, *, xp):
+        inner, outer = self.radii_lod**2
+        lower = radius2 >= xp.asarray(inner, dtype=radius2.dtype)
+        upper = xp.asarray(outer, dtype=radius2.dtype)
+        return lower & (
+            radius2 <= upper if self.boundary == "closed" else radius2 < upper
+        )
+
+    def _contains_host(self, points):
+        points = np.asarray(points, dtype=np.float64)
+        points = np.where(np.abs(points) < sys.float_info.min, 0.0, points)
+        if self.kind == "box":
+            lower, upper = self.limits_xy_lod
+            high = points <= upper if self.boundary == "closed" else points < upper
+            return np.all((points >= lower) & high, axis=-1)
+        return self._within_radii(np.sum(points**2, axis=-1), xp=np)
+
+
+def _rounded_sum_below(query, limit, *, inclusive):
+    """Compare two binary32 squares using the binary64 sum's rounding interval.
+
+    Binary32 squares have at most 48 significand bits. Two unsigned 24-bit
+    limbs store each product exactly. Compare their sum to the binary64
+    midpoint just above (inclusive) or below (exclusive) the limit, breaking
+    an exact midpoint tie toward the even significand.
+    """
+    if limit == 0:
+        return jnp.all(query == 0) if inclusive else jnp.asarray(False)
+    _, exponent = math.frexp(limit)
+    adjacent = math.nextafter(limit, math.inf if inclusive else -math.inf)
+    # Three 20-bit radix digits suffice for a 54-significant-bit midpoint.
+    midpoint = int(math.ldexp(limit, 60 - exponent)) + int(
+        math.ldexp(adjacent - limit, 59 - exponent)
+    )
+    even = (int(np.float64(limit).view(np.uint64)) & 1) == 0
+    tie_passes = even if inclusive else not even
+
+    # Clipping outside the largest possible boundary keeps all digit
+    # conversions in range even for a query near the binary32 maximum.
+    clipped = jnp.minimum(jnp.abs(query), math.ldexp(1.0, (exponent + 1) // 2 + 1))
+    mantissa, power = jnp.frexp(clipped)
+    significand = (mantissa * 2**24).astype(jnp.uint32)
+    high, low = significand >> 12, significand & 4095
+    bottom = low * low
+    middle = 2 * high * low + (bottom >> 12)
+    limbs = jnp.stack(
+        (high * high + (middle >> 12), ((middle & 4095) << 12) + (bottom & 4095))
+    )
+    terms = jnp.ldexp(
+        limbs.astype(query.dtype),
+        2 * power - exponent - jnp.array([[24], [48]], jnp.int32),
+    )
+    difference = jnp.int32(0)
+    for shift in (40, 20, 0):
+        scaled = terms * 2**20
+        digit = jnp.floor(scaled)
+        terms = scaled - digit
+        target = midpoint >> shift
+        if shift != 40:
+            target &= 2**20 - 1
+        difference = jnp.clip(
+            difference * 2**20 + jnp.sum(digit.astype(jnp.int32)) - target, -4, 4
+        )
+    # At a tie the larger square fits in the 60 bits compared above.
+    # Only the smaller square can leave a tail; its two limbs are disjoint.
+    equal = (difference == 0) & ~jnp.any(terms > 0)
+    return (difference < 0) | (equal & tie_passes)
 
 
 def normal_or_zero(value):
@@ -127,19 +242,34 @@ def coverage(query, lattice, reflected, profile=_RAW_PROFILE):
     Returns:
         Scalar boolean, True if the full stencil is covered.
     """
-    start = profile.stencil_start(query, origin_xy(lattice), spacing_xy(lattice))
-    size = jnp.asarray(lattice.shape[::-1], dtype=jnp.float64)
-    halo = float(profile.halo)
-    lower = halo + 1 - size if reflected else jnp.full((2,), halo)
-    upper = size - halo - profile.taps
-    return jnp.all(jnp.isfinite(start) & (start >= lower) & (start <= upper))
+    _, start = lattice_phase_start(
+        profile,
+        query,
+        origin_xy(lattice),
+        spacing_xy(lattice),
+        lattice.shape[::-1],
+        reflected,
+    )
+    return covered_start(start, lattice.shape[::-1], reflected, profile)
 
 
-@eqx.filter_jit
-def _candidate_membership(points, domain, lattice, reflected, profile):
-    return jax.vmap(
-        lambda q: domain.contains(q) & coverage(q, lattice, reflected, profile)
-    )(points)
+def covered_start(start, size, reflected, profile):
+    """Test the floating first tap before converting covered indices to int32.
+
+    Args:
+        start: First tap per axis (x first), shape (..., n_axes).
+        size: Stored node count per axis (x first).
+        reflected: Whether the table stores one reflected quadrant.
+        profile: Kernel profile giving the stencil and halo size.
+
+    Returns:
+        Boolean, True where every axis has its full stencil covered.
+    """
+    xp = array_namespace(start)
+    size = xp.asarray(size)
+    lower = profile.halo + 1 - size if reflected else profile.halo
+    upper = size - profile.halo - profile.taps
+    return xp.all(xp.isfinite(start) & (start >= lower) & (start <= upper), axis=-1)
 
 
 def safe_query(domain, lattice, reflected, profile=_RAW_PROFILE):
@@ -214,11 +344,12 @@ def safe_query(domain, lattice, reflected, profile=_RAW_PROFILE):
                         for sign in (-1, 1):
                             point = [value, sign * other]
                             candidates.append(point if axis == 0 else point[::-1])
-    points = jnp.asarray(candidates, dtype=jnp.float64)
-    valid = _candidate_membership(points, domain, lattice, reflected, profile).tolist()
-    for index, permitted in enumerate(valid):
-        if permitted:
-            return points[index]
+    points = np.asarray(candidates, dtype=np.float64)
+    valid = domain._contains_host(points) & coverage(
+        points, lattice, reflected, profile
+    )
+    if np.any(valid):
+        return points[np.argmax(valid)]
     return None
 
 
@@ -246,9 +377,9 @@ def restrict_domain(declared, override=None):
     if override.kind != declared.kind or override.boundary != declared.boundary:
         raise ValueError("Domain override must restrict declared geometry and boundary")
     if declared.kind == "box":
-        subset = jnp.all(
+        subset = np.all(
             override.limits_xy_lod[0] >= declared.limits_xy_lod[0]
-        ) & jnp.all(override.limits_xy_lod[1] <= declared.limits_xy_lod[1])
+        ) & np.all(override.limits_xy_lod[1] <= declared.limits_xy_lod[1])
     else:
         subset = (
             override.radii_lod[0] >= declared.radii_lod[0]
@@ -274,9 +405,8 @@ def validate_check_positions(positions, domain, lattice, reflected, profile=None
         ValueError: If a check lies outside the domain or stencil coverage.
     """
     profile = KernelProfile() if profile is None else profile
-    for position in positions:
-        query = jnp.asarray(position, dtype=jnp.float64)
-        if domain is not None and not bool(domain.contains(query)):
+    for point in np.asarray(positions, dtype=np.float64):
+        if domain is not None and not domain._contains_host(point):
             raise ValueError("DATA_INVALID: independent check outside served domain")
-        if not bool(coverage(query, lattice, reflected, profile)):
+        if not coverage(point, lattice, reflected, profile):
             raise ValueError("DATA_INVALID: independent check outside stencil coverage")

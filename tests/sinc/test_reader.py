@@ -7,10 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import eps, roundoff
 
 import yippy.sinc as sc
 from yippy.sinc.evidence import BoundKind, Reason, Status
-from yippy.sinc.geometry import origin_xy, spacing_xy
+from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
 from yippy.sinc.kernel import stencil
 from yippy.sinc.reader import read_batch, require_read
 
@@ -24,13 +25,23 @@ def test_off_node_analytic_and_scale(full_reader):
     """Fails on tap/axis/scale mistakes; 3e-7 bounds low-occupancy truncation.
 
     The largest source frequency is .16 cycles/lod at pitch .25 (8% of
-    Nyquist). The measured correct error is 2.912e-7; a shifted y stencil gives
-    1.1681e-6. The 3e-7 allowance resolves that mutation.
+    Nyquist). Check all tap indices against the host floor rule so a one-node
+    shift fails in either precision. The intensity bound adds 48 operations
+    for phase, kernel evaluation and two 32-tap sums.
+    Scaling a table adds one operation to the two contractions (32 epsilon units).
     """
     q = jnp.array([0.137, -0.219])
+    lattice = full_reader.grid.source
+    cell = np.floor(
+        (np.asarray(q, dtype=np.float64) - origin_xy(lattice)) / spacing_xy(lattice)
+    )
+    expected_nodes = cell.astype(np.int32)[:, None] + np.arange(-15, 17)
+    for select in (full_reader.stencil, eqx.filter_jit(full_reader.stencil)):
+        np.testing.assert_array_equal(select(q).nodes, expected_nodes)
     image = compiled_read(full_reader, q, jnp.int32(0))
     expected = analytic(q)
-    np.testing.assert_allclose(image.intensity, expected, atol=3e-7, rtol=0)
+    rounding = float(roundoff(float(expected.max()), n_ops=48, dtype=expected.dtype))
+    np.testing.assert_allclose(image.intensity, expected, atol=3e-7 + rounding, rtol=0)
     assert image.accepted and image.status == Status.SAMPLING_ADMITTED
     assert image.reason_bits == Reason.BOUND_UNKNOWN
     assert not image.bound_available and image.bound_kind == BoundKind.UNKNOWN
@@ -42,7 +53,7 @@ def test_off_node_analytic_and_scale(full_reader):
     np.testing.assert_allclose(
         compiled_read(scaled, q, jnp.int32(0)).intensity,
         7 * image.intensity,
-        rtol=3e-15,
+        rtol=32 * eps(image.intensity.dtype),
         atol=0,
     )
 
@@ -79,7 +90,7 @@ def test_folded_full_and_modes(full_reader, quadrant_reader, queries):
             np.testing.assert_allclose(
                 result.intensity,
                 folded.intensity[index],
-                rtol=32 * np.finfo(float).eps,
+                rtol=32 * eps(q.dtype),
                 atol=0,
             )
         taps, _ = stencil(
@@ -109,7 +120,7 @@ def test_folded_full_and_modes(full_reader, quadrant_reader, queries):
             ),
             axis=(0, 1),
         )
-        allowance = 32 * np.finfo(float).eps * weighted_absolute
+        allowance = 32 * eps(q.dtype) * weighted_absolute
         assert bool(
             jnp.all(
                 jnp.abs(folded.intensity[index] - full.intensity[index]) <= allowance
@@ -124,7 +135,7 @@ def test_folded_full_and_modes(full_reader, quadrant_reader, queries):
 
 
 def test_stencils_crossing_one_or_no_axes():
-    """Fails if reflection is applied to a query instead of each signed tap."""
+    """Compare folded and signed reads within 96 units for kernels and contractions."""
     quad = delivery(quadrant=True, half=34)
     full = delivery(half=34)
     domain = sc.Domain(
@@ -136,7 +147,16 @@ def test_stencils_crossing_one_or_no_axes():
     a = compiled_batch(qr, queries, jnp.zeros(3, dtype=jnp.int32))
     b = compiled_batch(fr, queries, jnp.zeros(3, dtype=jnp.int32))
     assert bool(jnp.all(a.accepted & b.accepted))
-    np.testing.assert_allclose(a.intensity, b.intensity, atol=4e-14, rtol=0)
+    np.testing.assert_allclose(
+        a.intensity,
+        b.intensity,
+        rtol=0,
+        atol=float(
+            roundoff(
+                float(np.max(np.abs(b.intensity))), n_ops=96, dtype=b.intensity.dtype
+            )
+        ),
+    )
 
 
 def test_asymmetric_full_and_quadrant_refusal():
@@ -157,7 +177,13 @@ def test_asymmetric_full_and_quadrant_refusal():
 def test_mixed_batch_and_empty(full_reader):
     """Fails if a bad query poisons another lane or empty batches execute a read."""
     queries = jnp.array(
-        [[0.1, 0.2], [jnp.nan, 0.1], [2.0, 0.0], [0.2, 0.1], [1e308, 0.0]]
+        [
+            [0.1, 0.2],
+            [jnp.nan, 0.1],
+            [2.0, 0.0],
+            [0.2, 0.1],
+            [jnp.finfo(full_reader._safe_query.dtype).max, 0.0],
+        ]
     )
     products = jnp.array([0, 0, 0, 99, 0], dtype=jnp.int32)
     result = compiled_batch(full_reader, queries, products)
@@ -222,10 +248,13 @@ def test_negative_excursions_preserved(full_reader):
     assert bool(jnp.all(image.intensity < -0.1))
 
 
-@pytest.mark.float64_only(reason="Float64 reference accumulation from float32 storage")
 @pytest.mark.parametrize("profile", ["raw", "prefiltered"])
 def test_stencil_weights_reproduce_the_read(profile, full_reader, tone_full):
-    """Fails if the stencil is a copy that drifts from the one a read contracts."""
+    """Compare a host float64 separable contraction to the read.
+
+    Weight an absolute sample sum and allow 64 rounding operations for the
+    different contraction orders and their two tap reductions.
+    """
     reader = full_reader if profile == "raw" else tone_full["reader"]
     queries = (
         [0.137, -0.219] if profile == "raw" else [0.31, -0.17],
@@ -239,7 +268,57 @@ def test_stencil_weights_reproduce_the_read(profile, full_reader, tone_full):
         assert bool(jnp.all(found.valid))
         nodes, w = found.nodes, found.weights
         samples = reader.grid.intensity[0, nodes[1, :, None], nodes[0, None, :]]
-        value = jnp.einsum("j,i,jirc->rc", w[1], w[0], samples.astype(jnp.float64))
-        np.testing.assert_allclose(
-            value, reader.read(q, jnp.int32(0)).intensity, rtol=1e-12, atol=1e-14
+        wy, wx = (np.asarray(w[axis], dtype=np.float64) for axis in (1, 0))
+        value = np.einsum("j,jrc->rc", wy, np.einsum("i,jirc->jrc", wx, samples))
+        scale = np.einsum(
+            "j,jrc->rc",
+            np.abs(wy),
+            np.einsum("i,jirc->jrc", np.abs(wx), np.abs(samples)),
         )
+        actual = np.asarray(reader.read(q, jnp.int32(0)).intensity)
+        assert np.all(np.abs(actual - value) <= 64 * eps(actual.dtype) * scale)
+
+
+def test_concrete_coordinates_preserve_subpixel_offsets(precision):
+    """The host oracle uses 64 epsilon units for sinc, window and contraction."""
+    data = delivery(shape=(2, 2), half=24)
+    grid = data["declared_lattice"]
+    origin = np.array([999999.4625, 999999.4625])
+    spacing = np.array([0.025, 0.025])
+    lattice = source_grid(origin, spacing, grid.shape, grid.frame)
+    indices = np.asarray(data["indices_xy"])
+    samples = 2 + 0.25 * np.sin(0.3 * indices[:, 0])
+    image = np.broadcast_to(samples[None, :, None, None], (1, len(samples), 2, 2))
+    domain = sc.Domain("box", "closed", [[999999.98] * 2, [999999.99] * 2], [0, 0])
+    reader = make_reader(
+        dict(
+            data,
+            declared_lattice=lattice,
+            domain=domain,
+            offsets_xy_lod=origin + indices * spacing,
+            intensity_nodes=image,
+        )
+    )
+    points = np.array([[999999.98, 999999.985], [999999.99, 999999.985]])
+    product = jnp.int32(0)
+    batch = read_batch(reader, points, jnp.zeros(2, jnp.int32))
+    for index, q in enumerate(points):
+        phase = (q - origin_xy(lattice)) / spacing
+        nodes = np.floor(phase).astype(int)[:, None] + np.arange(-15, 17)
+        argument = phase[:, None] - nodes
+        window = np.i0(12 * np.sqrt(1 - (argument / 16) ** 2)) / np.i0(12)
+        wx, wy = np.sinc(argument) * window
+        expected = np.sum(wy) * np.sum(wx * (2 + 0.25 * np.sin(0.3 * nodes[0])))
+        result = reader.read(q, product)
+        assert result.accepted and batch.accepted[index]
+        np.testing.assert_array_equal(reader.stencil(q).nodes, nodes)
+        np.testing.assert_allclose(
+            [result.intensity[0, 0], batch.intensity[index, 0, 0]],
+            expected,
+            atol=64 * eps(precision) * abs(expected),
+            rtol=0,
+        )
+    for edge, direction in ((points[0], -np.inf), (points[1], np.inf)):
+        outside = edge.copy()
+        outside[0] = np.nextafter(edge[0], direction)
+        assert reader.read(outside, product).reason_bits & Reason.OUTSIDE_DOMAIN

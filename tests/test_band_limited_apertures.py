@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import eps, roundoff
 from optixstuff.apertures import Circular
 from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.performance import (
@@ -138,17 +139,15 @@ def test_circle_fractional_boundary_has_analytic_area():
     assert area == pytest.approx(np.pi * 0.7**2, rel=1e-6)
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 @pytest.mark.parametrize("radius_lod", [0.7 * 575 / 553.4715922101486, 0.7, 1.3])
 @pytest.mark.parametrize("centre", [(0.0, 0.0), (0.5, 0.5), (0.3, -0.1)])
-def test_circle_weights_tile_the_disk_to_float64_rounding(radius_lod, centre):
-    """Exact overlap weights sum to pi r^2 at float64 rounding (64 eps).
+def test_circle_weights_tile_the_disk_to_rounding(radius_lod, centre):
+    """Exact overlap weights sum to pi r^2 at lane roundoff (64 eps).
 
     Basis: floating-point. The previous arcsin(z / r) form lost about
     sqrt(eps) relative (5e-9) where a chord meets the radius; this test
-    fails it by a factor of about 3e5.
+    fails it in float64. The 64 units cover both chord antiderivatives,
+    intersection geometry and the pairwise area sum.
     """
     step = 0.05
     radius_pix = radius_lod / step
@@ -158,7 +157,7 @@ def test_circle_weights_tile_the_disk_to_float64_rounding(radius_lod, centre):
         jnp.asarray(rows - centre[1]), jnp.asarray(cols - centre[0]), radius_pix
     )
     area = float(jnp.sum(weights)) * step**2
-    assert area == pytest.approx(np.pi * radius_lod**2, rel=64 * np.finfo(float).eps)
+    assert area == pytest.approx(np.pi * radius_lod**2, rel=64 * eps(weights.dtype))
 
 
 @pytest.mark.parametrize("pixel_lod", [0.25, 0.5])
@@ -353,11 +352,12 @@ def reference_level_weights(level, gy, gx):
     return weights
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 def test_dft_gradients_match_periodic_modes():
-    """The level-set normal is the spectral derivative, including both axes."""
+    """The level-set normal is the spectral derivative, including both axes.
+
+    On unit input scale, 96 epsilon units cover the forward FFT, spectral
+    differentiation and two Fourier contractions over 24 modes per axis.
+    """
     y, x = np.indices((24, 24))
     psf = 2 + np.sin(2 * np.pi * y / 24) + 0.3 * np.cos(4 * np.pi * x / 24)
     fine, sy, sx, gy, gx = core_subpixel_window(
@@ -370,14 +370,16 @@ def test_dft_gradients_match_periodic_modes():
         np.broadcast_to(
             (2 * np.pi / 24 * np.cos(2 * np.pi * yy / 24))[:, None], fine.shape
         ),
-        atol=1e-12,
+        atol=float(roundoff(1.0, n_ops=96, dtype=fine.dtype)),
+        rtol=0,
     )
     np.testing.assert_allclose(
         gx,
         np.broadcast_to(
             (-0.3 * 4 * np.pi / 24 * np.sin(4 * np.pi * xx / 24))[None, :], fine.shape
         ),
-        atol=1e-12,
+        atol=float(roundoff(1.0, n_ops=96, dtype=fine.dtype)),
+        rtol=0,
     )
 
 
@@ -428,12 +430,13 @@ def test_fractional_edge_search_excludes_competing_lobe(column):
     assert float(flux) < 0.02
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 @pytest.mark.parametrize("nominal", [None, (16.0, 40.0)])
 def test_global_truncation_is_independent_of_window(nominal):
-    """Retained off-image cores integrate every tile with fractional weights."""
+    """Retained off-image cores integrate every tile with fractional weights.
+
+    Allow 128 epsilon units for both FFT projections, fractional level-set
+    geometry and summed tile fluxes.
+    """
     y, x = np.indices((32, 32))
     psf = (
         2 + np.cos(2 * np.pi * (y - 16) / 32) + 0.7 * np.cos(2 * np.pi * (x - 16) / 32)
@@ -447,7 +450,11 @@ def test_global_truncation_is_independent_of_window(nominal):
     reference = np.array(
         truncation_core(psf, 0.65, 0.25, half_width_pix=16, nominal_center=(16.0, 16.0))
     )
-    np.testing.assert_allclose(values, np.broadcast_to(reference, (3, 2)), rtol=1e-10)
+    np.testing.assert_allclose(
+        values,
+        np.broadcast_to(reference, (3, 2)),
+        rtol=128 * eps(jnp.asarray(psf).dtype),
+    )
 
 
 @pytest.mark.parametrize("pixel_lod", [0.25, 0.5])
@@ -461,18 +468,18 @@ def test_fixed_center_airy_photometry(pixel_lod):
     assert float(area) == pytest.approx(np.pi * 0.7**2, rel=1e-6)
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 def test_fixed_center_ignores_a_brighter_remote_source():
-    """Known-centroid photometry also works on arbitrary, non-PSF images."""
+    """Known-centroid photometry also works on arbitrary, non-PSF images.
+
+    The disk area allows 64 epsilon units for chord geometry and summation.
+    """
     y, x = np.indices((32, 32))
     image = 2 + np.exp(-((y - 24) ** 2 + (x - 24) ** 2) / 4) * 1e3
     flux, area, _ = circular_aperture(
         image, 2.0, 1.0, half_width_pix=3, fixed_center=(8.2, 7.8)
     )
     assert float(flux) == pytest.approx(2 * np.pi * 4, rel=1e-5)
-    assert float(area) == pytest.approx(np.pi * 4, rel=1e-10)
+    assert float(area) == pytest.approx(np.pi * 4, rel=64 * eps(area.dtype))
 
 
 @pytest.mark.parametrize("value,ratio", [(0.0, 0.5), (2.0, 1.0), (2.0, 1.1)])

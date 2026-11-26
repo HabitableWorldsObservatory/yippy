@@ -22,6 +22,8 @@ from yippy.sinc.evidence import Receipt
 from yippy.sinc.geometry import source_grid
 from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile, stencil
 
+from .helpers import make_reader
+
 # tol_colors builds its palettes with Matplotlib's pending-deprecated set_bad;
 # eyepiece's suite uses the same narrow upstream compatibility filter.
 pytestmark = pytest.mark.filterwarnings(
@@ -163,16 +165,41 @@ def test_stencil_known_answer_and_update():
     assert artists == list(result.ax.get_children())
 
 
-@pytest.mark.float32_only(reason="Exercises x64-off stencil refusal")
-def test_stencil_requires_x64():
-    with pytest.raises(ValueError, match="jax_enable_x64"):
-        viz.plot_stencil(0.0, profile=KernelProfile())
-
-
 def test_stencil_callable_samples():
     result = viz.plot_stencil(2.5, profile=KernelProfile(), samples=lambda x: x**2)
     points = result.artists["scatter"][-1].get_offsets()
     np.testing.assert_allclose(points[:, 1], points[:, 0] ** 2)
+
+
+def test_translated_stencil_and_coverage_match_reader(full_delivery):
+    """A 0.025 pitch remains visible at a million lambda/D."""
+    origin = np.full(2, 999999.4625)
+    spacing = np.full(2, 0.025)
+    query = np.full(2, 1e6)
+    base = full_delivery["declared_lattice"]
+    lattice = source_grid(origin, spacing, base.shape, base.frame)
+    reader = make_reader(
+        {
+            **full_delivery,
+            "declared_lattice": lattice,
+            "offsets_xy_lod": origin
+            + np.asarray(full_delivery["indices_xy"]) * spacing,
+            "domain": sc.Domain("box", "closed", [query - 0.1, query], [0, 0]),
+        }
+    )
+    nodes = np.asarray(reader.stencil(jnp.asarray(query)).nodes)
+    np.testing.assert_array_equal(nodes[:, 0], [6, 6])
+    x, y = np.meshgrid(nodes[0], nodes[1])
+    expected = origin + np.column_stack((x.ravel(), y.ravel())) * spacing
+    for result in (
+        viz.plot_stencil_2d(query, lattice, profile=reader.profile),
+        viz.plot_stencil_2d(query, reader),
+    ):
+        np.testing.assert_array_equal(_taps_2d(result)[0], expected)
+    rectangle = viz.plot_coverage(lattice, query=query).artists["ellipse"][-1]
+    np.testing.assert_array_equal(
+        rectangle.get_xy(), origin + (nodes[:, 0] - 0.5) * spacing
+    )
 
 
 @pytest.mark.parametrize(

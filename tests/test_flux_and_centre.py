@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.numerics import eps
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, resample
 
@@ -120,9 +121,6 @@ def test_a_tabulated_offset_is_returned_without_interpolation(
         )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 def test_the_separation_map_is_measured_about_the_optical_axis(
     syn_coro_1d, synthetic_1d
 ):
@@ -132,6 +130,8 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
     corner, so the axis falls between the four central pixels. Those four read
     sqrt(2) / 2 pixels, not zero, and the map is point-symmetric about the
     array's middle, the same axis the core mean intensity profile uses.
+
+    Eight epsilon units cover coordinate subtraction, scaling and hypot.
     """
     npix = synthetic_1d.npix
     pixel_lod = synthetic_1d.pixscale
@@ -141,10 +141,14 @@ def test_the_separation_map_is_measured_about_the_optical_axis(
 
     separation_map = np.asarray(syn_coro_1d.grid.radius())
 
-    np.testing.assert_allclose(separation_map, expected, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        separation_map, expected, rtol=8 * eps(separation_map.dtype), atol=0.0
+    )
     middle = npix // 2
     central = separation_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
-    np.testing.assert_allclose(central, np.sqrt(0.5) * pixel_lod, rtol=1e-12)
+    np.testing.assert_allclose(
+        central, np.sqrt(0.5) * pixel_lod, rtol=8 * eps(separation_map.dtype)
+    )
 
 
 def test_both_paths_agree_about_where_the_axis_is(syn_coro_1d, synthetic_1d):
@@ -263,9 +267,6 @@ def test_core_mean_intensity_is_measured_about_the_optical_axis(axis_ring_coro):
     )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     axis_concentrated_coro,
 ):
@@ -276,13 +277,15 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
     is point-symmetric about the array's middle. A map centered on the
     header's XCENTER instead puts one of those pixels on zero separation and
     the other three at different radii, so they disagree.
+
+    Allow 32 epsilon units of the radius dtype for coordinate and projection
+    roundoff. The host interpolator can return float64 from float32 radii.
     """
     coro = axis_concentrated_coro
     pixel_lod = float(coro.grid.step)
+    radii = np.hypot(*coro.stellar_grid.coordinates())
     intensity_map = np.asarray(
-        stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(
-            np.hypot(*coro.stellar_grid.coordinates())
-        )
+        stellar_intensity_curves(coro, 0.0, interpolation="keys").evaluate(radii)
     )
     middle = intensity_map.shape[0] // 2
     central = intensity_map[middle - 1 : middle + 1, middle - 1 : middle + 1]
@@ -292,8 +295,10 @@ def test_core_mean_intensity_map_is_the_profile_about_the_optical_axis(
             np.sqrt(0.5) * pixel_lod
         )
     )
-    np.testing.assert_allclose(central, expected, rtol=1e-10)
-    np.testing.assert_allclose(intensity_map, intensity_map[::-1, ::-1], rtol=1e-10)
+    np.testing.assert_allclose(central, expected, rtol=32 * eps(radii.dtype))
+    np.testing.assert_allclose(
+        intensity_map, intensity_map[::-1, ::-1], rtol=32 * eps(radii.dtype)
+    )
 
 
 @pytest.mark.parametrize("npix,kind", [(8, "2dq"), (9, "2dq"), (8, "1d")])

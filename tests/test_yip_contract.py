@@ -16,6 +16,7 @@ package instead, in ``test_analytic_yip.py``.
 import astropy.io.fits as pyfits
 import numpy as np
 import pytest
+from hwoutils.numerics import eps
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
 from synthetic_yip import write_synthetic_yip
@@ -45,11 +46,8 @@ EAC1_AAVC_IWA_LOD = 4.054787
 EAC1_AAVC_IWA_TOL = 5e-3
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 def test_eac1_band_average_uses_one_scale(shipped_coro):
-    """EAC1 declares 0.95 to 1.05 microns, to float64 unit-conversion roundoff.
+    """EAC1 declares 0.95 to 1.05 microns, within two host conversion operations.
 
     A flat average is the same native map at both edges and selects the
     observing centre exactly (Stark and Krist 2019).
@@ -57,7 +55,7 @@ def test_eac1_band_average_uses_one_scale(shipped_coro):
     assert shipped_coro.band_averaged is True
     band = shipped_coro.bandpass
     np.testing.assert_allclose(
-        [band.low_nm, band.high_nm], [950, 1050], rtol=2e-16, atol=0
+        [band.low_nm, band.high_nm], [950, 1050], rtol=2 * eps(np.float64), atol=0
     )
     assert shipped_coro.scale_wavelength_nm(950, 980) == 980
     assert shipped_coro.scale_wavelength_nm(1050, 980) == 980
@@ -89,9 +87,35 @@ def test_equal_or_absent_edges_declare_one_wavelength(spectral_package, omit_edg
     assert coro.scale_wavelength_nm(515.0, 500.0) == 515.0
 
 
+@pytest.mark.parametrize(
+    "edges", [(("microns", 0.6), ("nm", 600.0)), (("nm", 600.0), ("microns", 0.6))]
+)
+def test_mixed_units_do_not_create_a_band(spectral_package, edges):
+    """Equivalent host edges use the shared four-float32-unit wavelength rule."""
+    for filename in ("offax_psf.fits", "stellar_intens.fits"):
+        with pyfits.open(spectral_package / filename, mode="update") as hdus:
+            for key, (unit, value) in zip(("MINLAM", "MAXLAM"), edges, strict=True):
+                hdus[0].header[key] = (value, unit)
+    assert open_yip(spectral_package).prepare().bandpass is None
+
+
+def test_same_wavelength_accepts_float32_header_edge(spectral_package):
+    """Float32 serialization agrees with the declared off-axis host band."""
+    for filename, edge in (
+        ("offax_psf.fits", 565.1),
+        ("stellar_intens.fits", float(np.float32(565.1))),
+    ):
+        with pyfits.open(spectral_package / filename, mode="update") as hdus:
+            hdus[0].header["MINLAM"] = (500.0, "nm")
+            hdus[0].header["MAXLAM"] = (edge, "nm")
+    with pytest.warns(UserWarning, match="N_LAM = 1.*declared band"):
+        band = open_yip(spectral_package).prepare().bandpass
+    assert (band.low_nm, band.high_nm) == (500.0, 565.1)
+
+
 @pytest.mark.parametrize("stellar_low_nm", [None, 480.0])
 def test_stellar_band_must_agree_with_offaxis(spectral_package, stellar_low_nm):
-    """An absent or discrepant FITS edge fails outside the relative 1e-9 bound."""
+    """An absent or discrepant FITS edge fails outside four float32 wavelength units."""
     with pyfits.open(spectral_package / "stellar_intens.fits", mode="update") as hdus:
         if stellar_low_nm is None:
             del hdus[0].header["MINLAM"]

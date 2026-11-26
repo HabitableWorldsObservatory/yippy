@@ -13,7 +13,6 @@ from itertools import pairwise
 from pathlib import Path
 
 import astropy.units as u
-import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
@@ -560,7 +559,7 @@ def admit_delivery(delivery, options):
         The admission result, the served domain and the memory budget, as a tuple.
     """
     d, p = delivery.manifest, delivery.plane
-    f64 = lambda value: jnp.asarray(value, dtype=jnp.float64)  # noqa: E731
+    f64 = lambda value: np.asarray(value, dtype=np.float64)  # noqa: E731
     premises = [d.get("premises", {}).get(key, {}) for key in _PREMISES]
     norm = d["normalization"]
     if not norm.get("source_independent", False):
@@ -679,7 +678,7 @@ def admit_delivery(delivery, options):
         mirror = MirrorCheckSet(
             f64(coords),
             jnp.array(signed_indices, jnp.int32),
-            jnp.asarray(delivery.read_images(records)),
+            delivery.read_images(records),
             jnp.zeros(len(records), jnp.int32),
             delivery.manifest_sha256,
         )
@@ -699,7 +698,7 @@ def admit_delivery(delivery, options):
     # Checks outside a caller's narrower domain cannot be read; exclude them
     # from the empirical comparison and keep their identifiers in provenance.
     excluded = [
-        r["id"] for r in records if not bool(domain.contains(f64(r["source_lod_xy"])))
+        r["id"] for r in records if not domain._contains_host(f64(r["source_lod_xy"]))
     ]
     records = [r for r in records if r["id"] not in excluded]
     checks = None
@@ -722,7 +721,7 @@ def admit_delivery(delivery, options):
                 raise ValueError("Unsupported independent check reference_units")
         checks = CheckSet(
             f64([r["source_lod_xy"] for r in records]),
-            jnp.asarray(delivery.read_images(records)),
+            delivery.read_images(records),
             jnp.zeros(len(records), jnp.int32),
             f64(peaks),
             delivery.manifest_sha256,
@@ -782,20 +781,19 @@ def _missing_metadata(d, p):
 
 def _domain(served, override=None):
     """Translate file-domain fields and delegate numeric permission checks."""
-    with jax.enable_x64():
-        declared = (
-            None
-            if served is None
-            else Domain(
-                served["kind"],
-                served["boundary"],
-                np.asarray(served["bounds_lod"]).T
-                if served["kind"] == "box"
-                else np.zeros((2, 2)),
-                served["radii_lod"] if served["kind"] == "annulus" else np.zeros(2),
-            )
+    declared = (
+        None
+        if served is None
+        else Domain(
+            served["kind"],
+            served["boundary"],
+            np.asarray(served["bounds_lod"]).T
+            if served["kind"] == "box"
+            else np.zeros((2, 2)),
+            served["radii_lod"] if served["kind"] == "annulus" else np.zeros(2),
         )
-        return restrict_domain(declared, override)
+    )
+    return restrict_domain(declared, override)
 
 
 def _independent_images(root, manifest, indices, shape):
@@ -851,19 +849,18 @@ def _independent_images(root, manifest, indices, shape):
 
 def _validate_check_positions(manifest, origin, spacing, size):
     """Check delivered references against the declared raw-table permission."""
-    with jax.enable_x64():
-        frame = Frame(
-            manifest["lambda0_m"] * m2nm,
-            manifest["diameter_m"],
-            manifest.get("diameter_convention") or "circumscribed",
-        )
-        lattice = source_grid(origin, spacing, tuple(size[::-1]), frame)
-        validate_check_positions(
-            [r["source_lod_xy"] for r in manifest.get("checks", [])],
-            _domain(manifest.get("served")),
-            lattice,
-            manifest["layout"] == "quadrant_rectangle",
-        )
+    frame = Frame(
+        manifest["lambda0_m"] * m2nm,
+        manifest["diameter_m"],
+        manifest.get("diameter_convention") or "circumscribed",
+    )
+    lattice = source_grid(origin, spacing, tuple(size[::-1]), frame)
+    validate_check_positions(
+        [r["source_lod_xy"] for r in manifest.get("checks", [])],
+        _domain(manifest.get("served")),
+        lattice,
+        manifest["layout"] == "quadrant_rectangle",
+    )
 
 
 def delivery_ratios(delivery, *, campaign_only=False):

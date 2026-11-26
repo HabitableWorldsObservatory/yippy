@@ -291,8 +291,8 @@ pip install yippy
 installs the library. Add the plotting module `yippy.sinc.viz` with
 `pip install "yippy[viz]"`.
 
-Enable JAX 64-bit mode (`jax.config.update("jax_enable_x64", True)`) before
-creating arrays or readers.
+Sinc construction works in either JAX precision. Enable JAX 64-bit mode
+before building a reader when you want binary64 read or scene arithmetic.
 
 ```{toctree}
 :maxdepth: 1

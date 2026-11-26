@@ -5,6 +5,8 @@ from abc import abstractmethod
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from hwoutils.precision import float_dtype, like
 
 from yippy.sinc._types import Boolean, check_static
 
@@ -248,17 +250,22 @@ class PrefilteredKernelProfile(AbstractKernelProfile):
 
 
 def flush_subnormal(value):
-    """Replace binary64 subnormals by signed zero using integer bits.
+    """Replace subnormals by signed zero using integer bits.
 
     Args:
-        value: Binary64 array.
+        value: Float32 or float64 array.
 
     Returns:
         The array with each subnormal replaced by a zero of the same sign.
     """
-    bits = jax.lax.bitcast_convert_type(value, jnp.int64)
-    exponent = (bits >> 52) & 0x7FF
-    zero = jax.lax.bitcast_convert_type(bits & jnp.int64(-(2**63)), jnp.float64)
+    if value.dtype == jnp.float32:
+        integer, fraction, exponent_mask = jnp.int32, 23, 0xFF
+    else:
+        integer, fraction, exponent_mask = jnp.int64, 52, 0x7FF
+    bits = jax.lax.bitcast_convert_type(value, integer)
+    exponent = (bits >> fraction) & exponent_mask
+    sign = jnp.iinfo(integer).min
+    zero = jax.lax.bitcast_convert_type(bits & sign, value.dtype)
     return jnp.where(exponent == 0, zero, value)
 
 
@@ -312,6 +319,87 @@ def upper_half_cell(query, origin, spacing):
     return jnp.where(upper, 1.0, 0.0)
 
 
+def _float32_ceiling(value):
+    """First binary32 value at or above a host binary64 boundary."""
+    rounded = np.asarray(value, dtype=np.float32)
+    return np.where(rounded < value, np.nextafter(rounded, np.float32(np.inf)), rounded)
+
+
+def _relative_phase(query, origin, spacing):
+    """Subtract the host reference before rounding away its low bits."""
+    high = origin.astype(np.float32)
+    low = origin - np.asarray(high, dtype=np.float64)
+    return ((query - like(high, query)) - like(low, query)) / like(spacing, query)
+
+
+def _host_start(profile, difference, h):
+    """Evaluate the binary64 quotient floor and odd-tap half-cell rule."""
+    remainder = np.fmod(difference, h)
+    quotient = np.rint((difference - remainder) / h)
+    floor = quotient - ((remainder != 0) & (difference < 0))
+    if profile.taps % 2:
+        upper = np.where(
+            difference >= 0,
+            2 * remainder >= h,
+            (remainder != 0) & (2 * remainder >= -h),
+        )
+        return floor + upper - (profile.taps - 1) // 2
+    return floor - (profile.taps // 2 - 1)
+
+
+def float32_stencil_start(profile, query, origin, spacing, size, reflected):
+    """Select taps at host-computed edges for represented float32 queries.
+
+    Args:
+        profile: Kernel profile giving the stencil and coverage margins.
+        query: Float32 query coordinates, one per axis (x first).
+        origin: Host coordinate of node zero, per axis.
+        spacing: Host node spacing, per axis.
+        size: Stored node count per axis (x first).
+        reflected: Whether the table is read by reflection.
+
+    Returns:
+        First tap per axis as a float array shaped like ``query``.
+    """
+    below, _ = profile.coverage_margins
+    starts = []
+    for axis, (o, h, n) in enumerate(zip(origin, spacing, size, strict=True)):
+        low = 1 - n if reflected else 0
+        # Include the immediate uncovered tap starts for stencil inspection.
+        first = low - profile.taps
+        stop = n + profile.taps
+        tap = np.arange(first, stop, dtype=np.float64)
+        shift = below - profile.halo
+        boundary = (tap + shift) * h
+
+        # First binary64 difference in the new cell. The rounded difference
+        # crosses at the midpoint with its predecessor. Form that midpoint
+        # after adding the origin so cancellation near zero keeps the gap.
+        boundary = np.where(
+            _host_start(profile, boundary, h) < tap,
+            np.nextafter(boundary, np.inf),
+            boundary,
+        )
+        gap = boundary - np.nextafter(boundary, -np.inf)
+        edges = _float32_ceiling((o + boundary) - gap / 2)
+        previous = np.nextafter(edges, np.float32(-np.inf))
+        earlier = (
+            _host_start(profile, np.asarray(previous, dtype=np.float64) - o, h) >= tap
+        )
+        later = _host_start(profile, np.asarray(edges, dtype=np.float64) - o, h) < tap
+        edges = np.where(
+            earlier,
+            previous,
+            np.where(later, np.nextafter(edges, np.float32(np.inf)), edges),
+        )
+        index = jnp.searchsorted(like(edges, query), query[..., axis], side="right")
+        tail = jnp.floor(_relative_phase(query[..., axis], np.asarray(o), h) - shift)
+        starts.append(
+            jnp.where((index > 0) & (index < edges.size), first + index - 1, tail)
+        )
+    return jnp.stack(starts, axis=-1)
+
+
 def weights(argument):
     """Evaluate raw Kaiser-sinc weights, with safe inactive derivative lanes.
 
@@ -324,12 +412,12 @@ def weights(argument):
     """
     active = jnp.abs(argument) < 16.0
     inside = jnp.where(active, 1.0 - (argument / 16.0) ** 2, 1.0)
-    window = jnp.i0(12.0 * jnp.sqrt(inside)) / jnp.i0(jnp.float64(12.0))
+    window = jnp.i0(12.0 * jnp.sqrt(inside)) / jnp.i0(like(12.0, argument))
     return jnp.where(active, jnp.sinc(argument) * window, 0.0)
 
 
 def stencil(query, origin, spacing):
-    """Return signed int64 taps and float64 weights for a prevalidated query.
+    """Return signed int32 taps and working-precision weights for a prevalidated query.
 
     Args:
         query: Query coordinates, one per axis, in the unit of ``origin``.
@@ -341,8 +429,8 @@ def stencil(query, origin, spacing):
         indices and the one-dimensional weights.
     """
     query = flush_subnormal(query)
-    floor = exact_quotient_floor_v1(query, origin, spacing).astype(jnp.int64)
-    taps = floor[:, None] + jnp.arange(-15, 17, dtype=jnp.int64)
+    floor = exact_quotient_floor_v1(query, origin, spacing).astype(jnp.int32)
+    taps = floor[:, None] + jnp.arange(-15, 17, dtype=jnp.int32)
     phase = (query - origin) / spacing
     return taps, weights(phase[:, None] - taps)
 
@@ -373,7 +461,7 @@ def bump(argument, taps, beta):
 
 
 def bump_stencil(query, origin, spacing, profile, beta, scale):
-    """Return signed int64 taps and float64 bump weights for a prevalidated query.
+    """Return signed int32 taps and bump weights for a prevalidated query.
 
     ``beta`` and ``scale`` are the per-axis shape and normalization of the design
     that built the coefficients; the weights are bump / scale.
@@ -391,8 +479,8 @@ def bump_stencil(query, origin, spacing, profile, beta, scale):
         node indices and the bump weights divided by ``scale``.
     """
     query = flush_subnormal(query)
-    start = profile.stencil_start(query, origin, spacing).astype(jnp.int64)
-    taps = start[:, None] + jnp.arange(profile.taps, dtype=jnp.int64)
+    start = profile.stencil_start(query, origin, spacing).astype(jnp.int32)
+    taps = start[:, None] + jnp.arange(profile.taps, dtype=jnp.int32)
     phase = (query - origin) / spacing
     value = bump(phase[:, None] - taps, profile.taps, beta[:, None])
     return taps, value / scale[:, None]
@@ -401,21 +489,95 @@ def bump_stencil(query, origin, spacing, profile, beta, scale):
 class Stencil(eqx.Module):
     """The taps of one read: per-axis nodes, weights and storage validity.
 
-    All three arrays are [2, taps], x axis first. ``nodes`` are signed int64
-    node indices, ``weights`` the float64 one-dimensional weights (a read
+    All three arrays are [2, taps], x axis first. ``nodes`` are signed int32
+    node indices, ``weights`` the working-precision one-dimensional weights (a read
     weights the node pair (i, j) by ``weights[0, i] * weights[1, j]``), and
     ``valid`` marks nodes a table can serve: inside the stored extent, or with
     reflection inside it after taking the absolute index.
 
     Attributes:
-        nodes: Signed int64 node indices, shape (2, taps).
-        weights: Float64 one-dimensional weights, shape (2, taps).
+        nodes: Signed int32 node indices, shape (2, taps).
+        weights: Working-precision one-dimensional weights, shape (2, taps).
         valid: Boolean mask of nodes a table can serve, shape (2, taps).
     """
 
     nodes: jax.Array
     weights: jax.Array
     valid: Boolean
+
+
+def lattice_phase_start(profile, query, origin, spacing, size, reflected):
+    """Compute local phase and first tap before narrowing a host coordinate.
+
+    Args:
+        profile: Kernel profile that selects the taps.
+        query: Query coordinates, one per axis (x first); host or traced.
+        origin: Host coordinate of node zero, per axis.
+        spacing: Host node spacing, per axis.
+        size: Stored node count per axis (x first), or None.
+        reflected: Whether the table is read by reflection.
+
+    Returns:
+        Tuple of the local phase and the first tap per axis.
+    """
+    if not isinstance(query, (jax.Array, jax.core.Tracer)):
+        points = np.asarray(query, dtype=np.float64)
+        clean = np.where(np.abs(points) < np.finfo(np.float64).tiny, 0.0, points)
+        difference = clean - origin
+        with np.errstate(over="ignore"):
+            return difference / spacing, _host_start(profile, difference, spacing)
+    clean = flush_subnormal(query)
+    if isinstance(origin, np.ndarray) and size is not None:
+        # Permission and first-tap decisions share one represented grid under
+        # JIT. Phase and its derivative retain the input coordinate precision.
+        represented = flush_subnormal(jax.lax.stop_gradient(clean).astype(jnp.float32))
+        first = float32_stencil_start(
+            profile, represented, origin, spacing, size, reflected
+        )
+        if query.dtype == jnp.float32:
+            phase = _relative_phase(clean, origin, spacing)
+        else:
+            phase = (clean - like(origin, clean)) / like(spacing, clean)
+        return phase, first
+    origin, spacing = like(origin, query), like(spacing, query)
+    return (clean - origin) / spacing, profile.stencil_start(clean, origin, spacing)
+
+
+def stencil_at(profile, phase, first, size, reflected, beta, scale):
+    """Build weights and signed nodes from the selected local lattice cell.
+
+    Args:
+        profile: Kernel profile that selects the taps and weights.
+        phase: Local phase per axis, in node spacings from node zero.
+        first: First tap per axis.
+        size: Stored node count per axis (x first), or None to mark every
+            node valid.
+        reflected: Whether node validity uses the absolute index.
+        beta: Per-axis Kaiser-Bessel shape of a prefiltered profile.
+        scale: Per-axis normalization of a prefiltered profile.
+
+    Returns:
+        The ``Stencil`` of nodes, weights and validity.
+
+    Raises:
+        ValueError: If a prefiltered profile lacks ``beta`` or ``scale``.
+    """
+    nodes = first.astype(jnp.int32)[:, None] + jnp.arange(profile.taps, dtype=jnp.int32)
+    argument = phase[:, None] - nodes
+    if isinstance(profile, PrefilteredKernelProfile):
+        if beta is None or scale is None:
+            raise ValueError(
+                "A prefiltered stencil needs the beta and scale of its design"
+            )
+        weights_ = bump(argument, profile.taps, beta[:, None]) / scale[:, None]
+    else:
+        weights_ = weights(argument)
+    if size is None:
+        valid = jnp.ones(nodes.shape, dtype=bool)
+    else:
+        reach = jnp.abs(nodes) if reflected else nodes
+        valid = (reach >= 0) & (reach < jnp.asarray(size)[:, None])
+    return Stencil(nodes, weights_, valid)
 
 
 def read_stencil(
@@ -453,17 +615,18 @@ def read_stencil(
     Returns:
         The ``Stencil`` of nodes, weights and validity for the read.
     """
-    if isinstance(profile, PrefilteredKernelProfile):
-        if beta is None or scale is None:
-            raise ValueError(
-                "A prefiltered stencil needs the beta and scale of its design"
-            )
-        nodes, weights_ = bump_stencil(query, origin, spacing, profile, beta, scale)
-    else:
-        nodes, weights_ = stencil(query, origin, spacing)
-    if size is None:
-        valid = jnp.ones(nodes.shape, dtype=bool)
-    else:
-        reach = jnp.abs(nodes) if reflected else nodes
-        valid = (reach >= 0) & (reach < jnp.asarray(size)[:, None])
-    return Stencil(nodes, weights_, valid)
+    phase, first = lattice_phase_start(profile, query, origin, spacing, size, reflected)
+    dtype = (
+        query.dtype
+        if isinstance(query, (jax.Array, jax.core.Tracer))
+        else float_dtype()
+    )
+    return stencil_at(
+        profile,
+        jnp.asarray(phase, dtype),
+        jnp.asarray(first, dtype),
+        size,
+        reflected,
+        beta,
+        scale,
+    )

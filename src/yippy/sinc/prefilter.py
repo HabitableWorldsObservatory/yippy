@@ -27,14 +27,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 
-import equinox as eqx
-import jax
-import jax.numpy as jnp
+import numpy as np
+from hwoutils.numerics import eps
+from scipy.special import i0
 
 from yippy.sinc.admission import sampling_ratio
-from yippy.sinc.evidence import PrecisionUnavailable
 from yippy.sinc.geometry import origin_xy, spacing_xy
-from yippy.sinc.kernel import PREFILTER_HALO, bump
+from yippy.sinc.kernel import PREFILTER_HALO
 
 # Trial shapes: beta = factor * pi * taps * (1 - band).
 _BETA_FACTORS = tuple(0.5 + 0.04 * step for step in range(16))
@@ -46,13 +45,6 @@ BUILD_CHUNK_BYTES = 64 * 2**20
 BUILD_SAMPLE_BYTES = 56
 
 
-def _require_precision():
-    if not jax.config.x64_enabled:
-        raise PrecisionUnavailable(
-            "Enable jax_enable_x64 before designing or building a prefilter"
-        )
-
-
 def _registrations():
     """Registrations in [0, 1] clustered at the stencil switch points.
 
@@ -61,9 +53,9 @@ def _registrations():
     is largest there. The set holds both points, their one-sided limits and
     Chebyshev clustering toward them.
     """
-    lobatto = 0.25 * (1.0 - jnp.cos(jnp.pi * jnp.arange(65) / 64))
-    limits = jnp.asarray([1e-9, 0.5 - 1e-9, 0.5 + 1e-9, 1.0 - 1e-9])
-    return jnp.unique(jnp.concatenate([lobatto, 0.5 + lobatto, limits]))
+    lobatto = 0.25 * (1.0 - np.cos(np.pi * np.arange(65) / 64))
+    limits = np.asarray([1e-9, 0.5 - 1e-9, 0.5 + 1e-9, 1.0 - 1e-9])
+    return np.unique(np.concatenate([lobatto, 0.5 + lobatto, limits]))
 
 
 def bump_transform(frequency, taps, beta):
@@ -81,11 +73,19 @@ def bump_transform(frequency, taps, beta):
     Returns:
         Transform values, same shape as ``frequency``.
     """
-    square = beta**2 - (jnp.pi * taps * frequency) ** 2
-    root = jnp.sqrt(jnp.abs(square))
-    safe = jnp.where(root > 1e-8, root, 1.0)
-    lobe = jnp.where(square >= 0, jnp.sinh(safe), jnp.sin(safe)) / safe
-    return taps * jnp.where(root > 1e-8, lobe, 1.0) / jnp.i0(beta)
+    frequency = np.asarray(frequency, dtype=np.float64)
+    square = beta**2 - (np.pi * taps * frequency) ** 2
+    root = np.sqrt(np.abs(square))
+    safe = np.where(root > 0, root, 1.0)
+    lobe = np.where(square >= 0, np.sinh(safe), np.sin(safe)) / safe
+    return taps * np.where(root > 0, lobe, 1.0) / i0(beta)
+
+
+def _bump(argument, taps, beta):
+    """Evaluate the Kaiser-Bessel bump on the host design grid."""
+    phase = argument / (taps / 2)
+    inside = np.maximum(1 - phase**2, 0.0)
+    return np.where(np.abs(phase) < 1, i0(beta * np.sqrt(inside)) / i0(beta), 0.0)
 
 
 def bump_scale(taps, beta):
@@ -98,11 +98,9 @@ def bump_scale(taps, beta):
     Returns:
         Mean over 64 registrations of the summed bump weights, dimensionless.
     """
-    registration = (8.0 * jnp.arange(64) + 0.5) / 512.0
-    offsets = jnp.arange(-taps, taps + 1)
-    return float(
-        jnp.mean(jnp.sum(bump(registration[:, None] - offsets, taps, beta), 1))
-    )
+    registration = (8.0 * np.arange(64) + 0.5) / 512.0
+    offsets = np.arange(-taps, taps + 1)
+    return float(np.mean(np.sum(_bump(registration[:, None] - offsets, taps, beta), 1)))
 
 
 def _fit(taps, beta, scale, band, left, right):
@@ -118,15 +116,15 @@ def _fit(taps, beta, scale, band, left, right):
     epsilon times the larger dimension of the system, so the choice does not
     depend on a library default.
     """
-    offsets = jnp.arange(-left, right + 1)
-    frequency = jnp.linspace(0.0, band, _FIT_FREQUENCIES)
-    phase = 2 * jnp.pi * frequency[:, None] * offsets[None, :]
-    system = jnp.concatenate([jnp.cos(phase), jnp.sin(phase)])
-    target = jnp.concatenate(
-        [scale / bump_transform(frequency, taps, beta), jnp.zeros(_FIT_FREQUENCIES)]
+    offsets = np.arange(-left, right + 1)
+    frequency = np.linspace(0.0, band, _FIT_FREQUENCIES)
+    phase = 2 * np.pi * frequency[:, None] * offsets[None, :]
+    system = np.concatenate([np.cos(phase), np.sin(phase)])
+    target = np.concatenate(
+        [scale / bump_transform(frequency, taps, beta), np.zeros(_FIT_FREQUENCIES)]
     )
-    rcond = float(jnp.finfo(jnp.float64).eps) * max(system.shape)
-    return jnp.linalg.lstsq(system, target, rcond=rcond)[0]
+    rcond = eps(np.float64) * max(system.shape)
+    return np.linalg.lstsq(system, target, rcond=rcond)[0]
 
 
 class _Filters:
@@ -178,17 +176,17 @@ class _Filters:
         Returns:
             Complex transfer function values, shape (n_f,).
         """
-        offsets = jnp.arange(-left, right + 1)
-        phase = 2j * jnp.pi * frequency[:, None] * offsets[None, :]
-        return jnp.exp(phase) @ self.get(left, right).astype(jnp.complex128)
+        offsets = np.arange(-left, right + 1)
+        phase = 2j * np.pi * frequency[:, None] * offsets[None, :]
+        return np.exp(phase) @ self.get(left, right)
 
 
 def _tap_terms(taps, beta, scale, registration, frequency):
     """Relative tap offsets, bump weights [tau, k] and tone terms [tau, k, f]."""
-    offsets = jnp.arange(-(taps // 2) - 1, taps // 2 + 2)
-    weight = bump(registration[:, None] - offsets, taps, beta) / scale
+    offsets = np.arange(-(taps // 2) - 1, taps // 2 + 2)
+    weight = _bump(registration[:, None] - offsets, taps, beta) / scale
     shift = offsets[None, :, None] - registration[:, None, None]
-    tone = jnp.exp(2j * jnp.pi * shift * frequency[None, None, :])
+    tone = np.exp(2j * np.pi * shift * frequency[None, None, :])
     return offsets, weight, weight[:, :, None] * tone
 
 
@@ -196,11 +194,11 @@ def _interior_error(taps, beta, band, half_width):
     """Worst in-band tone error of an interior read on a coarse trial grid."""
     scale = bump_scale(taps, beta)
     filters = _Filters(taps, beta, scale, band, half_width)
-    frequency = jnp.linspace(0.0, band, _CHECK_FREQUENCIES)
-    registration = (8.0 * jnp.arange(64) + 0.5) / 512.0
+    frequency = np.linspace(0.0, band, _CHECK_FREQUENCIES)
+    registration = (8.0 * np.arange(64) + 0.5) / 512.0
     _, _, terms = _tap_terms(taps, beta, scale, registration, frequency)
     response = terms.sum(1) * filters.transfer(half_width, half_width, frequency)
-    return float(jnp.max(jnp.abs(response - 1.0))), filters
+    return float(np.max(np.abs(response - 1.0))), filters
 
 
 @dataclass(frozen=True)
@@ -243,15 +241,14 @@ class AxisDesign:
     tone_error: float
     interior_tone_error: float
     sample_gain: float
-    direct: jax.Array
-    mirrored: jax.Array | None
+    direct: np.ndarray
+    mirrored: np.ndarray | None
 
 
 def design_axis(taps, filter_half_width, band, size, reflected, cells=None):
     """Design the bump shape and every filter one source axis needs.
 
-    Designs are cached by their arguments; the precision check runs on every
-    call, cached or not.
+    Designs are cached by their arguments and always use host float64.
 
     Args:
         taps: Bump taps per axis.
@@ -270,7 +267,6 @@ def design_axis(taps, filter_half_width, band, size, reflected, cells=None):
         only stored nodes; across a mirror axis the filter runs over reflected
         samples and needs no edge treatment.
     """
-    _require_precision()
     return _design_axis(taps, filter_half_width, band, size, reflected, cells)
 
 
@@ -292,46 +288,44 @@ def _design_axis(taps, filter_half_width, band, size, reflected, cells):
         (min(filter_half_width, node - low), min(filter_half_width, high - node))
         for node in range(low, high + 1)
     ]
-    matrix = jnp.zeros((signed, signed))
+    matrix = np.zeros((signed, signed))
     for row, (left, right) in enumerate(sides):
-        matrix = matrix.at[row, row - left : row + right + 1].set(
-            filters.get(left, right)
-        )
+        matrix[row, row - left : row + right + 1] = filters.get(left, right)
     registration = _registrations()
-    frequency = jnp.linspace(0.0, band, _CHECK_FREQUENCIES)
+    frequency = np.linspace(0.0, band, _CHECK_FREQUENCIES)
     offsets, weight, terms = _tap_terms(taps, beta, scale, registration, frequency)
     # First tap of the stencil relative to the cell base, per registration.
     if taps % 2:
-        first = jnp.where(registration >= 0.5, 1, 0) - (taps - 1) // 2
+        first = np.where(registration >= 0.5, 1, 0) - (taps - 1) // 2
     else:
-        first = jnp.full(registration.shape, 1 - taps // 2)
+        first = np.full(registration.shape, 1 - taps // 2)
     worst, interior, gain = {}, 0.0, 0.0
     first_cell, last_cell = (low, high) if cells is None else cells
     for base in range(max(low, first_cell), min(high, last_cell) + 1):
         covered = (base + first >= low + PREFILTER_HALO) & (
             base + first + taps - 1 <= high - PREFILTER_HALO
         )
-        if not bool(jnp.any(covered)):
+        if not bool(np.any(covered)):
             continue
         rows = [min(max(base + int(k), low), high) - low for k in offsets]
         pattern = tuple(sides[row] for row in rows)
         key = (pattern, tuple(covered.tolist()))
         if key not in worst:
-            transfer = jnp.stack(
+            transfer = np.stack(
                 [filters.transfer(left, right, frequency) for left, right in pattern]
             )
-            response = jnp.einsum("tkf,kf->tf", terms, transfer)
-            error = jnp.max(jnp.abs(response - 1.0), axis=1)
-            composite = jnp.zeros((registration.size, offsets.size + 2 * signed))
+            response = np.einsum("tkf,kf->tf", terms, transfer)
+            error = np.max(np.abs(response - 1.0), axis=1)
+            composite = np.zeros((registration.size, offsets.size + 2 * signed))
             for column, (left, right) in enumerate(pattern):
                 start = signed + column - left
-                composite = composite.at[:, start : start + left + right + 1].add(
+                composite[:, start : start + left + right + 1] += (
                     weight[:, column : column + 1] * filters.get(left, right)[None, :]
                 )
-            l1 = jnp.sum(jnp.abs(composite), axis=1)
+            l1 = np.sum(np.abs(composite), axis=1)
             worst[key] = (
-                float(jnp.max(jnp.where(covered, error, 0.0))),
-                float(jnp.max(jnp.where(covered, l1, 0.0))),
+                float(np.max(np.where(covered, error, 0.0))),
+                float(np.max(np.where(covered, l1, 0.0))),
             )
             if all(side == (filter_half_width,) * 2 for side in pattern):
                 interior = max(interior, worst[key][0])
@@ -339,9 +333,12 @@ def _design_axis(taps, filter_half_width, band, size, reflected, cells):
     tone_error = max((value[0] for value in worst.values()), default=math.inf)
     if reflected:
         direct = matrix[size - 1 :, size - 1 :]
-        mirrored = matrix[size - 1 :, size - 1 :: -1].at[:, 0].set(0.0)
+        mirrored = matrix[size - 1 :, size - 1 :: -1].copy()
+        mirrored[:, 0] = 0.0
+        mirrored.setflags(write=False)
     else:
         direct, mirrored = matrix, None
+    direct.setflags(write=False)
     return AxisDesign(
         taps,
         filter_half_width,
@@ -515,27 +512,27 @@ def build_chunk_rows(nodes, shape_yx):
     return max(1, min(shape_yx[0], BUILD_CHUNK_BYTES // row_bytes))
 
 
-@eqx.filter_jit
-def _filter_rows(samples, flipped, direct, mirrored, dtype):
+def _filter_rows(samples, flipped, direct, mirrored):
     """Filter one detector-row chunk [sy, sx, rows, px] along both source axes."""
     direct_x, direct_y = direct
-    samples = samples.astype(jnp.float64)
-    along_x = jnp.einsum("km,jmrc->jkrc", direct_x, samples)
+    samples = np.asarray(samples, dtype=np.float64)
+    along_x = np.einsum("km,jmrc->jkrc", direct_x, samples, optimize=True)
     if mirrored is None:
-        return jnp.einsum("kj,jmrc->kmrc", direct_y, along_x).astype(dtype)
+        return np.einsum("kj,jmrc->kmrc", direct_y, along_x, optimize=True)
     mirrored_x, mirrored_y = mirrored
-    flipped = flipped.astype(jnp.float64)
-    along_x = along_x + jnp.einsum("km,jmrc->jkrc", mirrored_x, samples[..., ::-1])
-    flipped_x = jnp.einsum("km,jmrc->jkrc", direct_x, flipped) + jnp.einsum(
-        "km,jmrc->jkrc", mirrored_x, flipped[..., ::-1]
+    flipped = np.asarray(flipped, dtype=np.float64)
+    along_x = along_x + np.einsum(
+        "km,jmrc->jkrc", mirrored_x, samples[..., ::-1], optimize=True
     )
-    return (
-        jnp.einsum("kj,jmrc->kmrc", direct_y, along_x)
-        + jnp.einsum("kj,jmrc->kmrc", mirrored_y, flipped_x)
-    ).astype(dtype)
+    flipped_x = np.einsum(
+        "km,jmrc->jkrc", direct_x, flipped, optimize=True
+    ) + np.einsum("km,jmrc->jkrc", mirrored_x, flipped[..., ::-1])
+    return np.einsum("kj,jmrc->kmrc", direct_y, along_x, optimize=True) + np.einsum(
+        "kj,jmrc->kmrc", mirrored_y, flipped_x, optimize=True
+    )
 
 
-def build_coefficients(intensity, designs):
+def build_coefficients(intensity, designs, *, storage_dtype=None):
     """Filter stored samples [P, sy, sx, py, px] into coefficients of the same shape.
 
     The filter arithmetic is float64 whatever the storage dtype; the result is
@@ -548,11 +545,14 @@ def build_coefficients(intensity, designs):
         intensity: Stored samples, shape (P, sy, sx, py, px): product, source
             row, source column, detector row, detector column.
         designs: The (x, y) pair of AxisDesign whose filters are applied.
+        storage_dtype: Coefficient storage precision. Defaults to the sample dtype.
 
     Returns:
-        Coefficients with the shape and dtype of ``intensity``.
+        Coefficients with the shape of ``intensity`` in the chosen storage precision.
+
+    Raises:
+        ValueError: If a coefficient overflows or underflows to zero in storage.
     """
-    _require_precision()
     design_x, design_y = designs
     direct = (design_x.direct, design_y.direct)
     mirrored = None
@@ -560,6 +560,10 @@ def build_coefficients(intensity, designs):
         mirrored = (design_x.mirrored, design_y.mirrored)
     count, sy, sx, py, px = intensity.shape
     rows = build_chunk_rows(sy * sx, (py, px))
+    dtype = np.dtype(intensity.dtype if storage_dtype is None else storage_dtype)
+    if dtype not in (np.float32, np.float64):
+        raise TypeError("Coefficient storage requires float32 or float64")
+    limit = float(np.finfo(dtype).max)
     products = []
     for product in range(count):
         pieces = []
@@ -569,8 +573,13 @@ def build_coefficients(intensity, designs):
             flipped = None
             if mirrored is not None:
                 flipped = intensity[product, :, :, py - stop : py - start][:, :, ::-1]
-            pieces.append(
-                _filter_rows(samples, flipped, direct, mirrored, intensity.dtype)
-            )
-        products.append(jnp.concatenate(pieces, axis=2))
-    return jnp.stack(products)
+            with np.errstate(over="ignore", invalid="ignore"):
+                wide = _filter_rows(samples, flipped, direct, mirrored)
+            if not (-limit <= wide.min() and wide.max() <= limit):
+                raise ValueError(f"Prefilter coefficients exceed {dtype} storage range")
+            stored = wide.astype(dtype, copy=False)
+            if dtype != wide.dtype and np.any((wide != 0) & (stored == 0)):
+                raise ValueError(f"Prefilter coefficients underflow to zero in {dtype}")
+            pieces.append(stored)
+        products.append(np.concatenate(pieces, axis=2))
+    return np.stack(products)

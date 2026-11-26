@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.memory import MemoryLimit
+from hwoutils.numerics import roundoff
 from optixstuff.grids import Image, Measure
 from synthetic_yip import write_synthetic_yip
 
@@ -115,9 +116,7 @@ def test_shipped_package_blocks_size_and_estimate(coro):
     assert estimate["total"] == estimate["resident"] + estimate["scratch"]
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
+@pytest.mark.float64_only(reason="Central finite differences at a 1e-6 step")
 def test_render_is_linear_mirrored_and_differentiable(tmp_path):
     """Fails if the render stops being exactly linear in flux or loses reflection.
 
@@ -240,9 +239,6 @@ def _disjoint_masks(grid):
     return inside, ~inside
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     """Fails if masked operators do not compose into the unmasked operator.
 
@@ -250,6 +246,9 @@ def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     every source, to rounding, with the scene valid: each reads only its own
     cells and the union covers every lit cell (before, an operator that was
     handed a source outside its mask turned the whole image to NaN).
+
+    The reference image peak scales a 128-operation budget for shifting and
+    the separate operator contractions and sum.
     """
     package = write_synthetic_yip(
         tmp_path / "masked",
@@ -276,7 +275,16 @@ def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     assert reference.valid and composed.valid
     assert float(jnp.abs(reference.image.data).max()) > 0
     np.testing.assert_allclose(
-        composed.image.data, reference.image.data, rtol=0, atol=1e-12
+        composed.image.data,
+        reference.image.data,
+        rtol=0,
+        atol=float(
+            roundoff(
+                np.max(np.abs(reference.image.data)),
+                n_ops=128,
+                dtype=reference.image.data.dtype,
+            )
+        ),
     )
     # One half alone leaves lit cells uncovered: finite image, not valid.
     alone = model.with_scene_operator(mask=keep).render_scene(
@@ -289,11 +297,11 @@ def test_disjoint_masked_operators_sum_to_the_unmasked_render(tmp_path):
     )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 def test_masked_wrapper_matches_the_native_mask(tmp_path):
-    """Fails if MaskedSceneOperator reads or reports a cell outside its mask."""
+    """Fails if MaskedSceneOperator reads or reports a cell outside its mask.
+
+    At the reference peak, 128 epsilon units cover filtering and contraction.
+    """
     package = write_synthetic_yip(
         tmp_path / "wrapper",
         kind="2dq",
@@ -314,7 +322,12 @@ def test_masked_wrapper_matches_the_native_mask(tmp_path):
     )
     image_n, covered_n = native.render(flux, model.scene_grid)
     image_w, covered_w = wrapped.render(flux, model.scene_grid)
-    np.testing.assert_allclose(image_w, image_n, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        image_w,
+        image_n,
+        rtol=0,
+        atol=float(roundoff(np.max(np.abs(image_n)), n_ops=128, dtype=image_n.dtype)),
+    )
     assert bool(jnp.all(covered_w == covered_n & keep))
 
 
@@ -385,9 +398,6 @@ def test_scene_grid_reaches_the_node_hull(wide_coro):
 _EAC1 = pytest.mark.medium(reason="float64 load and scene operator of eac1_aavc_2d")
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 @pytest.mark.parametrize(
     ("model_name", "cell_lod"),
     [
@@ -419,6 +429,8 @@ def test_a_point_read_is_the_clipped_render_of_its_cell(model_name, cell_lod, re
     hull. Before the read cut each node to its window it differed by up to 0.2
     of the peak on the synthetic table and 3e-2 on eac1_aavc_2d at the hull
     edge, and by 9e-4 and 8e-6 inside the stamp.
+
+    At peak scale, 128 epsilon units cover FFT shifting and dyadic blending.
     """
     model = request.getfixturevalue(model_name)
     grid = model.scene_grid
@@ -436,12 +448,14 @@ def test_a_point_read_is_the_clipped_render_of_its_cell(model_name, cell_lod, re
     assert covered[cell]
     peak = read.max()
     assert peak > 0
-    np.testing.assert_allclose(read, np.maximum(image, 0.0), rtol=0, atol=1e-12 * peak)
+    np.testing.assert_allclose(
+        read,
+        np.maximum(image, 0.0),
+        rtol=0,
+        atol=float(roundoff(peak, n_ops=128, dtype=read.dtype)),
+    )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 @pytest.mark.parametrize(
     ("kind", "source_lod", "outside"),
     [
@@ -465,6 +479,8 @@ def test_a_read_is_zero_beyond_the_stored_windows(tmp_path, kind, source_lod, ou
     read's peak (basis: exact-algebra, the window cut leaves exact zeros).
     Summing the shifted spectra before one inverse transform left the Fourier
     tail of each truncated PSF there, 7e-3 to 7e-2 of the peak.
+
+    At peak scale, 128 epsilon units cover the FFT and blend before masking.
     """
     package = write_synthetic_yip(
         tmp_path / kind,
@@ -484,4 +500,9 @@ def test_a_read_is_zero_beyond_the_stored_windows(tmp_path, kind, source_lod, ou
     )
     peak = read.max()
     assert peak > 0
-    np.testing.assert_allclose(read[outside], 0.0, rtol=0, atol=1e-12 * peak)
+    np.testing.assert_allclose(
+        read[outside],
+        0.0,
+        rtol=0,
+        atol=float(roundoff(peak, n_ops=128, dtype=read.dtype)),
+    )

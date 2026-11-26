@@ -7,12 +7,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.precision import like, require_float64
 
-from yippy.sinc._types import F64, I32, check_array, check_static
-from yippy.sinc.domain import coverage
+from yippy.sinc._types import FLOAT_DTYPES, I32, RealArray, check_array, check_static
+from yippy.sinc.domain import covered_start
 from yippy.sinc.evidence import BoundKind, MemoryLimit, Reason, Status
-from yippy.sinc.kernel import flush_subnormal
-from yippy.sinc.reader import ImageRead, PrefilteredReader, _require_precision
+from yippy.sinc.geometry import array_namespace, raster_axes
+from yippy.sinc.reader import ImageRead, PrefilteredReader
 
 # Detector columns widened to binary64 at a time when a narrower table is
 # contracted with binary64 accumulation; the whole table is never widened.
@@ -110,7 +111,7 @@ class SceneRenderer(AbstractSceneOperator):
         source_xy_lod,
         *,
         margin_nodes=1,
-        accumulate="float64",
+        accumulate=None,
         scale=1.0,
     ):
         """Gather the coefficient images that reads near the given positions touch.
@@ -125,11 +126,11 @@ class SceneRenderer(AbstractSceneOperator):
                 direction, so positions may move by that many node spacings (in
                 a fit, for example) before a render refuses.
             accumulate: ``"float64"`` (binary64 accumulation) or ``"storage"``
-                (accumulation in the table's storage dtype).
+                (accumulation in the table's storage dtype). None uses float64
+                with a float64 reader and storage precision otherwise.
             scale: Constant that ``render`` multiplies into the image, for
                 example a photon-unit conversion.
         """
-        _require_precision()
         if not isinstance(reader, PrefilteredReader):
             raise TypeError("SceneRenderer needs a PrefilteredReader")
         count = reader.grid.intensity.shape[0]
@@ -137,21 +138,25 @@ class SceneRenderer(AbstractSceneOperator):
             raise ValueError("product_index must be an available Python int")
         if type(margin_nodes) is not int or margin_nodes < 0:
             raise ValueError("margin_nodes must be a nonnegative integer")
+        if accumulate is None:
+            accumulate = (
+                "float64" if reader._safe_query.dtype == jnp.float64 else "storage"
+            )
         if accumulate not in ("float64", "storage"):
             raise ValueError("accumulate must be 'float64' or 'storage'")
+        if accumulate == "float64":
+            require_float64("yippy.sinc scene float64 accumulation", reader._safe_query)
         self.accumulate = accumulate
         self.scale = float(scale)
-        positions = jnp.asarray(source_xy_lod)
-        if positions.ndim != 2 or positions.shape[0] == 0:
+        positions = reader._prepare(source_xy_lod)
+        if positions.phase.ndim != 2 or positions.phase.shape[0] == 0:
             raise ValueError("Scene positions require a nonempty [source, 2] array")
-        check_array(positions, (positions.shape[0], 2), (jnp.float64,))
         self.reader, self.product_index = reader, product_index
         self.margin_nodes = margin_nodes
-        product = jnp.int32(product_index)
-        readable = jax.vmap(lambda q: reader._validate(q, product)[1])(positions)
+        readable = positions.finite & positions.member & positions.covered
         if not bool(jnp.all(readable)):
             raise ValueError("Scene positions must be finite, permitted and covered")
-        taps = jax.vmap(lambda q: reader.stencil(flush_subnormal(q)).nodes)(positions)
+        taps = jax.vmap(reader._stencil_at)(positions.phase, positions.start).nodes
         # Nodes that some covered read can use, as signed (low, high) per axis.
         size = reader.grid.source.shape[::-1]
         halo = reader.profile.halo
@@ -222,15 +227,16 @@ class SceneRenderer(AbstractSceneOperator):
         Returns:
             A SceneRenderer covering the readable raster centers.
         """
-        x_lod, y_lod = jnp.asarray(x_lod), jnp.asarray(y_lod)
+        xp = array_namespace(x_lod, y_lod)
+        x_lod, y_lod = xp.asarray(x_lod), xp.asarray(y_lod)
         if x_lod.ndim != 1 or y_lod.ndim != 1 or not x_lod.size or not y_lod.size:
             raise ValueError("Raster axes must be nonempty coordinate vectors")
-        x, y = jnp.meshgrid(x_lod, y_lod, indexing="xy")
-        centers = jnp.stack((x.ravel(), y.ravel()), axis=1)
-        readable = jax.vmap(lambda q: reader._validate(q, product_index)[1])(centers)
-        positions = centers[readable]
+        x, y = xp.meshgrid(x_lod, y_lod, indexing="xy")
+        centers = xp.stack((x.ravel(), y.ravel()), axis=1)
+        prepared = reader._prepare(centers)
+        positions = centers[prepared.finite & prepared.covered & prepared.member]
         if not positions.shape[0]:
-            positions = reader._safe_query[None, :]
+            positions = np.asarray(reader._safe_position)[None, :]
         return cls(reader, product_index, positions, margin_nodes=0, scale=scale)
 
     def __check_init__(self):
@@ -252,8 +258,10 @@ class SceneRenderer(AbstractSceneOperator):
     def _quadrant(self, node_x, node_y):
         """Sign quadrant of signed nodes: bit 0 for x < 0, bit 1 for y < 0."""
         if self._groups == 1:
-            return jnp.zeros(jnp.broadcast_shapes(node_x.shape, node_y.shape), int)
-        return (node_x < 0).astype(int) + 2 * (node_y < 0).astype(int)
+            return jnp.zeros(
+                jnp.broadcast_shapes(node_x.shape, node_y.shape), jnp.int32
+            )
+        return (node_x < 0).astype(jnp.int32) + 2 * (node_y < 0).astype(jnp.int32)
 
     def _scratch(self, working_bytes):
         rows, pixels = self.table.shape
@@ -266,21 +274,31 @@ class SceneRenderer(AbstractSceneOperator):
         if working_bytes > limit:
             raise MemoryLimit(f"scene scratch {working_bytes} bytes exceeds budget")
 
-    def _axis_ok(self, values, axis):
-        """Sanitize coordinates of one axis and flag the finite, covered ones."""
-        finite = jnp.isfinite(values)
-        clean = flush_subnormal(jnp.where(finite, values, 0.0))
-        safe = self.reader._safe_query
-        reflected = self.reader.grid.reflection.kind != "none"
-        covered = jax.vmap(
-            lambda v: coverage(
-                safe.at[axis].set(v),
-                self.reader.grid.source,
-                reflected,
-                self.reader.profile,
-            )
-        )(clean)
-        return clean, finite, covered
+    def _axis_stencil(self, values, axis):
+        """Compute one stencil per coordinate along a raster axis."""
+        reader = self.reader
+        xp = array_namespace(values)
+        other = xp.broadcast_to(reader._safe_position[1 - axis], values.shape)
+        points = xp.stack((other, values) if axis else (values, other), axis=-1)
+        prepared = reader._prepare(points)
+        covered = covered_start(
+            prepared.start[:, axis : axis + 1],
+            (reader.grid.source.shape[1 - axis],),
+            reader.grid.reflection.kind != "none",
+            reader.profile,
+        )
+        ok = (prepared.finite & covered)[:, None]
+        safe_phase, safe_start = reader._safe_lattice()
+        stencil = jax.vmap(reader._stencil_at)(
+            jnp.where(ok, prepared.phase, safe_phase),
+            jnp.where(ok, prepared.start, safe_start),
+        )
+        return (
+            stencil.nodes[:, axis],
+            stencil.weights[:, axis],
+            prepared.finite,
+            covered,
+        )
 
     def _contract(self, amplitudes):
         """Float64 partial images [groups, pixels] of amplitudes [groups, rows]."""
@@ -291,7 +309,7 @@ class SceneRenderer(AbstractSceneOperator):
             product = jnp.matmul(
                 amplitudes.astype(table.dtype), table, precision=highest
             )
-            return product.astype(jnp.float64)
+            return like(product, amplitudes)
         pixels = table.shape[1]
         width = min(CONTRACT_COLUMNS, pixels)
         blocks = pixels // width
@@ -299,7 +317,7 @@ class SceneRenderer(AbstractSceneOperator):
         def block(index, partial):
             columns = jax.lax.dynamic_slice_in_dim(table, index * width, width, 1)
             value = jnp.matmul(
-                amplitudes, columns.astype(jnp.float64), precision=highest
+                amplitudes, columns.astype(amplitudes.dtype), precision=highest
             )
             return jax.lax.dynamic_update_slice_in_dim(partial, value, index * width, 1)
 
@@ -307,7 +325,7 @@ class SceneRenderer(AbstractSceneOperator):
             0, blocks, block, jnp.zeros((amplitudes.shape[0], pixels))
         )
         if blocks * width < pixels:
-            tail = table[:, blocks * width :].astype(jnp.float64)
+            tail = table[:, blocks * width :].astype(amplitudes.dtype)
             partial = partial.at[:, blocks * width :].set(
                 jnp.matmul(amplitudes, tail, precision=highest)
             )
@@ -352,12 +370,12 @@ class SceneRenderer(AbstractSceneOperator):
             reason,
             jnp.asarray(False),
             jnp.asarray(BoundKind.UNKNOWN, dtype=jnp.int32),
-            jnp.asarray(jnp.inf, dtype=jnp.float64),
-            jnp.asarray(jnp.nan, dtype=jnp.float64),
+            like(jnp.inf, image),
+            like(jnp.nan, image),
             ledger,
         )
 
-    def render_points(self, source_xy_lod: F64, flux: F64) -> ImageRead:
+    def render_points(self, source_xy_lod: RealArray, flux: RealArray) -> ImageRead:
         """Render point sources [Q, 2] with fluxes [Q] as one image.
 
         The image is the sum over sources of flux times that source's read, in
@@ -382,27 +400,24 @@ class SceneRenderer(AbstractSceneOperator):
             ImageRead with the summed image in delivered units and the
             acceptance diagnostics.
         """
-        _require_precision()
-        queries, flux = jnp.asarray(source_xy_lod), jnp.asarray(flux)
-        if queries.ndim != 2:
-            raise ValueError("Scene coordinates require [source, 2]")
-        count = queries.shape[0]
-        check_array(queries, (count, 2), (jnp.float64,))
-        check_array(flux, (count,), (jnp.float64,))
         reader, taps = self.reader, self.reader.profile.taps
+        queries = reader._prepare(source_xy_lod)
+        flux = like(flux, reader._safe_query)
+        if queries.phase.ndim != 2:
+            raise ValueError("Scene coordinates require [source, 2]")
+        count = queries.phase.shape[0]
+        check_array(flux, (count,), FLOAT_DTYPES)
         rows = self.table.shape[0]
         groups = self._groups
         self._scratch(count * taps * taps * 40 + groups * (rows + 1) * 8)
-        finite = jnp.all(jnp.isfinite(queries), axis=1) & jnp.isfinite(flux)
-        clean = flush_subnormal(jnp.where(jnp.isfinite(queries), queries, 0.0))
-        member = jax.vmap(reader.domain.contains)(clean)
-        reflected = reader.grid.reflection.kind != "none"
-        covered = jax.vmap(
-            lambda q: coverage(q, reader.grid.source, reflected, reader.profile)
-        )(clean)
+        finite = queries.finite & jnp.isfinite(flux)
+        member, covered = queries.member, queries.covered
         readable = finite & member & covered
-        safe = jnp.where(readable[:, None], clean, reader._safe_query)
-        stencil = jax.vmap(reader.stencil)(safe)
+        safe_phase, safe_start = reader._safe_lattice()
+        stencil = jax.vmap(reader._stencil_at)(
+            jnp.where(readable[:, None], queries.phase, safe_phase),
+            jnp.where(readable[:, None], queries.start, safe_start),
+        )
         node, weight = stencil.nodes, stencil.weights
         index_x = node[:, 0, None, :] - self._corner_xy[0]
         index_y = node[:, 1, :, None] - self._corner_xy[1]
@@ -420,10 +435,10 @@ class SceneRenderer(AbstractSceneOperator):
         usable = readable & stored
         sampling_ok = jnp.all(usable | ~contributing)
         accepted = sampling_ok & (reader.policy.mode == "sampling")
-        amount = jnp.where(usable & contributing, flux, 0.0)
+        amount = jnp.where(usable, flux, 0.0)
         spread = amount[:, None, None] * weight[:, 1, :, None] * weight[:, 0, None, :]
         amplitudes = (
-            jnp.zeros((groups, rows + 1))
+            jnp.zeros((groups, rows + 1), dtype=flux.dtype)
             .at[quadrant.reshape(-1), row.reshape(-1)]
             .add(spread.reshape(-1))
         )
@@ -459,13 +474,15 @@ class SceneRenderer(AbstractSceneOperator):
             Tuple of the image (detector shape, in delivered units times
             ``scale``) and the boolean readable-cell mask, shape (H, W).
         """
-        x, y = grid.coordinates()
-        flux = jnp.asarray(flux, jnp.float64)
-        fold = self._fold_raster(flux, x[0], y[:, 0])
+        x, y = raster_axes(grid)
+        flux = like(flux, self.reader._safe_query)
+        fold = self._fold_raster(flux, x, y)
         image = self._image(fold.amplitudes) * self.scale
         return image, fold.readable & (self.reader.policy.mode == "sampling")
 
-    def render_raster(self, scene: F64, x_lod: F64, y_lod: F64) -> ImageRead:
+    def render_raster(
+        self, scene: RealArray, x_lod: RealArray, y_lod: RealArray
+    ) -> ImageRead:
         """Render a raster scene [H, W] whose pixel centers are x_lod [W], y_lod [H].
 
         Every raster pixel is a point source at its center with the pixel's
@@ -512,17 +529,18 @@ class SceneRenderer(AbstractSceneOperator):
         """Fold a raster onto the node amplitudes and flag each cell's readability.
 
         A cell is readable when its coordinates are finite, inside the domain,
-        covered and every tap lands on a stored node. Only readable, finite,
-        lit cells in a sampling policy reach the amplitudes.
+        covered and every tap lands on a stored node. Every readable, finite
+        cell in a sampling policy contributes its linear flux response.
         """
-        _require_precision()
-        scene, x, y = jnp.asarray(scene), jnp.asarray(x_lod), jnp.asarray(y_lod)
+        ref = self.reader._safe_query
+        xp = array_namespace(x_lod, y_lod)
+        scene, x, y = like(scene, ref), xp.asarray(x_lod), xp.asarray(y_lod)
         if scene.ndim != 2:
             raise ValueError("Raster scenes require two axes")
         height, width = scene.shape
-        check_array(scene, (height, width), (jnp.float64,))
-        check_array(x, (width,), (jnp.float64,))
-        check_array(y, (height,), (jnp.float64,))
+        check_array(scene, (height, width), FLOAT_DTYPES)
+        if x.shape != (width,) or y.shape != (height,):
+            raise ValueError("Raster axes must match the scene width and height")
         reader, rows = self.reader, self.table.shape[0]
         span_y, span_x = self.lookup.shape
         self._scratch(
@@ -531,37 +549,25 @@ class SceneRenderer(AbstractSceneOperator):
             + 16 * (span_y + 1) * (span_x + 1)
             + 8 * self._groups * rows
         )
-        clean_x, finite_x, covered_x = self._axis_ok(x, 0)
-        clean_y, finite_y, covered_y = self._axis_ok(y, 1)
-        member = jax.vmap(
-            lambda v: jax.vmap(lambda u: reader.domain.contains(jnp.stack([u, v])))(
-                clean_x
-            )
-        )(clean_y)
+        centers = xp.stack(xp.meshgrid(x, y, indexing="xy"), axis=-1)
+        member = reader.domain.contains(centers)
+        stencil_x = self._axis_stencil(x, 0)
+        stencil_y = self._axis_stencil(y, 1)
+        finite_x, covered_x = stencil_x[2:]
+        finite_y, covered_y = stencil_y[2:]
         finite = jnp.isfinite(scene) & finite_y[:, None] & finite_x[None, :]
         covered = covered_y[:, None] & covered_x[None, :]
         lit = scene != 0
-        safe = reader._safe_query
         spreading, columns = [], []
-        for axis, (clean, ok, span) in enumerate(
-            (
-                (clean_x, finite_x & covered_x, span_x),
-                (clean_y, finite_y & covered_y, span_y),
-            )
+        for axis, ((node, weight, _, _), span) in enumerate(
+            ((stencil_x, span_x), (stencil_y, span_y))
         ):
-            values = jnp.where(ok, clean, safe[axis])
-            stencil = jax.vmap(lambda v, a=axis: reader.stencil(safe.at[a].set(v)))(
-                values
-            )
-            node, weight = stencil.nodes, stencil.weights
-            index = node[:, axis, :] - self._corner_xy[axis]
+            index = node - self._corner_xy[axis]
             column = jnp.where((index >= 0) & (index < span), index, span)
-            matrix = jnp.zeros((values.shape[0], span + 1))
-            matrix = matrix.at[jnp.arange(values.shape[0])[:, None], column].add(
-                weight[:, axis, :]
-            )
+            matrix = jnp.zeros((node.shape[0], span + 1), dtype=weight.dtype)
+            matrix = matrix.at[jnp.arange(node.shape[0])[:, None], column].add(weight)
             spreading.append(matrix)
-            columns.append((column, weight[:, axis, :] != 0))
+            columns.append((column, weight != 0))
         # A cell is stored when every tap it weights is a stored node.
         present = jnp.pad(self.lookup < rows, ((0, 1), (0, 1)))
         (col_x, used_x), (col_y, used_y) = columns
@@ -574,7 +580,7 @@ class SceneRenderer(AbstractSceneOperator):
         readable = finite_y[:, None] & finite_x[None, :] & member & covered & stored
         usable = finite & member & covered & stored
         sampling = reader.policy.mode == "sampling"
-        amount = jnp.where(usable & lit & sampling, scene, 0.0)
+        amount = jnp.where(usable & sampling, scene, 0.0)
         across, down = spreading
         folded = down.T @ amount @ across
         index_y, index_x = self.nodes[:, 0], self.nodes[:, 1]
@@ -582,7 +588,7 @@ class SceneRenderer(AbstractSceneOperator):
             index_x + self._corner_xy[0], index_y + self._corner_xy[1]
         )
         amplitudes = (
-            jnp.zeros((self._groups, rows))
+            jnp.zeros((self._groups, rows), dtype=scene.dtype)
             .at[quadrant, self.lookup[index_y, index_x]]
             .add(folded[index_y, index_x])
         )

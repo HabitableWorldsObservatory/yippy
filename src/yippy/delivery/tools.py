@@ -1,7 +1,7 @@
 """Designer tools for sinc-delivery-0.1 directories: check a delivery, plan positions.
 
-``validate`` runs every yippy integrity check and then yippy.sinc admission with
-JAX binary64 enabled, and reports pass or fail with the numbers behind it.
+``validate`` runs the yippy integrity checks and reports admission and reference
+residuals. The reference read requires binary64. The CLI enables it on entry.
 ``plan`` writes the training, check and mirror-check coordinate lists a designer
 propagates. Both are exposed as functions and as the ``yippy-sinc`` command.
 
@@ -20,6 +20,7 @@ from pathlib import Path
 import jax
 import numpy as np
 from hwoutils.constants import m2nm
+from hwoutils.precision import require_float64
 
 from yippy.sinc.admission import MIRROR_TOLERANCE, judge_checks
 from yippy.sinc.evidence import AdmissionRefused, reason_names
@@ -189,7 +190,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
     """Check a sinc delivery directory the way yippy will read it.
 
     Runs every yippy integrity check (hashes, FITS and CSV agreement,
-    declarations), then yippy.sinc admission with JAX binary64 on, and gathers the
+    declarations), then yippy.sinc admission in binary64, and gathers the
     interior, mirror and axis residuals from the admission receipt.
 
     Args:
@@ -204,6 +205,7 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
 
     Raises:
         SincToolsError: If ``path`` holds no sinc delivery.
+        PrecisionError: If float64 is unavailable for reference admission.
     """
     root = Path(path)
     try:
@@ -229,15 +231,15 @@ def validate(path, product_id=None, acceptance_level=ACCEPTANCE_LEVEL):
 
     receipt, reasons, admitted = None, (), False
     if not failures:
-        with jax.enable_x64(True):
-            try:
-                admission, _, _ = admit_delivery(delivery, options)
-                receipt = admission.receipt
-                reasons = reason_names(admission.reason_bits)
-                admitted = admission.admitted
-            except AdmissionRefused as refusal:
-                receipt = refusal.receipt
-                reasons = reason_names(refusal.reason_bits)
+        require_float64("sinc delivery reference validation")
+        try:
+            admission, _, _ = admit_delivery(delivery, options)
+            receipt = admission.receipt
+            reasons = reason_names(admission.reason_bits)
+            admitted = admission.admitted
+        except AdmissionRefused as refusal:
+            receipt = refusal.receipt
+            reasons = reason_names(refusal.reason_bits)
     if not admitted and not failures:
         failures.append("yippy.sinc refused admission: " + (", ".join(reasons) or "?"))
 
@@ -585,7 +587,8 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         if args.command == "validate":
-            report = validate(args.directory, args.product, args.level)
+            with jax.enable_x64():  # precision-ok: CLI startup for reference validation
+                report = validate(args.directory, args.product, args.level)
             print(
                 json.dumps(report.to_dict(), indent=2)
                 if args.json

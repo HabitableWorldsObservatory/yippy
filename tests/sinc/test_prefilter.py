@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import eps, roundoff
 from hwoutils.testing import ulps
 from optixstuff.grids import Frame
 
@@ -93,9 +94,7 @@ def test_design_figures_at_reference_band(taps, half_width, tone, beta, filter_l
     np.testing.assert_allclose(design.interior_tone_error, tone, rtol=2e-2)
     np.testing.assert_allclose(design.tone_error, tone, rtol=2e-2)
     np.testing.assert_allclose(design.beta, beta, rtol=1e-3)
-    np.testing.assert_allclose(
-        jnp.sum(jnp.abs(design.direct[22])), filter_l1, rtol=1e-2
-    )
+    np.testing.assert_allclose(np.sum(np.abs(design.direct[22])), filter_l1, rtol=1e-2)
     # The closed-form transform agrees with quadrature of the cut bump.
     grid = np.linspace(-taps / 2, taps / 2, 40001)
     shape = _bump(grid, taps, design.beta)
@@ -105,7 +104,7 @@ def test_design_figures_at_reference_band(taps, half_width, tone, beta, filter_l
         grid[1] - grid[0]
     )
     np.testing.assert_allclose(
-        bump_transform(jnp.asarray(frequency), taps, design.beta),
+        bump_transform(frequency, taps, design.beta),
         quadrature,
         rtol=1e-8,
     )
@@ -171,7 +170,7 @@ def test_assembled_filters_meet_recorded_tone_error(
 
 @pytest.mark.parametrize("taps", [5, 6, 7, 8, 9, 10])
 @pytest.mark.parametrize("reflected", [False, True])
-def test_covered_interval_endpoints(taps, reflected, precision):
+def test_covered_interval_endpoints(taps, reflected):
     """Fails on a halo or stencil off-by-one: the covered phases are exact.
 
     Phases are dyadic so every endpoint is representable. Covered reads need
@@ -192,8 +191,8 @@ def test_covered_interval_endpoints(taps, reflected, precision):
     above = size - below - 1.0
     low = -above * spacing if reflected else below * spacing
     high = above * spacing
-    inside = [low, np.nextafter(high, -np.inf, dtype=precision), 0.5 * (low + high)]
-    outside = [np.nextafter(low, -np.inf, dtype=precision), high, math.inf, math.nan]
+    inside = [low, np.nextafter(high, -np.inf, dtype=np.float32), 0.5 * (low + high)]
+    outside = [np.nextafter(low, -np.inf, dtype=np.float32), high, math.inf, math.nan]
     middle = 0.5 * (low + high)
     for value, expected in [(v, True) for v in inside] + [(v, False) for v in outside]:
         for query in ([value, middle], [middle, value]):
@@ -286,7 +285,8 @@ def test_reads_track_band_limited_truth(full, quadrant):
     most the two-axis tone error times the l1 norm of the spectrum, were the
     recorded figure a true supremum. It is a sampled maximum, so this is a
     consistency check with a factor 1.5, not a bound validation. The quadrant
-    delivery of the same symmetric scene must give the full delivery's reads.
+    delivery of the same symmetric scene must give the full delivery's reads
+    within 128 epsilon units for phase, kernel weights and two tap contractions.
     """
     design = figures(full["reader"].design)
     allowance = 1.5 * design["tone_error_two_axis"] * full["norm"]
@@ -299,7 +299,10 @@ def test_reads_track_band_limited_truth(full, quadrant):
         worst = max(worst, error)
         assert error <= allowance
         np.testing.assert_allclose(
-            folded.intensity, whole.intensity, rtol=0, atol=1e-11 * full["norm"]
+            folded.intensity,
+            whole.intensity,
+            rtol=0,
+            atol=float(roundoff(full["norm"], n_ops=128, dtype=q.dtype)),
         )
         assert whole.status == Status.SAMPLING_ADMITTED
         assert whole.reason_bits == Reason.BOUND_UNKNOWN
@@ -360,7 +363,10 @@ def test_table_edge_reads_and_halo_refusal(quadrant_table):
 
     The domain is wider than coverage, so coverage alone decides. The last
     covered phase on each side uses one-sided edge filters and must still match
-    the oracle; just beyond refuses with INCOMPLETE_STENCIL and a NaN image.
+    the oracle; four binary32 epsilon units at the edge scale distinguish neighbors
+    through coordinate subtraction and division. The binary64 oracle fit
+    allowance is 2e-8 of the spectral L1 norm, plus 128 epsilon units for
+    phase, kernel evaluation and the two dot products in the read.
     """
     truth, norm = tone_truth((5, 4))
     data = delivery(
@@ -373,15 +379,22 @@ def test_table_edge_reads_and_halo_refusal(quadrant_table):
     # Dyadic spacing makes both limits exact: the lower is covered, the upper not.
     high = origin + 0.25 * (size - 9.5)
     low = -high if quadrant_table else origin + 0.25 * 8.5
-    # A nonzero origin rounds one-ulp neighbours back onto the limit, so step 1e-9.
-    inside = [high - 1e-9, low]
-    outside = [high, low - 1e-9]
+    # A nonzero origin can round one-ulp neighbours back onto the limit.
+    dtype = reader._safe_query.dtype
+    # Use the shared represented coordinate grid at a traced decision.
+    step = float(
+        roundoff(max(abs(low), abs(high), abs(origin)), n_ops=4, dtype=np.float32)
+    )
+    inside = [high - step, low]
+    outside = [high, low - step]
     for value in inside:
         query = [value, 0.11]
         result = reader.read(jnp.array(query), jnp.int32(0))
         assert bool(result.accepted)
+        reference = oracle(data, reader, np.asarray(query, dtype=dtype))
+        arithmetic = float(roundoff(norm, n_ops=128, dtype=dtype))
         np.testing.assert_allclose(
-            result.intensity, oracle(data, reader, query), rtol=0, atol=2e-8 * norm
+            result.intensity, reference, rtol=0, atol=2e-8 * norm + arithmetic
         )
     for value in outside:
         result = reader.read(jnp.array([0.11, value]), jnp.int32(0))
@@ -411,11 +424,8 @@ def test_minimum_table_size(half, quadrant_table, admitted):
         assert admission.reason_bits == Reason.INCOMPLETE_STENCIL
 
 
-@pytest.mark.float64_only(
-    reason="Compares a float64 reader with and without float64 available"
-)
-def test_margin_memory_policy_and_precision(full):
-    """Fails if the 0.64 margin, byte budgets, bounded policy or x64 guard slip."""
+def test_margin_memory_and_policy(full):
+    """Fails if the 0.64 margin, byte budgets or bounded policy slip."""
     truth, _ = tone_truth((4, 4))
     coarse = delivery(half=20, shape=(4, 4), spacing=0.33, truth=truth)
     coarse["memory"] = BUDGET
@@ -438,21 +448,57 @@ def test_margin_memory_policy_and_precision(full):
     result = bounded.read(jnp.array([0.1, 0.2]), jnp.int32(0))
     assert not bool(result.accepted) and bool(result.sampling_ok)
     assert int(result.status) == Status.REFUSED
-    # The design is cached by its arguments; the precision check is not.
-    cached = (7, 12, 0.29, 31, False, (12, 14))
-    design_axis(*cached)
-    with jax.enable_x64(False):
-        with pytest.raises(sc.PrecisionUnavailable):
-            design_axis(*cached)
-        with pytest.raises(sc.PrecisionUnavailable):
-            build_coefficients(full["reader"].grid.intensity, ())
+
+
+def test_design_and_coefficient_storage_are_host_float64(precision):
+    """Stored coefficients equal the wide build rounded once, bit for bit."""
+    data = delivery(shape=(2, 2))
+    source = np.random.default_rng(946).uniform(
+        0.01, 0.99, data["intensity_nodes"].shape
+    )
+    reader, _ = make_prefiltered({**data, "intensity_nodes": source})
+    designs = design_grid(
+        reader.profile, reader.grid.products, reader.grid.source, False, reader.domain
+    )
+    assert all(design.direct.dtype == np.float64 for design in designs)
+    wide = build_coefficients(source.reshape(reader.coefficients.shape), designs)
+    assert reader.coefficients.dtype == precision
+    np.testing.assert_array_equal(reader.coefficients, wide.astype(precision))
+
+
+@pytest.mark.parametrize("sample_dtype", [np.float32, np.float64])
+def test_coefficient_overflow_refuses_reader(sample_dtype, precision):
+    """The positive half of a signed filter can exceed the storage range."""
+    data = delivery(shape=(2, 2))
+    designs = design_grid(
+        PrefilteredKernelProfile(),
+        data["products"],
+        data["declared_lattice"],
+        False,
+        data["domain"],
+    )
+    weights = np.outer(designs[1].direct[20], designs[0].direct[20])
+    samples = np.where(weights > 0, np.finfo(np.float32).max / 2, 0).astype(
+        sample_dtype
+    )
+    data["intensity_nodes"] = np.broadcast_to(
+        samples.reshape(1, -1, 1, 1), data["intensity_nodes"].shape
+    )
+    if precision == np.float32 or sample_dtype == np.float32:
+        with pytest.raises(ValueError, match=r"coefficients.*float32"):
+            make_prefiltered(data)
+    else:
+        reader, _ = make_prefiltered(data)
+        result = reader.read(np.zeros(2), jnp.int32(0))
+        assert result.accepted and np.isfinite(result.intensity).all()
 
 
 def test_batch_checks_and_node_reads(full):
     """Fails if batching, admission checks or node reads bypass the new reader.
 
     A prefiltered read does not interpolate: at a lattice node it differs from
-    the stored sample, by no more than the design figure's scale.
+    the stored sample, by no more than the design figure's scale. Batch and
+    single contractions allow 64 epsilon units for their kernel and dot products.
     """
     reader, data, truth = full["reader"], full["data"], full["truth"]
     design = figures(reader.design)
@@ -463,7 +509,10 @@ def test_batch_checks_and_node_reads(full):
     for index in range(2):
         single = reader.read(queries[index], jnp.int32(0))
         np.testing.assert_allclose(
-            batch.intensity[index], single.intensity, rtol=1e-13, atol=0
+            batch.intensity[index],
+            single.intensity,
+            rtol=64 * eps(single.intensity.dtype),
+            atol=0,
         )
     with pytest.raises(sc.ReadRefused):
         require_read(batch)
@@ -510,8 +559,8 @@ def test_float32_storage_stays_near_float64(full):
     stored coefficients equal, bit for bit, the float64 build of the same
     float32 samples rounded to float32. A float32 filter pass moves them by
     about 4e-6 of the signal. The read of a float32 delivery then differs from
-    the float64 one by rounding of samples and coefficients only: a few 1e-7 of
-    the signal, measured 2e-7.
+    the float64 one by half a binary32 epsilon each for the samples and
+    coefficients, weighted by the two sample gains and coefficient scale.
     """
     data = full["data"]
     single = {
@@ -524,7 +573,9 @@ def test_float32_storage_stays_near_float64(full):
     designs = design_grid(
         reader.profile, reader.grid.products, reader.grid.source, False, data["domain"]
     )
-    wide = build_coefficients(admitted_samples(single).astype(jnp.float64), designs)
+    wide = build_coefficients(
+        np.asarray(admitted_samples(single), dtype=np.float64), designs
+    )
     np.testing.assert_array_equal(reader.coefficients, wide.astype(jnp.float32))
     worst = 0.0
     for query in QUERIES[:4]:
@@ -533,7 +584,14 @@ def test_float32_storage_stays_near_float64(full):
         rounded = reader.read(q, jnp.int32(0)).intensity
         assert rounded.dtype == jnp.float64
         worst = max(worst, float(jnp.max(jnp.abs(rounded - exact))))
-    assert worst <= 1e-6 * full["norm"]
+    # Round samples and coefficients once each; the design reports the
+    # composite sample gain. Its signed filter products need absolute scales.
+    gain_x, gain_y = (design.sample_gain for design in designs)
+    coefficient_scale = float(np.max(np.abs(wide)))
+    allowance = (
+        (gain_x * gain_y * full["norm"] + coefficient_scale) * eps(np.float32) / 2
+    )
+    assert worst <= allowance
 
 
 @pytest.mark.parametrize("fixture", ["full", "quadrant"])

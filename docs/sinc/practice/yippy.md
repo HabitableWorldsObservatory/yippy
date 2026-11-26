@@ -26,8 +26,10 @@ order, and the close fills in the answers.
 :::
 
 :::{note}
-The sinc reads ship with yippy. Enable JAX 64-bit mode before
-constructing a `Coronagraph` with sinc reads.
+Sinc readers work in both JAX precision modes. Enable JAX 64-bit mode
+before construction to select binary64 reads. An explicit
+`SceneRenderer(..., accumulate="float64")` request requires a float64
+reader and an x64-enabled process.
 :::
 
 ## What is a delivery?
@@ -107,8 +109,7 @@ argument, so it has no interior check images, and the starter has
 
 `"sinc"`
 : Strict yippy.sinc reads. The constructor raises if the delivery is not a
-  versioned sinc delivery, if JAX 64-bit
-  mode is off, or if admission refuses the grid.
+  versioned sinc delivery or if admission refuses the grid.
 
 `"auto"`
 : The yippy.sinc reader serves reads when the delivery is a versioned sinc delivery and admission
@@ -325,7 +326,9 @@ commands that a designer needs.
 `yippy-sinc validate <dir>`
 : Runs the yippy integrity checks and then yippy.sinc admission with 64-bit
   arithmetic, and exits 0 on a pass, 1 on a failure and 2 on a usage error.
-  The Python form is `yippy.delivery.tools.validate()`.
+  The CLI selects 64-bit arithmetic at startup. The Python entry point
+  `yippy.delivery.tools.validate()` requires JAX 64-bit mode and raises
+  `hwoutils.PrecisionError` when it is unavailable.
 
 ## What did this page establish?
 

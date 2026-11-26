@@ -11,6 +11,7 @@ from unittest.mock import patch
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import roundoff
 from synthetic_yip import write_synthetic_yip
 
 from yippy import open_yip
@@ -59,15 +60,14 @@ def test_a_source_between_rings_reads_the_analytic_throughput_ramp(
     assert np.all(np.diff(sums) > 0)
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 def test_whole_pixel_shift_beyond_padding(tmp_path):
     """Match a large-pad read when an integer shift wraps bright edge pixels.
 
     A seven-pixel shift crosses both two-pixel margins. Three columns wrap
     onto the detector outside the translated window. The reference has 48
     pixels per side. Integer translation is exact up to FFT roundoff.
+
+    A 96-operation budget covers FFT shifting and blend arithmetic at peak scale.
     """
     fixture = write_synthetic_yip(
         tmp_path / "wide",
@@ -88,5 +88,8 @@ def test_whole_pixel_shift_beyond_padding(tmp_path):
     peak = float(expected.image.data.max())
     assert peak > 0
     np.testing.assert_allclose(
-        actual.image.data, expected.image.data, rtol=0, atol=1e-12 * peak
+        actual.image.data,
+        expected.image.data,
+        rtol=0,
+        atol=float(roundoff(peak, n_ops=96, dtype=actual.image.data.dtype)),
     )

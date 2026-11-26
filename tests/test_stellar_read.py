@@ -108,7 +108,9 @@ def test_aperture_sums_match_independent_footprint_reads(shipped_coro):
 
     Every pixel is also compared to rounding with the SciPy footprint read of
     the floored spline (``footprint_truth``), which verifies the declaration,
-    the floor and the scale of the read on a structured map.
+    the floor and the scale of the read on a structured map. The pixel bound
+    propagates SciPy's two antiderivative operand magnitudes and includes
+    coordinate and contraction roundoff on both sides (see assert_stellar_read).
     """
     coro = shipped_coro
     native = coro.stellar_map(None, DIAMETER_LOD)
