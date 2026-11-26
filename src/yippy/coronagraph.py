@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import is_traced
 from hwoutils.memory import DEFAULT_MAX_BYTES, admit
-from hwoutils.precision import like
+from hwoutils.precision import float_dtype, like
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -29,7 +29,6 @@ from optixstuff.primary import SimplePrimary
 from optixstuff.spectral import Band, same_wavelength
 
 from ._jax_funcs import blend_pad
-from ._precision import float_dtype
 from ._stellar_intens import bounded_stellar_pchip, stellar_knot_index
 from ._yip import _YIPData
 from .header import HeaderData

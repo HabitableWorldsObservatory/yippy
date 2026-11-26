@@ -7,7 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.precision import like
+from hwoutils.precision import float_dtype, like
 from scipy.fft import next_fast_len
 
 from ._jax_funcs import (
@@ -17,7 +17,6 @@ from ._jax_funcs import (
     idw_read_plan,
     separable_read_plan,
 )
-from ._precision import float_dtype
 from .logger import logger
 from .sinc.scene import AbstractSceneOperator
 

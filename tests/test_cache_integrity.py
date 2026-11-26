@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import optixstuff.performance as perf
 import pytest
+from hwoutils.precision import dtype_tag
 from numpy.testing import assert_allclose
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Frame
@@ -419,7 +420,6 @@ def test_entry_without_identity_metadata_is_ignored(tmp_path):
 
 def test_legacy_named_entry_is_ignored(tmp_path):
     """A table under the pre-identity naming scheme is never read."""
-    from yippy._precision import dtype_tag
     from yippy._version import __version__
 
     path = _yip(tmp_path, "warm")
