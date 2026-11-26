@@ -860,7 +860,7 @@ def synthesize_psf_separable(
 # Nodes whose radii differ by less than this fraction of (1 + radius) share a
 # ring. It is wide enough for the single-precision rounding of the radii (about
 # 4e-6 lambda/D at 60) and far below any gap between rings.
-_RING_TOL = 1e-5
+_RING_TOL = 1e-5  # tol: algorithm, 1e-5 dimensionless fraction of 1 + radius in LOD
 
 
 def _angular_bracket(theta_q, theta_n, member):

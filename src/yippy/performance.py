@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.numerics import eps
 from hwoutils.precision import like
 from optixstuff.grids import Image
 from optixstuff.performance import (
@@ -104,7 +105,7 @@ def _iter_xaxis_positions(coro: _YIPData):
         planet_image = coro.offax.get_psf_by_offset_idx(i, y_idx)
         if planet_image is None:
             continue
-        with jax.enable_x64():
+        with jax.enable_x64():  # precision-ok: host aperture-center transform
             px, py = coro.offax.grid.unit_to_pixel(x_lod_val, y_lod_val)
         px, py = float(px), float(py)
         yield _OffAxisPosition(separation=r, image=planet_image, px=px, py=py)
@@ -139,10 +140,14 @@ def core_separations(coro: Coronagraph, step_lod: float = CORE_STEP_LOD) -> np.n
     x_offsets = np.asarray(coro._offaxis_backend.x_offsets, dtype=float)
     x_offsets = x_offsets[x_offsets >= 0]
     edge = coro.grid.shape[1] * coro.grid.step / 2 - CORE_WINDOW_LOD
-    s_max = max(min(x_offsets.max(), edge), x_offsets.min())
-    n_steps = int(np.floor((s_max - x_offsets.min()) / step_lod + 1e-9))
-    grid = x_offsets.min() + step_lod * np.arange(n_steps + 1)
-    if s_max - grid[-1] > 1e-9:
+    s_min = x_offsets.min()
+    s_max = max(min(x_offsets.max(), edge), s_min)
+    # Allow host roundoff at the separation scale when counting and rebuilding
+    # grid steps at the endpoint.
+    endpoint_roundoff = 4 * eps(x_offsets.dtype) * s_max
+    n_steps = int(np.floor((s_max - s_min + endpoint_roundoff) / step_lod))
+    grid = s_min + step_lod * np.arange(n_steps + 1)
+    if s_max - grid[-1] > endpoint_roundoff:
         grid = np.append(grid, s_max)
     # The synthesized PSF changes slope at every tabulated offset, so the
     # offsets themselves are knots.

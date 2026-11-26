@@ -129,6 +129,7 @@ markers = [
 # The sinc docs scripts write committed evidence by hand; they are not doc examples.
 addopts = "-p hwoutils.testing.precision -m 'not network' --ignore=docs/sinc/scripts"
 default_precision = "float32"
+precision_guard_enforce = true
 
 [tool.testbudget]
 library = "yippy"

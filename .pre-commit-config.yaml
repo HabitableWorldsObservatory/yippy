@@ -1,8 +1,10 @@
 repos:
   - repo: https://github.com/CoreySpohn/hwoutils
-    rev: 7ea5d77
+    rev: 328aa0d
     hooks:
       - id: no-internal-refs
+      - id: precision-guard
+        args: [--enforce]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: "v6.0.0"
     hooks:

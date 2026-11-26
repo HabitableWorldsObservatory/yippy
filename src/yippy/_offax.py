@@ -232,7 +232,7 @@ class OffAx:
             and isinstance(y, Quantity)
             and x.unit == y.unit == u.pix
         ):
-            with jax.enable_x64():
+            with jax.enable_x64():  # precision-ok: host pixel-pair transform
                 x, y = self.grid.pixel_to_unit(x.to_value(u.pix), y.to_value(u.pix))
             x, y = np.asarray(x), np.asarray(y)
         else:
@@ -240,7 +240,9 @@ class OffAx:
             for value, axis in ((x, "x"), (y, "y")):
                 if isinstance(value, Quantity):
                     if value.unit == u.pix:
-                        with jax.enable_x64():
+                        with (
+                            jax.enable_x64()  # precision-ok: host pixel-axis transform
+                        ):
                             point = self.grid.pixel_to_unit(
                                 value.to_value(u.pix)
                                 if axis == "x"

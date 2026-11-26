@@ -142,7 +142,7 @@ jobs:
       - name: Execute fenced code blocks
         run: |
           pytest README.md docs --markdown-docs --markdown-docs-syntax=superfences \
-            -p no:cacheprovider --timeout=120 -ra --tb=short \
+            -p no:cacheprovider -p hwoutils.precision_guard --timeout=120 -ra --tb=short \
             --junitxml=junit-docs.xml
 
       # Executes {code-cell} blocks and notebooks, and fails on any Sphinx warning.
