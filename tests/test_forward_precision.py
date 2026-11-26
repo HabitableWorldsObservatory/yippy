@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 from hwoutils.leaves import canonical
+from hwoutils.numerics import roundoff
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
 from optixstuff.grids import Image, Measure
 from optixstuff.performance import azimuthal_mean_profile, profile_radii
@@ -82,9 +83,12 @@ def test_fits_source_boundary_with_float64_coordinates(fits_models, compiled):
 def test_delivery_blend_angular_wrap_with_float32_offsets(tmp_path, compiled):
     """At the negative x-axis, a float64 read uses the full angular period.
 
-    The reference pixel is from a float64 blend of the same synthetic FITS
-    table with a full-width period. Allow 128 float64 epsilons at its peak
-    for four blended windows with length-16 FFT shifts on each axis.
+    The reference uses the stored binary32 samples and offsets widened before
+    arithmetic. For pitch p = float32(0.38), the bracketing rings have radii
+    p and sqrt(2)*p. In each ring the angular span is pi/2. A direct 16-by-16
+    DFT at pixel (y=1, x=0) gives the shifted values for the two windows that
+    cover it, centered originally at (-p, 0) and (-p, p). Allow 128 roundings
+    at the reference pixel scale for four windows and their length-16 FFTs.
     """
     manifest = write_delivery(tmp_path, full=True)
     offsets = tmp_path / "offsets.fits"
@@ -103,12 +107,14 @@ def test_delivery_blend_angular_wrap_with_float32_offsets(tmp_path, compiled):
     result = (jax.jit(read) if compiled else read)(query)
     np.testing.assert_array_equal(result.valid, [True])
     assert result.image.data.dtype == np.float64
-    peak = 0.02014727633478523
+    pixel = 0.020147278108169266
+    dtype = result.image.data.dtype
+    atol = roundoff(pixel, n_ops=128, dtype=dtype)  # tol: floating-point, FFT blend
     np.testing.assert_allclose(
         result.image.data[0, 1, 0],
-        peak,
+        pixel,
         rtol=0,
-        atol=float(ulps(128, np.float64(peak))),
+        atol=float(atol),
     )
 
 

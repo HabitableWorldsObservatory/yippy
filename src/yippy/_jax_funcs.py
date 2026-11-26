@@ -1024,7 +1024,8 @@ def synthesize_psf_idw(
         y_symmetric,
         input_type,
     )
-    neighbors = flat_psfs[inds]
+    # Gather before widening so only the four shifted windows enter the FFT.
+    neighbors = like(flat_psfs[inds], weights)
 
     # Pad and FFT (Standard Shift Logic)
     pad_width = ((0, 0), (n_pad, n_pad), (n_pad, n_pad))
