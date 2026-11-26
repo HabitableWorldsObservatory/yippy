@@ -260,6 +260,13 @@ JAX arrays, including arguments to `jit`, use a common binary32 grid for
 permission and tap selection in both lanes. Weights and contractions use
 the precision selected at reader construction.
 
+Product declarations keep wavelength, support extent, and photon conversion
+arrays in host float64 in both lanes. If a PyTree update replaces one of
+these arrays with a narrower floating dtype, raw and prefiltered reader
+construction raises `hwoutils.precision.PrecisionError` and names the field.
+An integer array, complex array, or non-array in one of these fields is a
+`TypeError`.
+
 The prefilter operates on the delivered samples in host binary64.
 Each coefficient chunk is checked before rounding once into storage.
 An overflow or an underflow to zero raises `ValueError` during

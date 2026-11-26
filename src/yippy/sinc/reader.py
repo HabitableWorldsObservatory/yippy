@@ -330,6 +330,8 @@ class AbstractImageReader(eqx.Module):
 
 def _bind_evidence(grid, domain, profile):
     """Return a verified covered point and the unknown-error model of a reader."""
+    # PyTree updates can replace metadata without running its converters.
+    grid.products.__check_init__()
     if not in_supported_range(domain):
         raise ValueError("Domain lies outside the supported numeric range")
     point = safe_query(domain, grid.source, grid.reflection.kind != "none", profile)
@@ -626,6 +628,10 @@ class Interpolator(AbstractGridReader):
             policy: Read policy.
             tiling: Query chunk and pixel tile sizes.
             memory: Byte ceilings the reader checks its estimates against.
+
+        Raises:
+            PrecisionError: If float64 product metadata has a narrower floating dtype.
+            TypeError: If the kernel profile or a product metadata type is invalid.
         """
         if not isinstance(profile, KernelProfile):
             raise TypeError("Interpolator reads with the raw KernelProfile")
@@ -746,6 +752,10 @@ class PrefilteredReader(AbstractGridReader):
             policy: Read policy.
             tiling: Query chunk and pixel tile sizes.
             memory: Byte ceilings the reader checks its estimates against.
+
+        Raises:
+            PrecisionError: If float64 product metadata has a narrower floating dtype.
+            TypeError: If the kernel profile or a product metadata type is invalid.
         """
         if not isinstance(profile, PrefilteredKernelProfile):
             raise TypeError("PrefilteredReader needs a PrefilteredKernelProfile")
@@ -938,6 +948,10 @@ def make_reader(grid, domain, *, profile, policy=None, tiling=None, memory):
 
     Returns:
         The reader for the profile.
+
+    Raises:
+        PrecisionError: If float64 product metadata has a narrower floating dtype.
+        TypeError: If the kernel profile or a product metadata type is invalid.
     """
     reader = (
         PrefilteredReader
