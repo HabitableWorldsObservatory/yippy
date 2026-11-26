@@ -3,11 +3,11 @@
 import astropy.units as u
 import numpy as np
 from astropy.units import Quantity
+from hwoutils.precision import float_dtype
 from lod_unit import lod
 from optixstuff.grids import Frame, Image
 from scipy.interpolate import CubicSpline, PchipInterpolator
 
-from ._precision import float_dtype
 from .sampling import STELLAR_RECONSTRUCTION, fraction_image, sample_units
 
 STELLAR_INTERPOLATION_REVISION = 1

@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.numerics import eps
+from hwoutils.precision import dtype_tag
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule, Circular
 from optixstuff.performance import (
@@ -18,7 +19,6 @@ from optixstuff.performance import (
 )
 
 from ._offjax import OffJAX
-from ._precision import dtype_tag
 from ._sky_trans import sky_transmission_image
 from ._stellar_intens import STELLAR_INTERPOLATION_REVISION, StellarIntens
 from ._util import (

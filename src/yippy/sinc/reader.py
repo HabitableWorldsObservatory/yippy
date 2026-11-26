@@ -335,18 +335,19 @@ def _bind_evidence(grid, domain, profile):
     point = safe_query(domain, grid.source, grid.reflection.kind != "none", profile)
     if point is None:
         raise ValueError("Domain has no covered query")
+    storage_dtype = jnp.result_type(grid.intensity)
+    compute_dtype = float_dtype()
     binding = EvidenceBinding(
         grid.receipt_id,
         grid.products.identity,
         "absolute_max_pixel_delivered",
-        f"{profile.identity}:storage-{jax.dtypes.canonicalize_dtype(grid.intensity.dtype)}:"
-        f"compute-{np.dtype(float_dtype())}:"
+        f"{profile.identity}:storage-{storage_dtype}:compute-{compute_dtype}:"
         f"jax-{jax.__version__}:{jax.default_backend()}:delivered",
         domain,
     )
     return (
         tuple(map(float, point)),
-        jnp.asarray(point, dtype=float_dtype()),
+        jnp.asarray(point, dtype=compute_dtype),
         UnknownErrorModel(binding),
     )
 
@@ -770,7 +771,7 @@ class PrefilteredReader(AbstractGridReader):
             build_coefficients(
                 grid.intensity,
                 designs,
-                storage_dtype=jax.dtypes.canonicalize_dtype(grid.intensity.dtype),
+                storage_dtype=jnp.result_type(grid.intensity),
             )
         )
         self.grid = dataclasses.replace(
