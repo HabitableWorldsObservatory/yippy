@@ -19,6 +19,8 @@ from yippy.sinc.kernel import (
 )
 
 _RAW_PROFILE = KernelProfile()
+MIN_GEOMETRY_LOD = 1e-6  # tol: algorithm, 1e-6 lambda/D minimum nonzero geometry
+MAX_GEOMETRY_LOD = 1e6
 
 
 class Domain(eqx.Module):
@@ -221,9 +223,15 @@ def in_supported_range(domain):
         True if the domain limits or radii are in range.
     """
     if domain.kind == "box":
-        return all(abs(v) <= 1e6 for row in domain.limits_xy_lod.tolist() for v in row)
+        return all(
+            abs(v) <= MAX_GEOMETRY_LOD
+            for row in domain.limits_xy_lod.tolist()
+            for v in row
+        )
     inner, outer = domain.radii_lod.tolist()
-    return (inner == 0 or 1e-6 <= inner <= 1e6) and 1e-6 <= outer <= 1e6
+    return (
+        inner == 0 or MIN_GEOMETRY_LOD <= inner <= MAX_GEOMETRY_LOD
+    ) and MIN_GEOMETRY_LOD <= outer <= MAX_GEOMETRY_LOD
 
 
 def coverage(query, lattice, reflected, profile=_RAW_PROFILE):

@@ -165,7 +165,7 @@ def plot_residual(
     ep = _require.eyepiece()
     grid = _display_grid(data.shape, pixscale_lod, pixels)
     # Keep source-disk membership in the static grid's host precision.
-    with jax.enable_x64():
+    with jax.enable_x64():  # precision-ok: host source-disk mask geometry
         x, y = map(np.asarray, grid.coordinates())
 
     def resolve(values, reference, point):

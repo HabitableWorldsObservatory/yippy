@@ -664,9 +664,9 @@ def admit_grid(
     offset_dtype = (
         offsets.dtype
         if offset_original_dtype is None
-        else jnp.dtype(offset_original_dtype)
+        else np.dtype(offset_original_dtype)
     )
-    if offset_dtype not in (jnp.dtype(jnp.float32), jnp.dtype(jnp.float64)):
+    if offset_dtype not in FLOAT_DTYPES:
         raise TypeError("Original offsets require float32 or float64 precision")
     if nodes.ndim != 4:
         raise ValueError("Nodes require [product, source, row, column]")

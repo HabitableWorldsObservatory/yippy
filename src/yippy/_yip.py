@@ -8,6 +8,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.numerics import eps
 from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule, Circular
 from optixstuff.performance import (
@@ -574,6 +575,8 @@ class _YIPData:
             self.stellar_intens.diams.value if diameter is None else [diameter],
             dtype=float,
         ) / float(angular_ratio)
+        # The host wavelength conversions and their ratio set the diameter scale.
+        diameter_rtol = 16 * eps(expected_diameters.dtype)
         identity = self._perf_identity(rule, leakage_rule, diameter, separations_lod)
         expected = cache_identity_digest(identity)
         directory = self._perf_dir if cache_dir is None else Path(cache_dir)
@@ -600,7 +603,7 @@ class _YIPData:
                     or not np.allclose(
                         record.stellar_diameters_lod,
                         expected_diameters,
-                        rtol=1e-12,
+                        rtol=diameter_rtol,
                         atol=0,
                     )
                 ):

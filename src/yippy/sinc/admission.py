@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import numpy as np
 
+from yippy.sinc.domain import MAX_GEOMETRY_LOD, MIN_GEOMETRY_LOD, normal_or_zero
 from yippy.sinc.evidence import Reason
 from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile
 
@@ -44,7 +45,7 @@ def offset_evidence(offsets, origin, spacing, indices, original_dtype=None):
         np.max(np.abs(offsets.astype(np.float64)), axis=0), np.abs(spacing)
     ).astype(dtype)
     tolerance = 4 * (np.nextafter(scale, np.array(np.inf, dtype)) - scale).astype(
-        np.float64
+        np.float64  # precision-ok: NumPy ULPs widened for the host residual check
     )
     expected = (
         np.asarray(origin, np.float64) + np.asarray(indices, np.float64) * spacing
@@ -237,8 +238,6 @@ def lattice_reasons(origin, spacing, basis=None):
     Returns:
         Reason flags for nonuniform or unsupported layout; empty when valid.
     """
-    from yippy.sinc.domain import normal_or_zero
-
     reasons = Reason(0)
     if not all(normal_or_zero(v) for v in (*origin, *spacing)) or not all(
         h > 0 for h in spacing
@@ -247,8 +246,10 @@ def lattice_reasons(origin, spacing, basis=None):
     if basis is not None and (basis[0][1] != 0 or basis[1][0] != 0):
         reasons |= Reason.GRID_NONUNIFORM
     if not (
-        all(1e-6 <= h <= 1e6 for h in spacing)
-        and all(v == 0 or 1e-6 <= abs(v) <= 1e6 for v in origin)
+        all(MIN_GEOMETRY_LOD <= h <= MAX_GEOMETRY_LOD for h in spacing)
+        and all(
+            v == 0 or MIN_GEOMETRY_LOD <= abs(v) <= MAX_GEOMETRY_LOD for v in origin
+        )
     ):
         reasons |= Reason.LAYOUT_UNSUPPORTED
     return reasons

@@ -210,32 +210,42 @@ class _BlendPlan:
 
 
 def _read_plan(backend):
-    """The blend reader of a backend as a function of one source position.
-
-    Call it inside ``jax.enable_x64()`` so the offsets keep double precision.
-    """
+    """Close over host offsets, then read at the dtype of each source position."""
     scale = float(backend.pixel_scale_arcsec.value)
     xsym, ysym = bool(backend.x_symmetric), bool(backend.y_symmetric)
     if backend.type == "1d":
-        args = (
-            *(
-                jnp.asarray(a, jnp.float64)
-                for a in (backend.x_offsets, backend.y_offsets)
-            ),
-            jnp.asarray(backend.offset_to_flat_idx),
-        )
+        x_offsets, y_offsets = map(np.asarray, (backend.x_offsets, backend.y_offsets))
+        indices = jnp.asarray(backend.offset_to_flat_idx)
 
         def read(x, y):
-            return separable_read_plan(x, y, scale, *args, xsym, ysym, "1d")
+            return separable_read_plan(
+                x,
+                y,
+                scale,
+                like(x_offsets, x),
+                like(y_offsets, y),
+                indices,
+                xsym,
+                ysym,
+                "1d",
+            )
 
     else:
-        args = tuple(
-            jnp.asarray(a, jnp.float64)
-            for a in (backend.flat_x_offsets, backend.flat_y_offsets)
+        x_offsets, y_offsets = map(
+            np.asarray, (backend.flat_x_offsets, backend.flat_y_offsets)
         )
 
         def read(x, y):
-            return idw_read_plan(x, y, scale, *args, xsym, ysym, backend.type)
+            return idw_read_plan(
+                x,
+                y,
+                scale,
+                like(x_offsets, x),
+                like(y_offsets, y),
+                xsym,
+                ysym,
+                backend.type,
+            )
 
     return read
 
@@ -249,7 +259,7 @@ def _blend_plan(backend, grid, valid, itemsize):
     npix = backend.flat_psfs.shape[-1]
     out_shape = tuple(backend.flat_psfs.shape[-2:])
     xsym, ysym = bool(backend.x_symmetric), bool(backend.y_symmetric)
-    with jax.enable_x64():
+    with jax.enable_x64():  # precision-ok: host plan fixes source shift groups
         xg, yg = grid.coordinates()
         xs, ys = np.asarray(xg, np.float64).ravel(), np.asarray(yg, np.float64).ravel()
         read = jax.jit(jax.vmap(_read_plan(backend)))
