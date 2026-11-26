@@ -229,14 +229,8 @@ def _assert_dependency_closed(read, *args, error=AssertionError, match):
         raise
 
 
-_GRID_WIDENING = (
-    r"[^\n]*/optixstuff/grids\.py:\d+:\d+ \(PixelGrid\.coordinates\): "
-    r"precision widened to float64"
-)
-
-
 @pytest.mark.parametrize(
-    ("read", "match", "operations"),
+    ("read", "operations"),
     [
         pytest.param(
             lambda m, q: (
@@ -247,41 +241,25 @@ _GRID_WIDENING = (
                     ),
                 ).data
             ),
-            _GRID_WIDENING,
             64,
             id="sky-shifted",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=_DependencyPrecisionError,
-                reason="optixstuff PixelGrid.coordinates widens shifted sky to float64",
-            ),
         ),
         pytest.param(
             lambda m, q: m.curves().evaluate("leakage_density_lod2", q[0], q[1]),
-            r"[^\n]*/optixstuff/performance\.py:\d+:\d+ "
-            r"\(PerformanceCurves\._evaluate_by_diameter\): "
-            r"precision widened to float64",
             128,
             id="leakage",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=_DependencyPrecisionError,
-                reason="optixstuff diameter-dependent leakage widens to float64",
-            ),
         ),
     ],
 )
-def test_coronagraph_read_closure_waiting_on_dependencies(
-    fits_models, read, match, operations
-):
-    """Check dependency promotions and compare the callable reads to float64.
+def test_coronagraph_shifted_read_closure(fits_models, read, operations):
+    """Check closure and compare the callable reads to float64.
 
     Allow 64 peak-scaled epsilons for shifted sky coordinates and bilinear
     interpolation. Allow 128 for nested leakage polynomials in log space.
     """
     args = (fits_models["2d"], jnp.array([0.0625, 0.09375]))
     precision_pair(read, args, bound=float(ulps(operations, np.float32(1))))
-    _assert_dependency_closed(read, *canonical(args, precision="float32"), match=match)
+    assert_precision_closed(read, *canonical(args, precision="float32"))
 
 
 @pytest.mark.xfail(
@@ -571,11 +549,6 @@ def test_scene_coronagraph_closure(fits_models, delivery_models, kind, entry_poi
     precision_pair(values, args, bound=float(ulps(256, np.float32(1))))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=_DependencyPrecisionError,
-    reason="optixstuff PixelGrid.coordinates widens scene resampling to float64",
-)
 def test_render_scene_with_resampled_input_closure(fits_models):
     """Allow 256 peak-scaled epsilons for coverage, overlap and detector reads.
 
@@ -597,6 +570,4 @@ def test_render_scene_with_resampled_input_closure(fits_models):
     data, valid = read(*args)
     assert valid and np.max(data) > 0
     precision_pair(read, args, bound=float(ulps(256, np.float32(1))))
-    _assert_dependency_closed(
-        read, *canonical(args, precision="float32"), match=_GRID_WIDENING
-    )
+    assert_precision_closed(read, *canonical(args, precision="float32"))
