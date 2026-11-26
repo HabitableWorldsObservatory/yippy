@@ -7,6 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import canonical
 from lod_unit import lod
 from optixstuff.grids import Measure, PixelGrid
 
@@ -14,6 +15,7 @@ from .._jax_funcs import synthesize_psf_idw
 from ..interpolation import InterpolationRead, ReadLedger, blend_read
 from ..sampling import fraction_image
 from ..sinc.evidence import Reason
+from ..sinc.geometry import array_namespace
 from ..sinc.reader import require_read
 
 # Construction/query fallbacks allowed for declared complete full rectangles.
@@ -28,7 +30,6 @@ _FALLBACK_MASK = int(
     | Reason.INCOMPLETE_STENCIL
     | Reason.OUTSIDE_DOMAIN
     | Reason.SYMMETRY_UNSUPPORTED
-    | Reason.PRECISION_UNAVAILABLE
     | Reason.MEMORY_LIMIT
 )
 
@@ -96,7 +97,9 @@ class DeliveryBackend(eqx.Module):
             order = np.argsort(
                 delivery.indices[:, 1] * delivery.shape_yx[1] + delivery.indices[:, 0]
             )
-            self.training_nodes = jnp.asarray(delivery.nodes)[order]
+            self.training_nodes = canonical(
+                delivery.nodes, precision=reader.grid.intensity.dtype
+            )[order]
         full = delivery.manifest["layout"] == "full_rectangle" and (
             reader is None or requested == "auto"
         )
@@ -187,7 +190,6 @@ class DeliveryBackend(eqx.Module):
             * self.conversion
         )
 
-    @eqx.filter_jit
     def create_psf_with_info(self, x_lod, y_lod):
         """Read a fixed product and return photon-unit image and diagnostics.
 
@@ -199,13 +201,21 @@ class DeliveryBackend(eqx.Module):
             The interpolation read: the photon-unit image with its acceptance, status,
             error evidence and ledger.
         """
-        dtype = (
-            jnp.float64
-            if self.reader is not None
-            else jax.dtypes.canonicalize_dtype(jnp.float64)
+        xp = array_namespace(x_lod, y_lod)
+        query = xp.stack((x_lod, y_lod), axis=-1)
+        if query.shape != (2,):
+            raise ValueError("Coordinates must be scalars")
+        prepared = None
+        if self.reader is not None:
+            self.reader.memory.check(self.reader.memory_estimate(1))
+            prepared = self.reader._prepare(query)
+        return self._read_query(
+            jnp.asarray(query, dtype=self.x_offsets.dtype), prepared
         )
-        query = jnp.array([x_lod, y_lod], dtype=dtype)
-        finite = jnp.all(jnp.isfinite(query))
+
+    @eqx.filter_jit
+    def _read_query(self, query, prepared):
+        finite = jnp.all(jnp.isfinite(query)) if prepared is None else prepared.finite
         if self.reader is None:
             safe = jnp.where(finite, query, jnp.zeros(2))
             return blend_read(
@@ -216,7 +226,7 @@ class DeliveryBackend(eqx.Module):
                 target_id="incident_photon_per_pixel:" + self.product_identity,
                 profile_id=f"blend:conversion-{self.conversion}",
             )
-        result = self.reader.read(query, jnp.int32(0))
+        result = self.reader._read_prepared(prepared, jnp.int32(0))
         ledger = result.ledger
         factor = self.conversion
         converted = InterpolationRead(
@@ -306,12 +316,8 @@ class DeliveryBackend(eqx.Module):
             The interpolation reads of the N sources, stacked on a leading axis of
             length N.
         """
-        dtype = (
-            jnp.float64
-            if self.reader is not None
-            else jax.dtypes.canonicalize_dtype(jnp.float64)
-        )
-        x, y = jnp.asarray(x_lod, dtype), jnp.asarray(y_lod, dtype)
+        xp = array_namespace(x_lod, y_lod)
+        x, y = xp.asarray(x_lod), xp.asarray(y_lod)
         if x.ndim != 1 or x.shape != y.shape:
             raise ValueError("Coordinates must be equal-length vectors")
         if self.reader is not None:
@@ -325,7 +331,12 @@ class DeliveryBackend(eqx.Module):
         if not x.size:
             shape = eqx.filter_eval_shape(self.create_psf_with_info, 0.0, 0.0)
             return jax.tree.map(lambda a: jnp.empty((0, *a.shape), a.dtype), shape)
-        return jax.lax.map(lambda xy: self.create_psf_with_info(*xy), (x, y))
+        queries = xp.stack((x, y), axis=-1)
+        prepared = None if self.reader is None else self.reader._prepare(queries)
+        return jax.lax.map(
+            lambda pair: self._read_query(*pair),
+            (jnp.asarray(queries, dtype=self.x_offsets.dtype), prepared),
+        )
 
     def _require(self, result):
         if self.reader is not None and not isinstance(result.accepted, jax.core.Tracer):

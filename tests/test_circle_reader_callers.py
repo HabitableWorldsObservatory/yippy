@@ -6,6 +6,7 @@ import equinox as eqx
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.numerics import eps
 from optixstuff.apertures import Circular
 from optixstuff.performance import performance_curves
 from scipy.interpolate import PchipInterpolator
@@ -17,13 +18,15 @@ from yippy import open_yip
 from yippy.performance import stellar_intensity_curves
 
 
-def quintic_ring_reference(image, center, radii_pix):
+def quintic_ring_reference(image, center, radii_pix, *, absolute=False):
     """Independent scipy cardinal spline sampled on in-image circle arcs."""
     image = np.asarray(image, dtype=np.float64)
     padding = 48
     coefficients = spline_filter(
         np.pad(image, padding, mode="edge"), order=5, mode="nearest"
     )
+    if absolute:
+        coefficients = np.abs(coefficients)
     ny, nx = image.shape
     n_theta = 2 * max(image.shape)
     profiles = []
@@ -111,12 +114,12 @@ def reader_coro(request, tmp_path_factory):
     return coro
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
 @pytest.mark.parametrize("diameter", [0.0, 0.03])
-def test_public_intensity_selects_reader(reader_coro, diameter):
-    """Point and extended sources use the requested reader in both public views."""
+def test_public_intensity_selects_reader(reader_coro, diameter, precision):
+    """Point and extended sources use the requested reader in both public views.
+
+    Allow 128 epsilon units for the weighted ring sum and interpolation.
+    """
     coro = reader_coro
     separation = np.array([1.0, 2.0, 3.0])
     keys_before = (
@@ -149,42 +152,44 @@ def test_public_intensity_selects_reader(reader_coro, diameter):
     keys_after = stellar_intensity_curves(
         coro, getattr(diameter, "value", diameter), interpolation="keys"
     ).evaluate(separation)
-    np.testing.assert_allclose(actual, expected, rtol=1e-12)
-    np.testing.assert_allclose(traced, expected, rtol=1e-12)
+    np.testing.assert_allclose(actual, expected, rtol=128 * eps(precision))
+    np.testing.assert_allclose(traced, expected, rtol=128 * eps(precision))
+    unsigned = np.dtype(f"u{np.asarray(keys_before).dtype.itemsize}")
     np.testing.assert_array_equal(
-        np.asarray(keys_before).view(np.uint64), np.asarray(keys_after).view(np.uint64)
+        np.asarray(keys_before).view(unsigned), np.asarray(keys_after).view(unsigned)
     )
     assert np.max(np.abs(keys_before / expected - 1)) > 1e-3
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
-def test_curve_and_noise_callers_forward_reader(reader_coro):
-    """Every diameter record matches independent scipy rings and PCHIP at 1e-12."""
+def test_curve_and_noise_callers_forward_reader(reader_coro, precision):
+    """Compare ring photometry and interpolation to host SciPy.
+
+    Scale 128 epsilon units by the local absolute spline coefficient sum
+    before interpolation, so signed cancellation in a faint ring is counted.
+    """
     coro = reader_coro
     grid = coro.stellar_grid
     diameters = np.r_[0.0, np.asarray(coro._stellar_ln_interp.x)[1:]]
     for diameter in diameters:
         record = stellar_intensity_curves(coro, diameter, interpolation="quintic")
         nodes = np.asarray(record.separation_lod)
-        expected = quintic_ring_reference(
-            coro.stellar_map(None, diameter).integrated().data,
-            (grid.center_y, grid.center_x),
-            nodes / grid.step,
-        )
+        image = coro.stellar_map(None, diameter).integrated().data
+        center = grid.center_y, grid.center_x
+        radii = np.asarray(nodes, dtype=np.float64) / grid.step
+        expected = quintic_ring_reference(image, center, radii)
+        scale = quintic_ring_reference(image, center, radii, absolute=True)
         queries = np.sort(np.r_[nodes, (nodes[1:] + nodes[:-1]) / 2])
         actual = record.evaluate(queries)
-        np.testing.assert_allclose(
-            actual, PchipInterpolator(nodes, expected)(queries), rtol=1e-12
-        )
+        reference = PchipInterpolator(nodes, expected)(queries)
+        allowance = 128 * eps(precision) * np.interp(queries, nodes, scale)
+        assert np.all(np.abs(actual - reference) <= allowance)
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
-def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
-    """Opt-in table construction keeps later Keys requests and JAX views distinct."""
+def test_rebuilt_tables_do_not_change_default_reader(reader_coro, precision):
+    """Opt-in table construction keeps later Keys requests and JAX views distinct.
+
+    Allow 128 epsilon units for ring quadrature, cubic evaluation and JIT.
+    """
     coro = reader_coro
     separation = np.array([1.0, 2.0, 3.0])
     diameter = float(coro._stellar_ln_interp.x[-1])
@@ -215,13 +220,13 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
             )
         )(separation, diameter)
     )
-    np.testing.assert_allclose(actual, before, rtol=1e-12)
+    np.testing.assert_allclose(actual, before, rtol=128 * eps(precision))
     np.testing.assert_allclose(
         stellar_intensity_curves(
             coro, getattr(diameter, "value", diameter), interpolation="keys"
         ).evaluate(separation),
         before,
-        rtol=1e-12,
+        rtol=128 * eps(precision),
     )
     np.testing.assert_allclose(
         stellar_intensity_curves(coro, 0.0, interpolation="quintic").evaluate(
@@ -232,5 +237,5 @@ def test_rebuilt_tables_do_not_change_default_reader(reader_coro):
             (coro.stellar_grid.center_y, coro.stellar_grid.center_x),
             separation / coro.stellar_grid.step,
         ),
-        rtol=1e-12,
+        rtol=128 * eps(precision),
     )

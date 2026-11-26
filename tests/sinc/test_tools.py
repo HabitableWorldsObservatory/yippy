@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.precision import PrecisionError, float_dtype
 
 from yippy.delivery.format import detect_delivery, load_delivery
 from yippy.delivery.tools import (
@@ -129,6 +130,14 @@ def test_documented_example_parses(example_root):
     assert len(manifest["mirror_checks"]) == 5
 
 
+@pytest.mark.float32_only(reason="Reference residuals require available float64")
+def test_validate_refuses_float32_reference_read(example_root):
+    """Python validation must honor the precision selected by its caller."""
+    with pytest.raises(PrecisionError, match="requires float64"):
+        validate(example_root)
+
+
+@pytest.mark.float64_only(reason="Reference delivery residuals require float64")
 def test_validate_passes_documented_example(example_root):
     """A delivery built from the documented example passes with its residuals."""
     report = validate(example_root)
@@ -144,9 +153,10 @@ def test_validate_passes_documented_example(example_root):
     assert "PASS" in report.summary()
 
 
-def test_validate_cli_exit_codes(example_root, tmp_path, capsys):
+def test_validate_cli_exit_codes(example_root, tmp_path, capsys, precision):
     """The command exits 0 on a pass and 1 on a failure, printing the summary."""
     assert main(["validate", str(example_root)]) == 0
+    assert float_dtype() == precision
     assert "PASS" in capsys.readouterr().out
     broken = tmp_path / "broken"
     shutil.copytree(example_root, broken)
@@ -158,6 +168,7 @@ def test_validate_cli_exit_codes(example_root, tmp_path, capsys):
     assert "sha256 mismatch" in capsys.readouterr().out
 
 
+@pytest.mark.float64_only(reason="Reference admission checks require float64")
 def test_validate_fails_missing_mirror_checks(example_root, tmp_path):
     """Dropping the negative-position checks is refused by admission."""
     broken = tmp_path / "no-mirror"

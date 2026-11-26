@@ -1,12 +1,11 @@
 """Stored nodes, virtual reflections, and stencil-served geometry."""
 
-import jax.numpy as jnp
 import numpy as np
 from matplotlib.patches import Circle, Rectangle
 
-from yippy.sinc.kernel import exact_quotient_floor_v1
+from yippy.sinc.kernel import KernelProfile
 from yippy.sinc.viz import _require
-from yippy.sinc.viz._common import lattice_parts, query_xy, require_x64, single_ax
+from yippy.sinc.viz._common import lattice_parts, query_xy, single_ax, stencil_profile
 
 
 def plot_coverage(
@@ -33,7 +32,7 @@ def plot_coverage(
         moves preallocated artists, including when query was initially omitted.
 
     Raises:
-        ValueError: Invalid lattice, query, axes shape, or disabled x64 when
+        ValueError: Invalid lattice, query or axes shape when
             drawing a query's exact stencil.
 
     Example::
@@ -112,16 +111,11 @@ def plot_coverage(
         for patch in outlines:
             ax.add_patch(patch)
 
+    at = stencil_profile(KernelProfile(), origin, spacing, shape[::-1], quadrant)
+
     def tap_corner(point):
-        require_x64()
-        floor = np.asarray(
-            exact_quotient_floor_v1(
-                jnp.asarray(point, dtype=jnp.float64),
-                jnp.asarray(origin),
-                jnp.asarray(spacing),
-            )
-        )
-        return origin + (floor - 15.5) * spacing
+        nodes, _, _ = at(point)
+        return origin + (nodes[:, 0] - 0.5) * spacing
 
     initial = np.empty((0, 2)) if point is None else point.reshape(1, 2)
     marker = ax.scatter(

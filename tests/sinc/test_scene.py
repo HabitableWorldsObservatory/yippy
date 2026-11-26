@@ -5,11 +5,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import roundoff
+from hwoutils.precision import PrecisionError
 from jax.test_util import check_grads
 
 import yippy.sinc as sc
 from yippy.sinc import scene as scene_module
 from yippy.sinc.evidence import Reason, Status
+from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
 from yippy.sinc.reader import Interpolator, read_batch
 
 from .helpers import make_prefiltered
@@ -34,21 +37,72 @@ def scene_points():
     return points, flux
 
 
+@pytest.mark.medium(reason="compiles three scene paths with and without jit, 12 s")
+def test_translated_host_scenes_keep_distinct_sources_and_flux_tangents(full_delivery):
+    """Translation preserves the two source responses and their flux derivatives.
+
+    The dyadic translation, offsets and pitch are exact in binary64, and the
+    two sources are one binary32 unit apart at the translation. The signed
+    difference of two nearby reads exposes a collapsed coordinate.
+    Each scene fold can regroup the two tap contractions, budgeted at 128
+    working epsilon units on the sum of the absolute source image peaks.
+    """
+    full_delivery = dict(
+        full_delivery,
+        memory=sc.MemoryBudget(100_000_000, 10_000_000, 60_000_000, 400_000_000),
+    )
+    local, _ = make_prefiltered(full_delivery)
+    lattice = local.grid.source
+    shift = 2.0**19
+    axes = np.array([0.125, 0.15625])
+    offsets = np.column_stack((axes, np.full(2, axes[0])))
+    positions = offsets + shift
+    domain = sc.Domain("box", "closed", [positions[0], positions[-1]], [0, 0])
+    shifted_grid = source_grid(
+        origin_xy(lattice) + shift, spacing_xy(lattice), lattice.shape, lattice.frame
+    )
+    reader, _ = make_prefiltered(
+        dict(
+            full_delivery,
+            declared_lattice=shifted_grid,
+            offsets_xy_lod=np.asarray(full_delivery["offsets_xy_lod"], np.float64)
+            + shift,
+            domain=domain,
+        )
+    )
+    reads = [local.read(q, jnp.int32(0)).intensity for q in offsets]
+    expected = reads[0] - reads[1]
+    scale = sum(jnp.max(jnp.abs(image)) for image in reads)
+    budget = float(roundoff(scale, n_ops=128, dtype=expected.dtype))
+    assert jnp.max(jnp.abs(expected)) > budget
+    x, y = positions[:, 0], positions[:1, 1]
+    raster = sc.SceneRenderer.from_raster(reader, 0, x, y)
+    points = sc.SceneRenderer(reader, 0, positions)
+    raster_grid = source_grid(positions[0], (0.03125, 0.03125), (1, 2), lattice.frame)
+    direction = jnp.array([1.0, -1.0])
+    for render in (
+        lambda f: points.render_points(positions, f).intensity,
+        lambda f: raster.render_raster(f[None, :], x, y).intensity,
+        lambda f: raster.render(f[None, :], raster_grid)[0],
+    ):
+        for run in (render, eqx.filter_jit(render)):
+            np.testing.assert_allclose(run(direction), expected, rtol=0, atol=budget)
+            _, tangent = jax.jvp(run, (jnp.zeros_like(direction),), (direction,))
+            np.testing.assert_allclose(tangent, expected, rtol=0, atol=budget)
+
+
 @pytest.fixture(scope="module", params=["tone_full", "tone_quadrant"])
 def case(request):
     return request.getfixturevalue(request.param)
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 @pytest.mark.medium(reason="compiles the render and a batch read per table, 4 s")
 def test_points_equal_summed_reads(case):
     """Fails if the fold drops, double counts or mis-flips a touched node.
 
     The render regroups the same products the reads sum, so it agrees with the
-    flux-weighted sum of reads to rounding (1e-12 of the scene scale), for a
-    full table and for a mirror-symmetric one with sources straddling its axes.
+    flux-weighted sum of reads within 128 epsilon units of scene scale for
+    two tap contractions. Use full and reflected tables and cross both axes.
     """
     reader = case["reader"]
     points, flux = scene_points()
@@ -56,7 +110,12 @@ def test_points_equal_summed_reads(case):
     result = render_points(renderer, points, flux)
     expected = brute(reader, points, flux)
     scale = case["norm"] * float(jnp.sum(flux))
-    np.testing.assert_allclose(result.intensity, expected, rtol=0, atol=1e-12 * scale)
+    np.testing.assert_allclose(
+        result.intensity,
+        expected,
+        rtol=0,
+        atol=float(roundoff(scale, n_ops=128, dtype=result.intensity.dtype)),
+    )
     assert bool(result.accepted) and bool(result.sampling_ok)
     assert int(result.status) == Status.SAMPLING_ADMITTED
     assert int(result.reason_bits) == Reason.BOUND_UNKNOWN
@@ -66,16 +125,14 @@ def test_points_equal_summed_reads(case):
     assert not np.any(np.asarray(result.ledger.evidence))
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for FFT shifts and scene contraction"
-)
 @pytest.mark.medium(reason="compiles raster, point and batch paths per table, 4 s")
 def test_raster_equals_points_and_summed_reads(case):
     """Fails if the separable raster fold swaps axes or loses a pixel.
 
     The raster is not square and crosses both mirror axes; one pixel is dark.
     No center sits on a half cell, where the stencil choice can depend on how
-    each path compiles.
+    each path compiles. At scene scale, 128 rounding operations allow for
+    the two tap contractions and the alternative flux summation orders.
     """
     reader = case["reader"]
     x, y = jnp.linspace(-0.9, 1.3, 6), jnp.linspace(-1.1, 0.66, 4)
@@ -91,7 +148,10 @@ def test_raster_equals_points_and_summed_reads(case):
     for result in (raster, points):
         assert bool(result.accepted)
         np.testing.assert_allclose(
-            result.intensity, expected, rtol=0, atol=1e-12 * scale
+            result.intensity,
+            expected,
+            rtol=0,
+            atol=float(roundoff(scale, n_ops=128, dtype=result.intensity.dtype)),
         )
 
 
@@ -135,7 +195,7 @@ def test_refusals_padding_and_margin(tone_quadrant):
         moved.intensity,
         brute(reader, points * 0.8 + shift, flux),
         rtol=0,
-        atol=1e-11 * float(jnp.max(good)),
+        atol=float(roundoff(jnp.max(good), n_ops=128)),
     )
     far = tight.render_points(points * 0.8 + 3 * shift, flux)
     assert not bool(far.accepted)
@@ -293,3 +353,16 @@ def test_float32_table_accumulation(tone_quadrant, monkeypatch):
     assert error <= 1e-6
     with pytest.raises(ValueError, match="accumulate"):
         sc.SceneRenderer(reader, 0, points, accumulate="float32")
+
+
+@pytest.mark.float32_only(
+    reason="Float64 absence must raise the shared precision error"
+)
+def test_explicit_float64_accumulation_requires_x64(tone_full):
+    """A float32 scene can render, while an explicit float64 request refuses."""
+    points, flux = scene_points()
+    reader = tone_full["reader"]
+    result = sc.SceneRenderer(reader, 0, points).render_points(points, flux)
+    assert result.accepted and result.intensity.dtype == jnp.float32
+    with pytest.raises(PrecisionError, match=r"float64 accumulation.*Enable x64"):
+        sc.SceneRenderer(reader, 0, points, accumulate="float64")

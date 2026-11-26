@@ -10,10 +10,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given
+from hwoutils.numerics import eps
+from hwoutils.testing import precision_pair
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
-from yippy.sinc.kernel import exact_quotient_floor_v1, flush_subnormal, weights
+from yippy.sinc.kernel import (
+    KernelProfile,
+    exact_quotient_floor_v1,
+    flush_subnormal,
+    read_stencil,
+    weights,
+)
 
 
 def truth(q, origin, h):
@@ -61,9 +69,13 @@ def test_floor_edge_list():
     origin=st.floats(-10.0, 10.0, allow_subnormal=False),
     h=st.floats(0.05, 0.5, allow_subnormal=False),
 )
-def test_floor_fraction_property(q, origin, h):
-    """Fails if dynamic pitches or shifted origins break exact-real floors."""
-    expected = truth(q, origin, h)
+def test_floor_fraction_property(q, origin, h, precision):
+    """Compare exact-real floors of rounded data in the admitted origin range."""
+    q, origin, h = map(precision.type, (q, origin, h))
+    assume(origin == 0 or abs(origin) >= 1e-6)
+    if abs(q) < np.finfo(precision).tiny:
+        q = precision.type(math.copysign(0.0, q))
+    expected = math.floor(Fraction(float(q - origin)) / Fraction(float(h)))
     args = tuple(jnp.asarray(v) for v in (q, origin, h))
     assert float(compiled_floor(*args)) == expected
     assert float(exact_quotient_floor_v1(*args)) == expected
@@ -90,3 +102,64 @@ def test_raw_kernel_and_gradient():
     np.testing.assert_array_equal(derivative[jnp.array([0, 1, 6, 7])], jnp.zeros(4))
     taps = jnp.arange(-15, 17)
     assert abs(float(jnp.sum(weights(0.37 - taps))) - 1) > 1e-8
+
+
+def test_host_origin_retains_the_local_phase(precision):
+    """A shift below a large coordinate's float32 spacing still sets the taps.
+
+    The host reference differences q and origin before division. Fourteen
+    epsilon units cover phase arithmetic and the window and sinc factors
+    against the independently evaluated float64 kernel.
+    """
+    query = np.array([1e6, 1e6])
+    pitch = np.array([0.025, 0.025])
+    origin = query - np.array([0.5125, 0.4875])
+    phase = (query - origin) / pitch
+    expected = np.floor(phase).astype(int)[:, None] + np.arange(-15, 17)
+    arg = phase[:, None] - expected
+    window = np.i0(12 * np.sqrt(np.maximum(0, 1 - (arg / 16) ** 2))) / np.i0(12)
+    weights_ref = np.where(np.abs(arg) < 16, np.sinc(arg) * window, 0)
+    stencil = eqx.filter_jit(
+        lambda q: read_stencil(KernelProfile(), q, origin, pitch, (48, 48))
+    )
+    position = jnp.asarray(query)
+    found = stencil(position)
+    if precision == np.dtype("float64"):
+        precision_pair(
+            lambda q: stencil(q).weights, (position,), bound=14 * eps(np.float32)
+        )
+    np.testing.assert_array_equal(found.nodes, expected)
+    np.testing.assert_allclose(
+        found.weights, weights_ref, rtol=0, atol=14 * eps(precision)
+    )
+
+
+def test_stencil_matches_host_subtraction_at_a_zero_crossing():
+    """Both lanes use the binary64 rounding boundary for the same queries."""
+    origin = np.array([-5.0, -5.0])
+    spacing = np.array([0.25, 0.25])
+    queries = np.array([[-(2.0**-55), -(2.0**-48)], [0.0, 2.0**-55]])
+    expected = np.floor((queries - origin) / spacing).astype(np.int32) - 15
+    start = jax.jit(
+        jax.vmap(
+            lambda q: read_stencil(KernelProfile(), q, origin, spacing, (41, 41)).nodes[
+                :, 0
+            ]
+        )
+    )
+    np.testing.assert_array_equal(start(jnp.asarray(queries)), expected)
+
+
+def test_runtime_switch_uses_shared_coordinate_grid(precision):
+    """Both traces select the boundary tap while the host resolves its neighbor."""
+    origin, pitch = np.zeros(2), np.full(2, 0.25)
+    query = np.array([np.nextafter(5.0, -np.inf), 5.0])
+
+    def select(q):
+        return read_stencil(KernelProfile(), q, origin, pitch, (48, 48)).nodes[:, 0]
+
+    np.testing.assert_array_equal(select(query), [4, 5])
+    for runtime in (select, jax.jit(select)):
+        np.testing.assert_array_equal(
+            runtime(jnp.asarray(query, dtype=precision)), [5, 5]
+        )

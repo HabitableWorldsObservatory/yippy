@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.precision import PrecisionError
 
 import yippy.sinc as sc
 from yippy.sinc.evidence import Reason
@@ -31,6 +32,7 @@ def changed(data, key, where, value):
         ("negative", Reason.DATA_INVALID),
         ("premise", Reason.METADATA_MISSING),
         ("support", Reason.UNKNOWN_BANDWIDTH),
+        ("disjoint_support", Reason.UNKNOWN_BANDWIDTH | Reason.INCOMPLETE_STENCIL),
     ],
 )
 def test_grid_and_evidence_refusals(full_delivery, case, reason):
@@ -43,7 +45,8 @@ def test_grid_and_evidence_refusals(full_delivery, case, reason):
         data["indices_xy"] = data["indices_xy"][1:]
         data["offsets_xy_lod"] = data["offsets_xy_lod"][1:]
     elif case == "offset":
-        data["offsets_xy_lod"] = data["offsets_xy_lod"].at[0, 0].add(1e-10)
+        data["offsets_xy_lod"] = np.array(data["offsets_xy_lod"], dtype=np.float64)
+        data["offsets_xy_lod"][0, 0] += 1e-10
     elif case == "negative":
         data["intensity_nodes"] = data["intensity_nodes"].at[0, 0, 0, 0].set(-1)
     elif case == "premise":
@@ -60,8 +63,12 @@ def test_grid_and_evidence_refusals(full_delivery, case, reason):
             lambda p: p.support_evidence,
             jnp.zeros(1, dtype=jnp.int32),
         )
+        if case == "disjoint_support":
+            data["domain"] = sc.Domain(
+                "box", "closed", [[100, 100], [101, 101]], [0, 0]
+            )
     result = sc.admit_grid(**data)
-    assert not result.admitted and result.reason_bits & reason
+    assert not result.admitted and result.reason_bits & reason == reason
     with pytest.raises(sc.AdmissionRefused) as error:
         result.require()
     assert error.value.receipt is result.receipt
@@ -137,14 +144,20 @@ def test_quadrant_refusals(quadrant_delivery, case, reason):
             data,
             "mirror_checks",
             lambda c: c.intensity,
-            data["mirror_checks"].intensity.at[0, 0, 0].set(jnp.nan),
+            np.where(
+                np.indices(data["mirror_checks"].intensity.shape).sum(axis=0) == 0,
+                np.nan,
+                data["mirror_checks"].intensity,
+            ),
         )
     elif case == "failed":
         data = changed(
             data,
             "mirror_checks",
             lambda c: c.intensity,
-            data["mirror_checks"].intensity.at[0, 0, 0].add(0.1),
+            data["mirror_checks"].intensity
+            + (np.indices(data["mirror_checks"].intensity.shape).sum(axis=0) == 0)
+            * 0.1,
         )
     elif case == "declaration":
         data = changed(data, "reflection", lambda r: r.axes, jnp.array([True, False]))
@@ -255,18 +268,20 @@ def test_checkset_is_empirical(full_delivery):
     assert bool(jnp.all(jnp.isinf(result.abs_error_bound)))
 
 
-@pytest.mark.float64_only(
-    reason="Compares a float64 reader with and without float64 available"
-)
-def test_precision_and_allocation_limits(full_delivery, full_reader):
-    """Fails if x64-off silently truncates or batches allocate past byte ceilings."""
+def test_reader_after_disabling_x64(full_reader):
+    """Disabling x64 preserves float32 reads and refuses resident float64 leaves."""
     with jax.enable_x64(False):
-        admission = sc.admit_grid(**full_delivery)
-        assert admission.reason_bits == Reason.PRECISION_UNAVAILABLE
-        with pytest.raises(sc.PrecisionUnavailable):
-            admission.require()
-        with pytest.raises(sc.PrecisionUnavailable):
-            full_reader.read(jnp.array([0.0, 0.0]), jnp.int32(0))
+        query, product = jnp.zeros(2), jnp.int32(0)
+        for read in (full_reader.read, eqx.filter_jit(full_reader.read)):
+            if full_reader.grid.intensity.dtype == np.float64:
+                with pytest.raises(PrecisionError, match="requires float64"):
+                    read(query, product)
+            else:
+                assert read(query, product).accepted
+
+
+def test_allocation_limits(full_delivery, full_reader):
+    """Reject batch and admission allocations past their byte ceilings."""
     memory = sc.MemoryBudget(100_000_000, 1000, 10_000_000, 400_000_000)
     reader = eqx.tree_at(lambda r: r.memory, full_reader, memory)
     with pytest.raises(sc.MemoryLimit):

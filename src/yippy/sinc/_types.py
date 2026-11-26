@@ -5,9 +5,10 @@ from typing import get_args, get_origin
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Bool, Float32, Float64, Int32, UInt32
+from jaxtyping import Bool, Float, Float32, Int32, UInt32
 
-F64 = Float64[jax.Array, "..."]
+RealArray = Float[jax.Array, "..."]
+FLOAT_DTYPES = (jnp.float32, jnp.float64)
 F32 = Float32[jax.Array, "..."]
 I32 = Int32[jax.Array, "..."]
 U32 = UInt32[jax.Array, "..."]

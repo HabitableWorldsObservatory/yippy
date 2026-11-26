@@ -24,7 +24,7 @@ from optixstuff.coronagraph import (
 from optixstuff.grids import Image, Measure, PixelGrid, coverage
 from optixstuff.performance import RING_RULE, PerformanceCurves, SampledProfile
 from optixstuff.primary import SimplePrimary
-from optixstuff.spectral import Band
+from optixstuff.spectral import Band, same_wavelength
 
 from ._jax_funcs import blend_pad
 from ._precision import float_dtype
@@ -43,9 +43,22 @@ from .scene import (
     _DenseSceneOperator,
 )
 from .sinc import SceneRenderer
+from .sinc.geometry import array_namespace
 from .sinc.reader import PrefilteredReader
 
 _WARNED_2D: set = set()
+# Flux magnitude in the scene's units below the normal binary32 range is dark.
+_SCENE_DARK_FLUX = np.finfo(np.float32).tiny
+
+
+@jax.custom_jvp
+def _scene_flux(flux):
+    """Flush dark cells while retaining the linear operator's flux derivative."""
+    dark = (flux > -_SCENE_DARK_FLUX) & (flux < _SCENE_DARK_FLUX)
+    return jnp.where(dark, 0, flux)
+
+
+_scene_flux.defjvps(lambda tangent, result, flux: tangent)
 
 
 def _jax_record(record):
@@ -87,16 +100,13 @@ def _declared_band(offaxis_header, stellar_header):
     if (
         None in offaxis
         or None in stellar
-        or not all(
-            math.isclose(a, b, rel_tol=1e-9)
-            for a, b in zip(offaxis, stellar, strict=True)
-        )
+        or not all(same_wavelength(a, b) for a, b in zip(offaxis, stellar, strict=True))
     ):
         raise ValueError(
             "Both intensity headers must declare matching (MINLAM, MAXLAM) in nm: "
             f"offax_psf.fits has {offaxis}, stellar_intens.fits has {stellar}"
         )
-    return None if offaxis[0] == offaxis[1] else Band(*offaxis)
+    return None if same_wavelength(*offaxis) else Band(*offaxis)
 
 
 class Coronagraph(AbstractTableCoronagraph):
@@ -391,10 +401,16 @@ class Coronagraph(AbstractTableCoronagraph):
     def _native_source_psfs(self, x_lod, y_lod):
         if hasattr(x_lod, "unit") or hasattr(y_lod, "unit"):
             raise TypeError("source coordinates must be floats in lambda/D")
-        x, y = jnp.atleast_1d(jnp.asarray(x_lod)), jnp.atleast_1d(jnp.asarray(y_lod))
+        backend = self._offaxis_backend
+        xp = (
+            array_namespace(x_lod, y_lod)
+            if hasattr(backend, "create_psfs_with_info")
+            else jnp
+        )
+        x = xp.atleast_1d(xp.asarray(x_lod))
+        y = xp.atleast_1d(xp.asarray(y_lod))
         if x.ndim != 1 or x.shape != y.shape:
             raise ValueError("Coordinates must be equal-length vectors")
-        backend = self._offaxis_backend
         if hasattr(backend, "create_psfs_with_info"):
             # The delivery keeps its own admission as the source domain; the
             # image of a source it refuses is zero here, not the NaN of its read.
@@ -667,8 +683,9 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
         it. The result is finite. Its ``valid`` is False when a lit input cell
         extends beyond ``scene_grid`` or when resampled flux is nonfinite or
         falls on a cell covered by no operator.
-        Flux magnitudes below the smallest normal float32 count as zero, below
-        any physical flux.
+        Flux magnitudes below the smallest normal float32 count as zero.
+        The flux derivative on covered cells is the linear operator response,
+        including at zero flux.
 
         Args:
             scene: Cell-integral two-dimensional image of the source flux, on
@@ -684,9 +701,8 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
             raise ValueError("scene must be a two-dimensional cell-integral Image")
         source = self.scene_grid
         input_supported = True
-        if scene.grid == source:
-            flux = scene.data
-        else:
+        flux = _scene_flux(scene.data)
+        if scene.grid != source:
             source_footprint, input_grid = source, scene.grid
             if source.unit != input_grid.unit or (
                 source.unit == "lod" and source.frame != input_grid.frame
@@ -700,10 +716,9 @@ class SceneCoronagraph(Coronagraph, AbstractSceneCoronagraph):
                         input_grid.frame.reference_wavelength_nm
                     )
             inside = coverage(source_footprint, input_grid)
-            tiny = np.finfo(np.float32).tiny
-            dark = (scene.data > -tiny) & (scene.data < tiny)
-            input_supported = ~jnp.any(~dark & ~inside)
-            flux = on_grid(scene, source).data
+            input_supported = ~jnp.any((flux != 0) & ~inside)
+            flux = on_grid(replace(scene, data=flux), source).data
+            flux = _scene_flux(flux)
         parts = [operator.render(flux, source) for operator in self.operators]
         data = sum(part[0] for part in parts)
         covered = jnp.any(jnp.stack([part[1] for part in parts]), axis=0)

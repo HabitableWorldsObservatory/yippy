@@ -531,8 +531,9 @@ parses exactly this block.
 ## Checking a delivery
 
 `yippy-sinc validate <dir> [--product ID]` runs every integrity check above, then
-the `yippy.sinc` admission step with JAX binary64 on, and prints a pass or fail summary. The same
-report is returned by `yippy.delivery.tools.validate`. It exits with 0 on a pass.
+the `yippy.sinc` admission step with JAX binary64 on, and prints a pass or fail
+summary. The command exits with 0 on a pass. To obtain the same report from
+`yippy.delivery.tools.validate`, enable JAX 64-bit mode before calling it.
 
 The summary shows the admission reason names and receipt id, $\rho$ on each axis, the
 worst and median interior check residual against the acceptance level, and the mirror

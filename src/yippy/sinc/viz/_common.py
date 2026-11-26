@@ -1,7 +1,5 @@
 """Shared axes and precision validation at the plotting boundary."""
 
-import jax
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -24,12 +22,6 @@ def single_ax(ax):
         shape = np.asarray(ax, dtype=object).shape
         raise ValueError(f"expected a single ax, got axes shape {shape}")
     return ax
-
-
-def require_x64():
-    """Refuse precision-sensitive kernel arithmetic without changing JAX."""
-    if not jax.config.x64_enabled:
-        raise ValueError("Enable jax_enable_x64 before plotting yippy.sinc stencils")
 
 
 def query_xy(query):
@@ -103,7 +95,7 @@ def stencil_reader(reader):
     origin, spacing, shape = lattice_parts(reader.grid.source)
 
     def at(query):
-        found = reader.stencil(jnp.asarray(query, dtype=jnp.float64))
+        found = reader.stencil(query)
         return tuple(np.asarray(a) for a in (found.nodes, found.weights, found.valid))
 
     return origin, spacing, shape, reader.grid.reflection.kind != "none", at
@@ -128,12 +120,15 @@ def stencil_profile(profile, origin, spacing, size_xy, reflected):
     """
     if not isinstance(profile, AbstractKernelProfile):
         raise TypeError("profile must be a kernel profile; or pass a reader")
-    origin, spacing = jnp.asarray(origin), jnp.asarray(spacing)
+    origin, spacing = (
+        np.asarray(origin, dtype=np.float64),
+        np.asarray(spacing, dtype=np.float64),
+    )
 
     def at(query):
         found = read_stencil(
             profile,
-            jnp.asarray(query, dtype=jnp.float64),
+            query,
             origin,
             spacing,
             size_xy,

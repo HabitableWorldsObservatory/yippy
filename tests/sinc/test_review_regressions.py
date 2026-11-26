@@ -28,7 +28,10 @@ def test_relaxed_symmetry_tolerance_refused(quadrant_delivery, target):
     if target == "mirror":
         checks = data["mirror_checks"]
         data["mirror_checks"] = eqx.tree_at(
-            lambda c: c.intensity, checks, checks.intensity.at[0, 0, 0].add(0.01)
+            lambda c: c.intensity,
+            checks,
+            checks.intensity
+            + (np.indices(checks.intensity.shape).sum(axis=0) == 0) * 0.01,
         )
     else:
         data["intensity_nodes"] = data["intensity_nodes"].at[0, 0, 0, 0].add(0.01)
@@ -101,7 +104,7 @@ def test_supported_metadata_range(full_delivery, field, value):
         reason = Reason.LAYOUT_UNSUPPORTED
     elif field == "annulus":
         data["domain"] = sc.Domain(
-            "annulus", "closed", jnp.zeros((2, 2)), jnp.array([value, 2 * value])
+            "annulus", "closed", np.zeros((2, 2)), [value, 2 * value]
         )
     else:
         data["domain"] = sc.Domain(
@@ -131,7 +134,7 @@ def test_annulus_inclusive_coverage_corner(full_delivery):
             "annulus",
             "closed",
             jnp.zeros((2, 2)),
-            jnp.array([0.0, math.hypot(3.75, 3.75)]),
+            [0.0, math.hypot(3.75, 3.75)],
         ),
     )
     result = sc.admit_grid(**data)
@@ -351,7 +354,6 @@ def test_reflection_tolerance_range_on_full_grid(full_delivery):
     assert result.reason_bits & Reason.SYMMETRY_UNSUPPORTED
 
 
-@pytest.mark.float64_only(reason="Float64 domain boundaries beyond float32 resolution")
 @pytest.mark.parametrize(
     "shape, bounds, radial",
     [
@@ -361,9 +363,7 @@ def test_reflection_tolerance_range_on_full_grid(full_delivery):
     ],
 )
 def test_reader_constructor_enforces_domain_range(full_reader, shape, bounds, radial):
-    domain = sc.Domain(
-        shape, "closed", jnp.asarray(bounds, dtype=float), jnp.asarray(radial)
-    )
+    domain = sc.Domain(shape, "closed", bounds, radial)
     reader = full_reader
     with pytest.raises(ValueError, match="supported numeric range"):
         Interpolator(

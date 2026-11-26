@@ -10,7 +10,6 @@ from yippy.sinc.domain import Domain
 from yippy.sinc.evidence import (
     AdmissionRefused,
     MemoryLimit,
-    PrecisionUnavailable,
     ReadRefused,
 )
 from yippy.sinc.grid import Premises, Products, SampledGrid, admit_grid
@@ -24,7 +23,6 @@ __all__ = [
     "KernelProfile",
     "MemoryBudget",
     "MemoryLimit",
-    "PrecisionUnavailable",
     "Premises",
     "Products",
     "ReadPolicy",

@@ -16,6 +16,7 @@ import pytest
 from astropy.io import fits
 from footprint_truth import assert_stellar_read
 from hwoutils.memory import MemoryLimit
+from hwoutils.numerics import eps, roundoff
 from lod_unit import lod
 from optixstuff.grids import Image, Measure, PixelGrid, resample
 from sinc_fixture import save_manifest, write_delivery
@@ -245,13 +246,14 @@ def test_reads_units_refusals(admitted):
     )
 
 
-def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
+def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch, precision):
     """Fails if stellar pitch is overwritten or reader tables hide in closures.
 
     The Fourier oracle below checks pitch and frame handling, so the stellar map is
     resampled band-limited here; the shipped default is linear (sampling.py).
     The angular sky-response read is the reference for the reframed profile,
-    with float64 interpolation roundoff. This catches using the native radii.
+    within 96 lane epsilon units for its DFT and interpolation roundoff.
+    This catches using the native radii.
     """
     import yippy._stellar_intens as stellar_intens
     import yippy.coronagraph as coronagraph
@@ -262,7 +264,6 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     host = _YIPData(admitted.package, interpolation="sinc")
     assert np.ptp(view.stellar_map(None, 0.0).data) > 0
     # Independent Fourier series integrated over target pixel boxes.
-    # The 1e-14 bound allows float64 DFT and exponential roundoff.
     # Zero extension doubles each axis (period 8): the table is centered in a
     # zero field, since nothing is reflected past its edge.
     stellar = view.stellar_map(None, 0.0)
@@ -285,7 +286,9 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
             grid=PixelGrid.regular((4, 4), pitch, "lod", frame=view.stellar_grid.frame),
         )
         assert sampled.reconstruction == "band_limited"
-        np.testing.assert_allclose(sampled.data, expected, rtol=1e-14, atol=0)
+        np.testing.assert_allclose(
+            sampled.data, expected, rtol=96 * eps(precision), atol=0
+        )
         wrong = expected * (0.4 / 0.25) ** 2
         assert not np.allclose(expected, wrong, atol=0.0, rtol=1e-3)
     assert view.stellar_grid.step == 0.4
@@ -301,31 +304,33 @@ def test_stellar_frame_and_eqx(admitted, tmp_path, monkeypatch):
     assert exported["starlightSuppressionSystems"][0]["lam"] == 500.0
     sky = fits.getdata(tmp_path / "occ_trans.fits")
     np.testing.assert_allclose(
-        sky[:, 0], separations * view.grid.frame.lod_to_arcsec(500), rtol=1e-14
+        sky[:, 0],
+        separations * view.grid.frame.lod_to_arcsec(500),
+        rtol=96 * eps(precision),
     )
     np.testing.assert_allclose(
         sky[:, 1],
         view.uniform_sky_profile.evaluate(separations * (500 / 400)),
-        rtol=1e-14,
+        rtol=96 * eps(precision),
     )
     record = view.curves()
     assert record.uniform_sky.frame == record.frame != view.uniform_sky_profile.frame
     np.testing.assert_allclose(
         record.uniform_sky.evaluate(separations),
         view.uniform_sky_response(separations),
-        rtol=1e-14,
+        rtol=96 * eps(precision),
     )
     np.testing.assert_allclose(stellar_intensity_curves(view).separation_lod[1], 0.1)
     np.testing.assert_allclose(
         view.stellar_map(None, 0.0).data,
         host.stellar_intens(0.0 * lod).data,
-        rtol=1e-14,
+        rtol=96 * eps(precision),
     )
     sky_grid = PixelGrid.regular((4, 4), 0.4, "lod", frame=view.sky_trans.grid.frame)
     np.testing.assert_allclose(
         view.uniform_sky_map(500.0, grid=sky_grid).data,
         resample(host.sky_trans, sky_grid).data,
-        atol=1e-14,
+        atol=float(roundoff(1.0, n_ops=96, dtype=precision)),
     )
     assert any(
         leaf is view._offaxis_backend.reader.grid.intensity
@@ -437,18 +442,19 @@ def test_auto_fallback_and_bounded(tmp_path):
     assert result.selected_backend == 1
 
 
-@pytest.mark.float32_only(reason="Exercises x64-off sinc fallback and refusal")
-def test_x64_off_auto_falls_back_and_explicit_sinc_refuses(tmp_path):
-    """Auto remains available when an explicit sinc request refuses x64-off."""
+def test_auto_and_explicit_sinc_admit_in_both_lanes(tmp_path, precision):
+    """Precision availability alone does not change the construction route."""
     write_delivery(tmp_path, full=True)
-    _, precision_fallback, info = route_interpolation(tmp_path, "auto", None, None)
-    assert info.reasons == ("PRECISION_UNAVAILABLE",)
-    assert precision_fallback.create_psf_with_info(0.0, 0.0).accepted
-    with pytest.raises(sc.PrecisionUnavailable):
-        route_interpolation(tmp_path, "sinc", None, None)
+    for requested in ("auto", "sinc"):
+        _, backend, info = route_interpolation(tmp_path, requested, None, None)
+        assert info.effective == "sinc"
+        assert not info.reasons
+        result = backend.create_psf_with_info(0.0, 0.0)
+        assert result.accepted
+        assert result.intensity.dtype == precision
 
 
-def test_table_consumer(admitted):
+def test_table_consumer(admitted, precision):
     """Fails if the table consumer rescales densities or resamples off its frame.
 
     The stellar truth is the SciPy footprint integral of the stored samples,
@@ -457,7 +463,8 @@ def test_table_consumer(admitted):
     two cells inside its edge, so every pixel lies where the spline depends
     on its end condition; the truth implements the documented restriction of
     the spline to the table footprint, and the comparison guards scale and
-    frame, not the edge physics.
+    frame, not the edge physics. The exported scalar allows 32 epsilon
+    units for knot lookup and the unit conversion.
     """
     host = _YIPData(admitted.package, interpolation="sinc")
     # The record stores density per (lambda/D)^2: no pitch factor.
@@ -465,7 +472,7 @@ def test_table_consumer(admitted):
     np.testing.assert_allclose(
         admitted.curves().evaluate("leakage_density_lod2", 0.0, 0.0) / 30.0,
         density / 30.0,
-        rtol=0,
+        rtol=32 * eps(precision),
     )
     x, y = jnp.array([0.07]), jnp.array([-0.04])
     for pitch in (0.25, 0.4):
@@ -585,8 +592,8 @@ def test_cache_identity_and_selections(admitted, monkeypatch):
 def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
     """One lit pixel reproduces a source read, including photon conversion.
 
-    Binary64 accumulation differs by at most 1e-12 of the peak from the
-    differently ordered coefficient sum in a single read.
+    Allow 128 epsilon units at peak scale for the two separable contractions
+    and the differently ordered scene and source reads.
     """
     metadata = write_delivery(tmp_path)
     metadata["support_extent_D"] = [0.8, 0.8]
@@ -608,7 +615,10 @@ def test_prefiltered_scene_uses_coefficient_renderer(tmp_path):
     assert result.valid and point.valid[0]
     expected = 2.0 * point.image.data[0]
     np.testing.assert_allclose(
-        result.image.data, expected, rtol=0, atol=1e-12 * expected.max()
+        result.image.data,
+        expected,
+        rtol=0,
+        atol=float(roundoff(expected.max(), n_ops=128)),
     )
     x, y = model.grid.coordinates()
     raster = model.operators[0].render_raster(flux, x[0], y[:, 0])
@@ -759,16 +769,7 @@ def test_header_invalid_angular_units(tmp_path, unit):
 @pytest.mark.parametrize(
     "gate",
     [
-        pytest.param(
-            "precision",
-            marks=pytest.mark.float32_only(
-                reason="Exercises x64-off fallback precedence"
-            ),
-        ),
-        pytest.param(
-            "memory",
-            marks=pytest.mark.float64_only(reason="Isolates the memory fallback gate"),
-        ),
+        "memory",
     ],
 )
 @pytest.mark.parametrize(
@@ -868,21 +869,15 @@ def test_campaign_claim_refuses(tmp_path):
 
 @pytest.mark.parametrize(
     "gate",
-    [
-        "sampling",
-        pytest.param(
-            "precision",
-            marks=pytest.mark.float32_only(
-                reason="Exercises x64-off fallback precedence"
-            ),
-        ),
-    ],
+    ["sampling", "metadata"],
 )
 def test_fallback_options_cache(tmp_path, monkeypatch, gate):
     """Distinct fallback domains/options generate and reload separate artifacts."""
     m = write_delivery(tmp_path, full=True)
     if gate == "sampling":
         m["support_extent_D"] = [2.0, 2.0]
+    else:
+        del m["coordinate_model"]
     save_manifest(tmp_path, m)
     domains = [
         sc.Domain("box", "closed", jnp.array([[-r, -r], [r, r]]), jnp.zeros(2))
@@ -1042,16 +1037,7 @@ def test_original_offset_precision(tmp_path):
     [
         "normal",
         "blend",
-        pytest.param(
-            "precision",
-            marks=pytest.mark.float32_only(
-                reason="Exercises x64-off fallback precedence"
-            ),
-        ),
-        pytest.param(
-            "memory",
-            marks=pytest.mark.float64_only(reason="Isolates the memory fallback gate"),
-        ),
+        "memory",
         "metadata",
         "sampling",
     ],
@@ -1144,7 +1130,7 @@ def test_admission_declaration_errors(tmp_path, gate, defect):
 
 @pytest.mark.medium
 @pytest.mark.parametrize("peak", ["absent", None, 0.001])
-def test_peak_reference_controls(tmp_path, peak, precision):
+def test_peak_reference_controls(tmp_path, peak):
     """Fails if unknown or positive peak evidence prevents admission or fallback.
 
     Cold independent-check admission and finite reads cover the available routes.
@@ -1155,8 +1141,6 @@ def test_peak_reference_controls(tmp_path, peak, precision):
     else:
         m["checks"][0]["local_peak_reference"] = peak
     gates = ["blend", "memory", "metadata", "sampling", "normal"]
-    if precision == np.dtype("float32"):
-        gates.insert(0, "precision")
     for gate in gates:
         metadata = copy.deepcopy(m)
         if gate == "metadata":
@@ -1182,17 +1166,22 @@ def test_override_domain_excludes_unreadable_checks(tmp_path):
     m = write_delivery(tmp_path, full=True)
     save_manifest(tmp_path, m)
     check_ids = [r["id"] for r in m["checks"]]
-    narrow = sc.Domain(
-        "box", "closed", jnp.array([[-0.05, -0.05], [0.05, 0.05]]), jnp.zeros(2)
-    )
+    # No absolute binary32 x coordinate lies strictly between these edges.
+    x = np.array([0.0300000001, 0.0300000002])
+    narrow = sc.Domain("box", "closed", [[x[0], -0.05], [x[1], 0.05]], [0, 0])
     _, backend, info = route_interpolation(
         tmp_path, "sinc", SincOptions(domain=narrow), None
     )
     provenance = dict(info.receipt.provenance)
     excluded = json.loads(provenance["excluded_checks"])
     assert excluded and set(excluded) <= set(check_ids)
-    result = backend.create_psf_with_info(0.0, 0.0)
+    result = backend.create_psf_with_info(x[0], 0.0)
     assert bool(result.accepted)
+    batch = backend.create_psfs_with_info(x, np.zeros(2))
+    np.testing.assert_array_equal(batch.accepted, [True, True])
+    assert not bool(
+        backend.create_psf_with_info(np.nextafter(x[0], -np.inf), 0.0).accepted
+    )
 
 
 @pytest.mark.parametrize("kind", ["integral", "mean"])

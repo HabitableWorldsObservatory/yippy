@@ -243,7 +243,6 @@ R = {
     "INCOMPLETE_STENCIL": ("both", "At a read, the query's 32 by 32 stencil runs off the stored nodes. At admission, the grid has fewer than 17 nodes per quadrant axis (32 per full-grid axis), or no served position has a complete stencil", "Read inside the served region, or deliver a larger rectangle"),
     "OUTSIDE_DOMAIN": ("read", "The query is outside the permission region", "Read inside the region"),
     "SYMMETRY_UNSUPPORTED": ("admission", "The symmetry declaration is incomplete or malformed (both axes, evidence, identifiers, tolerance no looser than 1e-6), or conflicts with the grid", "Complete the declaration"),
-    "PRECISION_UNAVAILABLE": ("admission", "JAX 64-bit mode is off", "`jax.config.update(\"jax_enable_x64\", True)` before building arrays"),
     "MEMORY_LIMIT": ("admission", "An allocation estimate exceeds the `MemoryBudget`", "Raise the ceilings or tile reads more finely"),
     "NONFINITE_QUERY": ("read", "The query position is NaN or infinite", "Pass a finite position"),
     "PRODUCT_UNAVAILABLE": ("read", "The product index is not in the delivery", "Use an index the delivery has"),
@@ -288,21 +287,18 @@ except sc.AdmissionRefused as err:
 
 The only reason is `KERNEL_MARGIN_FAIL`: $\rho=0.9$ is below the Nyquist limit
 but above the margin. The exception carries the reasons in its message and
-the receipt of what was checked. A reader raises the narrower `MemoryLimit` or
-`PrecisionUnavailable` (both are `AdmissionRefused`) when its budget or the
-64-bit setting is what fails at construction.
+the receipt of what was checked. A reader raises `MemoryLimit` when its
+construction estimate exceeds the requested budget.
 
 ## What does admission check, and in what order?
 
-Admission checks in a fixed order. Two failures end the run at once, and the
-rest are accumulated into one report or skipped once an earlier group has
+Admission checks the memory estimate first. The remaining checks accumulate
+reasons into one report or are skipped once an earlier group has
 failed, as the flowchart shows.
 
 ```mermaid
 flowchart TD
-    A["admit_grid called"] --> B{"JAX 64-bit mode on?"}
-    B -- no --> X1["PRECISION_UNAVAILABLE, stop"]
-    B -- yes --> C{"Allocation estimate within the budget?"}
+    A["admit_grid called"] --> C{"Allocation estimate within the budget?"}
     C -- no --> X2["MEMORY_LIMIT, stop"]
     C -- yes --> D["Semantic checks, all reasons accumulated"]
     D --> E{"Any reason so far?"}
@@ -316,12 +312,10 @@ flowchart TD
     J -- no --> L["Admitted, with a receipt"]
 ```
 
-1. **Precision.** If JAX 64-bit mode is off, `PRECISION_UNAVAILABLE` is
-   returned alone.
-2. **Memory.** An allocation estimate from the declared array sizes is compared
+1. **Memory.** An allocation estimate from the declared array sizes is compared
    with the `MemoryBudget`. A breach returns `MEMORY_LIMIT` alone, before any
    other check and before anything large is allocated.
-3. **Semantic checks, accumulated together.** Structure (array shapes and
+2. **Semantic checks, accumulated together.** Structure (array shapes and
    dtypes), metadata and the six premises with their evidence, geometry (a
    supported layout, a complete rectangle without duplicates, offsets within
    four ULPs of the declared lattice, values in the supported numeric range
@@ -332,7 +326,7 @@ flowchart TD
    shortest contributing wavelength and, if given, the campaign minimum), the
    stencil minimum (`INCOMPLETE_STENCIL`) and the memory estimate again with
    the full set of arrays. All reasons found here are reported together.
-4. **Symmetry.** For quadrant grids, the declared reflection, a tolerance no
+3. **Symmetry.** For quadrant grids, the declared reflection, a tolerance no
    looser than $10^{-6}$, every mirror residual and every axis-invariance
    check, computed from the images. These run only if no earlier reason was
    found.

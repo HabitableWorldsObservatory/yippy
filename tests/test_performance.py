@@ -7,6 +7,7 @@ conftest.py (downloaded via pooch).
 import numpy as np
 import pytest
 from conftest import requires_available_yip
+from hwoutils.numerics import eps
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.performance import DIAMETER_QUANTITIES, PerformanceCurves
 from scipy.interpolate import PchipInterpolator, make_interp_spline
@@ -208,13 +209,13 @@ def test_cached_record_retains_the_host_sky_profile(
     assert record.uniform_sky is host.uniform_sky_profile
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
-def test_performance_interpolation_default_and_legacy(performance_interpolation):
+def test_performance_interpolation_default_and_legacy(
+    performance_interpolation, precision
+):
     """Fails if a curve's PCHIP or declared interpolation space changes.
 
-    Independent scipy evaluation allows 1e-13 relative polynomial roundoff.
+    Allow 128 epsilon units for converted nodes and Hermite evaluation,
+    including log/exp for positive curves, against float64 SciPy.
     The removed configurable-order API raises rather than aliasing.
     """
     coro, record = performance_interpolation
@@ -233,7 +234,10 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
     ):
         # A leakage quantity is read at the first tabulated diameter, a point star.
         by_diameter = name in DIAMETER_QUANTITIES
-        values = getattr(record, name)[0] if by_diameter else getattr(record, name)
+        values = np.asarray(
+            getattr(record, name)[0] if by_diameter else getattr(record, name),
+            dtype=np.float64,
+        )
         is_log = record.interpolation[name] == "log"
         y = np.log10(np.maximum(values, 1e-300)) if is_log else values
         nodes = record.separation_lod
@@ -244,22 +248,20 @@ def test_performance_interpolation_default_and_legacy(performance_interpolation)
         np.testing.assert_allclose(
             record.evaluate(name, grid, 0.0 if by_diameter else None),
             expected,
-            rtol=1e-13,
+            rtol=128 * eps(precision),
             atol=0,
         )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
-def test_performance_interpolation_linear_tails(performance_interpolation):
-    """Fails if tail extrapolation uses the end cubic (float64 bound 1e-13)."""
+def test_performance_interpolation_linear_tails(performance_interpolation, precision):
+    """Compare linear tails to float64 SciPy within 128 units for slope and log/exp."""
     coro, record = performance_interpolation
     for name in ("throughput", "core_area_lod2", "raw_contrast"):
         by_diameter = name in DIAMETER_QUANTITIES
         values, nodes = (
             np.asarray(
-                getattr(record, name)[0] if by_diameter else getattr(record, name)
+                getattr(record, name)[0] if by_diameter else getattr(record, name),
+                dtype=np.float64,
             ),
             np.asarray(record.separation_lod),
         )
@@ -272,7 +274,7 @@ def test_performance_interpolation_linear_tails(performance_interpolation):
         np.testing.assert_allclose(
             record.evaluate(name, grid, 0.0 if by_diameter else None),
             expected,
-            rtol=1e-13,
+            rtol=128 * eps(precision),
         )
 
     assert np.isnan(

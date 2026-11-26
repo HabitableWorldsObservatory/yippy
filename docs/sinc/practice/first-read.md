@@ -55,9 +55,9 @@ builds a complete quadrant grid and the declarations yippy.sinc requires.
 given. This toy grid is not the public delivery that {doc}`yippy` and
 {doc}`../validation` use, which has 27 by 31 nodes.
 
-The first cell enables JAX 64-bit mode, because yippy.sinc refuses to build a
-reader without it, and builds the delivery. The toy's numbers are in the box
-that follows.
+The first cell enables JAX 64-bit mode to select binary64 arithmetic for
+the example, then builds the delivery. For binary32 reads, build the reader
+with JAX 64-bit mode off.
 
 ```{code-cell} python
 import jax

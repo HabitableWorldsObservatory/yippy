@@ -1,35 +1,45 @@
-"""Float64 tiled interpolation and bounded serial query mapping."""
+"""Working-precision tiled interpolation and bounded serial query mapping."""
 
 import dataclasses
 import math
 from abc import abstractmethod
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from hwoutils.precision import float_dtype, like
 
-from yippy.sinc._types import F64, I32, U32, Boolean, check_array, check_static
-from yippy.sinc.domain import Domain, coverage, in_supported_range, safe_query
+from yippy.sinc._types import (
+    FLOAT_DTYPES,
+    I32,
+    U32,
+    Boolean,
+    RealArray,
+    check_array,
+    check_static,
+)
+from yippy.sinc.domain import Domain, covered_start, in_supported_range, safe_query
 from yippy.sinc.evidence import (
     BoundKind,
     EvidenceBinding,
     Ledger,
     MemoryLimit,
-    PrecisionUnavailable,
     ReadRefused,
     Reason,
     Status,
     UnknownErrorModel,
 )
-from yippy.sinc.geometry import origin_xy, spacing_xy
+from yippy.sinc.geometry import array_namespace, origin_xy, spacing_xy
 from yippy.sinc.grid import Products, SampledGrid
 from yippy.sinc.kernel import (
     AbstractKernelProfile,
     KernelProfile,
     PrefilteredKernelProfile,
     flush_subnormal,
-    read_stencil,
+    lattice_phase_start,
+    stencil_at,
 )
 from yippy.sinc.prefilter import (
     BUILD_CHUNK_BYTES,
@@ -40,37 +50,22 @@ from yippy.sinc.prefilter import (
 )
 
 
-def _require_precision():
-    if not jax.config.x64_enabled:
-        raise PrecisionUnavailable(
-            "Enable jax_enable_x64 before construction or tracing"
-        )
-
-
-def _default_budget():
-    _require_precision()
-    return jnp.asarray(jnp.inf, dtype=jnp.float64)
-
-
 class ReadPolicy(eqx.Module):
     """Sampling permits unknown errors; bounded always refuses in this version.
 
     Attributes:
         mode: Policy mode, "sampling" or "bounded".
         max_abs_error: Largest accepted absolute error, in delivered sample
-            units, as a float64 scalar. Must be infinite for "sampling" and
+            units, as a host float. Must be infinite for "sampling" and
             finite and nonnegative for "bounded". Defaults to infinity.
     """
 
     mode: str = eqx.field(static=True, default="sampling")
-    max_abs_error: F64 = eqx.field(
-        default_factory=_default_budget, converter=jnp.asarray
-    )
+    max_abs_error: float = eqx.field(static=True, default=math.inf, converter=float)
 
     def __check_init__(self):
         """Validate the declared structure before numerical use."""
         check_static(self)
-        check_array(self.max_abs_error, (), (jnp.float64,))
         budget = float(self.max_abs_error)
         if self.mode not in ("sampling", "bounded"):
             raise ValueError("Policy must be sampling or bounded")
@@ -275,22 +270,22 @@ class ImageRead(eqx.Module):
         reason_bits: Uint32 scalar bit mask of ``Reason`` flags.
         bound_available: Whether an error bound is available, a scalar.
         bound_kind: Int32 scalar kind code from ``BoundKind``.
-        abs_error_bound: Float64 scalar absolute error bound, in delivered
+        abs_error_bound: Working-precision scalar absolute error bound, in delivered
             sample units; infinity when unknown.
-        empirical_max_abs: Float64 scalar empirical maximum absolute error of
+        empirical_max_abs: Scalar empirical maximum absolute error of
             the grid checks, in delivered sample units.
         ledger: Per-source evidence ledger of the read.
     """
 
-    intensity: F64
+    intensity: RealArray
     accepted: Boolean
     sampling_ok: Boolean
     status: I32
     reason_bits: U32
     bound_available: Boolean
     bound_kind: I32
-    abs_error_bound: F64
-    empirical_max_abs: F64
+    abs_error_bound: RealArray
+    empirical_max_abs: RealArray
     ledger: Ledger
 
     def __check_init__(self):
@@ -298,14 +293,14 @@ class ImageRead(eqx.Module):
         check_static(self)
         if self.intensity.ndim != 2:
             raise ValueError("Scalar read images require two detector axes")
-        check_array(self.intensity, self.intensity.shape, (jnp.float64,))
+        check_array(self.intensity, self.intensity.shape, FLOAT_DTYPES)
         for value in (self.accepted, self.sampling_ok, self.bound_available):
             check_array(value, (), (jnp.bool_,))
         for value in (self.status, self.bound_kind):
             check_array(value, (), (jnp.int32,))
         check_array(self.reason_bits, (), (jnp.uint32,))
         for value in (self.abs_error_bound, self.empirical_max_abs):
-            check_array(value, (), (jnp.float64,))
+            check_array(value, (), FLOAT_DTYPES)
 
 
 class AbstractImageReader(eqx.Module):
@@ -320,11 +315,11 @@ class AbstractImageReader(eqx.Module):
     memory: eqx.AbstractVar[MemoryBudget]
 
     @abstractmethod
-    def read(self, source_xy_lod: F64, product_index: I32) -> ImageRead:
+    def read(self, source_xy_lod: RealArray, product_index: I32) -> ImageRead:
         """Read one source [2] and int32 product [], returning delivered units.
 
         Args:
-            source_xy_lod: Float64 source position (x, y), shape (2,), in
+            source_xy_lod: Source position (x, y), shape (2,), in
                 lambda/D.
             product_index: Int32 scalar index of the product to read.
 
@@ -344,11 +339,24 @@ def _bind_evidence(grid, domain, profile):
         grid.receipt_id,
         grid.products.identity,
         "absolute_max_pixel_delivered",
-        f"{profile.identity}:storage-{grid.intensity.dtype}:compute-float64:"
+        f"{profile.identity}:storage-{jax.dtypes.canonicalize_dtype(grid.intensity.dtype)}:"
+        f"compute-{np.dtype(float_dtype())}:"
         f"jax-{jax.__version__}:{jax.default_backend()}:delivered",
         domain,
     )
-    return point, UnknownErrorModel(binding)
+    return (
+        tuple(map(float, point)),
+        jnp.asarray(point, dtype=float_dtype()),
+        UnknownErrorModel(binding),
+    )
+
+
+class _PreparedQuery(NamedTuple):
+    phase: RealArray
+    start: RealArray
+    finite: Boolean
+    member: Boolean
+    covered: Boolean
 
 
 class AbstractGridReader(AbstractImageReader):
@@ -377,11 +385,12 @@ class AbstractGridReader(AbstractImageReader):
     errors: eqx.AbstractVar[UnknownErrorModel]
     tiling: eqx.AbstractVar[Tiling]
     memory: eqx.AbstractVar[MemoryBudget]
-    _safe_query: eqx.AbstractVar[F64]
+    _safe_query: eqx.AbstractVar[RealArray]
+    _safe_position: eqx.AbstractVar[tuple]
 
     @abstractmethod
-    def _image(self, query, product):
-        """Return the float64 image and per-axis weight l1 of a prevalidated query."""
+    def _image(self, stencil, product):
+        """Return the image and per-axis weight L1 norm of a prevalidated query."""
 
     def _design(self):
         """Return the (beta, scale) of the kernel design, or None for raw reads."""
@@ -394,22 +403,77 @@ class AbstractGridReader(AbstractImageReader):
         nodes; ``valid`` marks the nodes the table serves.
 
         Args:
-            query: Float64 source position (x, y), shape (2,), in lambda/D.
+            query: Source position (x, y), shape (2,), in lambda/D.
 
         Returns:
             The ``Stencil`` of nodes, weights and validity for the query.
         """
+        coords = self._prepare(query)
+        return self._stencil_at(coords.phase, coords.start)
+
+    def _stencil_at(self, phase, start):
         beta, scale = self._design()
-        return read_stencil(
+        return stencil_at(
             self.profile,
-            query,
-            origin_xy(self.grid.source),
-            spacing_xy(self.grid.source),
+            phase,
+            start,
             self.grid.source.shape[::-1],
             self.grid.reflection.kind != "none",
             beta,
             scale,
         )
+
+    def _prepare(self, query):
+        """Resolve permission and tap selection in the input coordinate precision."""
+        xp = array_namespace(query)
+        points = xp.asarray(query, dtype=np.float64 if xp is np else None)
+        if points.shape[-1:] != (2,):
+            raise ValueError("Source coordinates require a final (x, y) axis")
+        grid = self.grid.source
+        reflected = self.grid.reflection.kind != "none"
+        finite = xp.isfinite(points)
+        clean = xp.where(finite, points, 0.0)
+        if xp is jnp:
+            if not jnp.issubdtype(clean.dtype, jnp.floating):
+                clean = like(clean, self._safe_query)
+            clean = flush_subnormal(clean)
+        phase, start = lattice_phase_start(
+            self.profile,
+            clean,
+            origin_xy(grid),
+            spacing_xy(grid),
+            grid.shape[::-1],
+            reflected,
+        )
+        member = self.domain.contains(clean)
+        covered = covered_start(start, grid.shape[::-1], reflected, self.profile)
+        if xp is np:
+            # Out-of-range host points still return a refusal without overflowing
+            # the conversion of the unused phase and tap.
+            maximum = float(np.finfo(self._safe_query.dtype).max)
+            phase, start = (
+                np.clip(phase, -maximum, maximum),
+                np.clip(start, -maximum, maximum),
+            )
+        return _PreparedQuery(
+            like(phase, self._safe_query),
+            like(start, self._safe_query),
+            jnp.asarray(xp.all(finite, axis=-1)),
+            jnp.asarray(member),
+            jnp.asarray(covered),
+        )
+
+    def _safe_lattice(self):
+        grid = self.grid.source
+        phase, start = lattice_phase_start(
+            self.profile,
+            self._safe_position,
+            origin_xy(grid),
+            spacing_xy(grid),
+            grid.shape[::-1],
+            self.grid.reflection.kind != "none",
+        )
+        return like(phase, self._safe_query), like(start, self._safe_query)
 
     def _check_grid(self):
         if self.grid.stored != self._stored:
@@ -447,17 +511,18 @@ class AbstractGridReader(AbstractImageReader):
         return self.grid.products
 
     def _validate(self, query, product):
-        """Return sanitized inputs, per-condition flags and the reason mask."""
-        finite = jnp.all(jnp.isfinite(query))
-        sanitized = flush_subnormal(jnp.where(jnp.isfinite(query), query, 0.0))
-        available = (product >= 0) & (product < self.products.wavelength_nm.size)
-        member = self.domain.contains(sanitized)
-        covered = coverage(
-            sanitized,
-            self.grid.source,
-            self.grid.reflection.kind != "none",
-            self.profile,
+        """Check a represented point and return its per-condition reason mask."""
+        prepared = self._prepare(query)
+        valid, reason = self._query_status(prepared, product)
+        return (
+            flush_subnormal(jnp.where(jnp.isfinite(query), query, 0.0)),
+            valid,
+            reason,
         )
+
+    def _query_status(self, query, product):
+        finite, member, covered = query.finite, query.member, query.covered
+        available = (product >= 0) & (product < self.products.wavelength_nm.size)
         reason = jnp.asarray(Reason.BOUND_UNKNOWN, dtype=jnp.uint32)
         for ok, bit in (
             (finite, Reason.NONFINITE_QUERY),
@@ -466,38 +531,46 @@ class AbstractGridReader(AbstractImageReader):
             (covered, Reason.INCOMPLETE_STENCIL),
         ):
             reason = reason | jnp.where(ok, jnp.uint32(0), jnp.uint32(bit))
-        return sanitized, finite & available & member & covered, reason
+        return finite & available & member & covered, reason
 
-    def read(self, source_xy_lod: F64, product_index: I32) -> ImageRead:
+    def read(self, source_xy_lod: RealArray, product_index: I32) -> ImageRead:
         """Return one image; invalid runtime values refuse only their own lane.
 
-        Coordinates and weights use binary64. Exact quotient floors determine
-        every tap, including zero-weight endpoints. Bounded policy leaves
+        Coordinates and weights use the reader precision. Exact quotient floors
+        determine every tap, including zero-weight endpoints. Bounded policy leaves
         sampling_ok independent of its unknown-bound refusal.
 
         Args:
-            source_xy_lod: Float64 source position (x, y), shape (2,), in
+            source_xy_lod: Source position (x, y), shape (2,), in
                 lambda/D.
             product_index: Int32 scalar index of the product to read.
 
         Returns:
             The ``ImageRead`` of the source for that product.
         """
-        _require_precision()
-        query, product = jnp.asarray(source_xy_lod), jnp.asarray(product_index)
-        check_array(query, (2,), (jnp.float64,))
+        query = self._prepare(source_xy_lod)
+        check_array(query.phase, (2,), FLOAT_DTYPES)
+        product = jnp.asarray(product_index)
         check_array(product, (), (jnp.int32,))
         self.memory.check(self.memory_estimate(1))
-        sanitized, sampling_ok, reason = self._validate(query, product)
+        return self._read_prepared(query, product)
+
+    def _read_prepared(self, query, product):
+        sampling_ok, reason = self._query_status(query, product)
         temporary_product = jnp.where(
             (product >= 0) & (product < self.products.wavelength_nm.size), product, 0
         )
         accepted = sampling_ok & (self.policy.mode == "sampling")
         if self.grid._has_checks:
             reason = reason | jnp.uint32(Reason.EMPIRICAL_ONLY)
-        safe = jnp.where(accepted, sanitized, self._safe_query)
-        image, gain = self._image(safe, temporary_product)
-        ledger = self.errors.evaluate(safe, temporary_product, gain, grid=self.grid)
+        safe_phase, safe_start = self._safe_lattice()
+        phase = jnp.where(accepted, query.phase, safe_phase)
+        start = jnp.where(accepted, query.start, safe_start)
+        image, gain = self._image(self._stencil_at(phase, start), temporary_product)
+        # Unknown-error ledger terms are independent of the source position.
+        ledger = self.errors.evaluate(
+            self._safe_query, temporary_product, gain, grid=self.grid
+        )
         return ImageRead(
             jnp.where(accepted, image, jnp.nan),
             accepted,
@@ -509,8 +582,8 @@ class AbstractGridReader(AbstractImageReader):
             reason,
             jnp.asarray(False),
             jnp.asarray(BoundKind.UNKNOWN, dtype=jnp.int32),
-            jnp.asarray(jnp.inf, dtype=jnp.float64),
-            self.grid._empirical_max_abs,
+            like(jnp.inf, image),
+            like(self.grid._empirical_max_abs, image),
             ledger,
         )
 
@@ -535,7 +608,8 @@ class Interpolator(AbstractGridReader):
     errors: UnknownErrorModel
     tiling: Tiling
     memory: MemoryBudget
-    _safe_query: F64
+    _safe_query: RealArray
+    _safe_position: tuple = eqx.field(static=True)
 
     def __init__(self, grid, domain, profile, policy, tiling, memory):
         """Bind an admitted grid and a nonempty covered domain on the host.
@@ -548,22 +622,22 @@ class Interpolator(AbstractGridReader):
             tiling: Query chunk and pixel tile sizes.
             memory: Byte ceilings the reader checks its estimates against.
         """
-        _require_precision()
         if not isinstance(profile, KernelProfile):
             raise TypeError("Interpolator reads with the raw KernelProfile")
         if grid.profile_id not in ("", profile.identity):
             raise ValueError("Grid was admitted under a different kernel profile")
         self.grid, self.domain, self.profile = grid, domain, profile
         self.policy, self.tiling, self.memory = policy, tiling, memory
-        self._safe_query, self.errors = _bind_evidence(grid, domain, profile)
+        self._safe_position, self._safe_query, self.errors = _bind_evidence(
+            grid, domain, profile
+        )
 
     def __check_init__(self):
         """Validate the declared structure before numerical use."""
         check_static(self)
         self._check_grid()
 
-    def _image(self, query, product):
-        stencil = self.stencil(query)
+    def _image(self, stencil, product):
         taps, weight = stencil.nodes, stencil.weights
         kx, ky = taps[0], taps[1]
         wx, wy = weight[0], weight[1]
@@ -595,12 +669,12 @@ class Interpolator(AbstractGridReader):
                     source_x[:, None],
                     detector_y[None, :],
                     detector_x,
-                ].astype(jnp.float64)
+                ].astype(weight.dtype)
                 inner = jnp.sum(wx[:, None] * samples, axis=0)
                 return total + wy[index] * inner
 
             values = jax.lax.fori_loop(
-                0, 32, source_row, jnp.zeros(tile_size, dtype=jnp.float64)
+                0, 32, source_row, jnp.zeros(tile_size, dtype=weight.dtype)
             )
             values = jnp.where(mask, values, 0.0)
             return jax.lax.dynamic_update_slice(output, values, (tile * tile_size,))
@@ -609,7 +683,7 @@ class Interpolator(AbstractGridReader):
             0,
             tile_count,
             pixel_tile,
-            jnp.zeros(tile_count * tile_size, dtype=jnp.float64),
+            jnp.zeros(tile_count * tile_size, dtype=weight.dtype),
         )
         return output[:pixels].reshape(ny, nx), jnp.sum(jnp.abs(weight), axis=1)
 
@@ -650,11 +724,12 @@ class PrefilteredReader(AbstractGridReader):
     errors: UnknownErrorModel
     tiling: Tiling
     memory: MemoryBudget
-    _safe_query: F64
+    _safe_query: RealArray
+    _safe_position: tuple = eqx.field(static=True)
     design: tuple[tuple[str, int | float], ...] = eqx.field(static=True)
-    _beta_xy: F64
-    _scale_xy: F64
-    _gain_xy: F64
+    _beta_xy: RealArray
+    _scale_xy: RealArray
+    _gain_xy: RealArray
 
     def __init__(self, grid, domain, profile, policy, tiling, memory):
         """Bind an admitted grid and build its coefficient table on the host.
@@ -667,7 +742,6 @@ class PrefilteredReader(AbstractGridReader):
             tiling: Query chunk and pixel tile sizes.
             memory: Byte ceilings the reader checks its estimates against.
         """
-        _require_precision()
         if not isinstance(profile, PrefilteredKernelProfile):
             raise TypeError("PrefilteredReader needs a PrefilteredKernelProfile")
         if grid.profile_id != profile.identity:
@@ -676,7 +750,9 @@ class PrefilteredReader(AbstractGridReader):
             raise ValueError("PrefilteredReader builds from samples, not coefficients")
         self.grid, self.domain, self.profile = grid, domain, profile
         self.policy, self.tiling, self.memory = policy, tiling, memory
-        self._safe_query, self.errors = _bind_evidence(grid, domain, profile)
+        self._safe_position, self._safe_query, self.errors = _bind_evidence(
+            grid, domain, profile
+        )
         memory.check(self.memory_estimate(1))
         designs = design_grid(
             profile,
@@ -686,13 +762,19 @@ class PrefilteredReader(AbstractGridReader):
             domain,
         )
         self.design = design_record(designs)
-        coefficients = build_coefficients(grid.intensity, designs)
+        coefficients = jnp.asarray(
+            build_coefficients(
+                grid.intensity,
+                designs,
+                storage_dtype=jax.dtypes.canonicalize_dtype(grid.intensity.dtype),
+            )
+        )
         self.grid = dataclasses.replace(
             grid, intensity=coefficients, stored="prefiltered_coefficients"
         )
-        self._beta_xy = jnp.asarray([d.beta for d in designs], dtype=jnp.float64)
-        self._scale_xy = jnp.asarray([d.scale for d in designs], dtype=jnp.float64)
-        self._gain_xy = jnp.asarray([d.sample_gain for d in designs], dtype=jnp.float64)
+        self._beta_xy = like([d.beta for d in designs], self._safe_query)
+        self._scale_xy = like([d.scale for d in designs], self._safe_query)
+        self._gain_xy = like([d.sample_gain for d in designs], self._safe_query)
 
     _stored: ClassVar[str] = "prefiltered_coefficients"
 
@@ -709,15 +791,15 @@ class PrefilteredReader(AbstractGridReader):
     def _design(self):
         return self._beta_xy, self._scale_xy
 
-    def _image(self, query, product):
-        stencil = self.stencil(query)
+    def _image(self, stencil, product):
         taps, weight = stencil.nodes, stencil.weights
         kx, ky = taps[0], taps[1]
         table = self.coefficients[product]
         if self.grid.reflection.kind == "none":
             count = self.profile.taps
+            zero = jnp.int32(0)
             block = jax.lax.dynamic_slice(
-                table, (ky[0], kx[0], 0, 0), (count, count, *table.shape[2:])
+                table, (ky[0], kx[0], zero, zero), (count, count, *table.shape[2:])
             )
         else:
             block = table[jnp.abs(ky)[:, None], jnp.abs(kx)[None, :]]
@@ -728,7 +810,7 @@ class PrefilteredReader(AbstractGridReader):
         # emitters on x86 with AVX2 or wider (jax 0.10.2 and later), returning a
         # read off by about a tenth of the signal at a query on a cell midpoint.
         # The two-stage form is exact to rounding on every platform tested.
-        along_y = jnp.einsum("j,jirc->irc", weight[1], block.astype(jnp.float64))
+        along_y = jnp.einsum("j,jirc->irc", weight[1], block.astype(weight.dtype))
         image = jnp.einsum("i,irc->rc", weight[0], along_y)
         # Stored-sample errors reach a read through the composite of filter and
         # bump, so the gain reported to the error model is the design figure.
@@ -736,7 +818,7 @@ class PrefilteredReader(AbstractGridReader):
 
 
 def read_batch(
-    reader: AbstractImageReader, source_xy_lod: F64, product_index: I32
+    reader: AbstractImageReader, source_xy_lod: RealArray, product_index: I32
 ) -> ImageRead:
     """Read [Q,2] sources and int32 [Q] products using bounded serial chunks.
 
@@ -746,18 +828,18 @@ def read_batch(
 
     Args:
         reader: The reader to call for each query.
-        source_xy_lod: Float64 source positions, shape (Q, 2), in lambda/D.
+        source_xy_lod: Source positions, shape (Q, 2), in lambda/D.
         product_index: Int32 product indices, shape (Q,).
 
     Returns:
         An ``ImageRead`` whose array leaves have a leading axis of length Q.
     """
-    _require_precision()
-    queries, products = jnp.asarray(source_xy_lod), jnp.asarray(product_index)
+    xp = array_namespace(source_xy_lod)
+    queries, products = xp.asarray(source_xy_lod), jnp.asarray(product_index)
     if queries.ndim != 2:
         raise ValueError("Batch coordinates require [query, 2]")
     count = queries.shape[0]
-    check_array(queries, (count, 2), (jnp.float64,))
+    check_array(queries, (count, 2), FLOAT_DTYPES)
     check_array(products, (count,), (jnp.int32,))
     gridded = isinstance(reader, AbstractGridReader)
     tiling = reader.tiling if gridded else Tiling()
@@ -770,25 +852,28 @@ def read_batch(
     if count == 0:
         if gridded:
             ledger = reader.errors.evaluate(
-                reader._safe_query, jnp.int32(0), jnp.ones(2), grid=reader.grid
+                reader._safe_query,
+                jnp.int32(0),
+                jnp.ones_like(reader._safe_query),
+                grid=reader.grid,
             )
             shape = ImageRead(
-                jnp.empty(reader.products.pixels.shape, dtype=jnp.float64),
+                jnp.empty(reader.products.pixels.shape, dtype=reader._safe_query.dtype),
                 jnp.asarray(False),
                 jnp.asarray(False),
                 jnp.int32(0),
                 jnp.uint32(0),
                 jnp.asarray(False),
                 jnp.int32(0),
-                jnp.asarray(jnp.inf),
-                reader.grid._empirical_max_abs,
+                like(jnp.inf, reader._safe_query),
+                like(reader.grid._empirical_max_abs, reader._safe_query),
                 ledger,
             )
         else:
             # Future nominal readers determine their own ledger row count.
             shape = eqx.filter_eval_shape(
                 reader.read,
-                jax.ShapeDtypeStruct((2,), jnp.float64),
+                jax.ShapeDtypeStruct((2,), queries.dtype),
                 jax.ShapeDtypeStruct((), jnp.int32),
             )
         return jax.tree_util.tree_map(
@@ -796,15 +881,18 @@ def read_batch(
         )
     chunk = min(tiling.query_chunk, count)
     padded = ((count + chunk - 1) // chunk) * chunk
-    queries = jnp.pad(queries, ((0, padded - count), (0, 0)))
-    products = jnp.pad(products, ((0, padded - count),))
+    coordinates = reader._prepare(queries) if gridded else queries
+    read_one = reader._read_prepared if gridded else reader.read
+
+    def chunks(leaf):
+        tail = leaf.shape[1:]
+        padding = [(0, padded - count), *((0, 0) for _ in tail)]
+        return jnp.pad(leaf, padding).reshape(-1, chunk, *tail)
 
     def one_chunk(values):
-        return jax.lax.map(lambda pair: reader.read(*pair), values)
+        return jax.lax.map(lambda pair: read_one(*pair), values)
 
-    result = jax.lax.map(
-        one_chunk, (queries.reshape(-1, chunk, 2), products.reshape(-1, chunk))
-    )
+    result = jax.lax.map(one_chunk, jax.tree.map(chunks, (coordinates, products)))
     return jax.tree_util.tree_map(
         lambda leaf: leaf.reshape((padded, *leaf.shape[2:]))[:count], result
     )

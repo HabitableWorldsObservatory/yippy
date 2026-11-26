@@ -84,13 +84,14 @@ that accuracy, the largest weight is
 
 ## Floor rule
 
-The floor rule is `exact_quotient_floor_v1`. Subnormal queries (numbers
-smaller than the smallest normal float64) flush to signed zero with integer bit
-operations, the difference $d=s-o$ is formed once, and the C `fmod`
+The floor rule is `exact_quotient_floor_v1`. For a host query, binary64
+subnormals flush to signed zero, the difference $d=s-o$ is formed once in
+binary64, and the C `fmod`
 remainder $r=\operatorname{fmod}(d,h)$, which takes the sign of $d$ and is
 exact in binary floating point, determines the floor of the exact real quotient: $n=\operatorname{round}((d-r)/h)$,
-minus one when $r\ne0$ and $d<0$. Kernel phases use ordinary float64
-division. The reason this matters is on {doc}`stencil-floor`.
+minus one when $r\ne0$ and $d<0$. JAX queries select taps on a common
+binary32 coordinate grid in both lanes. The weights use the local phase at
+the reader's working precision. See {doc}`stencil-floor` for the edge cases.
 
 ## Supported numeric range
 
@@ -115,7 +116,7 @@ outside the lattice fail coverage before any gathering.
 
 ## Permission and coverage
 
-A read is permitted when the original signed query lies in the declared
+A read is permitted when the signed query at its decision resolution lies in the declared
 `Domain` (a box or an origin-centered annulus, closed or lower-closed and
 upper-open, never expanded by a tolerance) and every stencil node exists. A
 safe point for compiled fallbacks is chosen from coverage endpoints, box
@@ -196,7 +197,7 @@ the raw profile are these.
   filter for the design band. The filter half-width is 12 nodes for 7 taps
   and 16 otherwise, the filter is one-sided near a table end, and the design
   runs in binary64. Coefficients are stored in the dtype of the samples and
-  the read contracts in float64. A read does not reproduce a stored sample
+  the read contracts in the reader precision. A read does not reproduce a stored sample
   exactly.
 - **Design band.** The band on each axis is the largest $\rho/2$ over the
   products, in cycles per node, so the design holds at the shortest declared
@@ -251,17 +252,29 @@ the raw profile are these.
 
 ## Precision
 
-Enable JAX 64-bit mode before creating arrays or readers. Samples stay in
-their delivered float32 or float64 storage, and gathered pixels, weights and
-contractions use float64. Without 64-bit mode, construction refuses with
-`PRECISION_UNAVAILABLE`. Adapters that converted float32 coordinates to
-float64 angular units pass `offset_original_dtype=jnp.float32`, and the
-four-ULP coordinate allowance then uses `nextafter` in that original dtype at
-the converted scale.
+Admission uses the original host coordinates in binary64. For Python and
+NumPy queries the reader checks permission, selects taps and subtracts the
+lattice origin before narrowing. Pass translated coordinates in this form
+when their separation is smaller than one binary32 spacing at the origin.
+JAX arrays, including arguments to `jit`, use a common binary32 grid for
+permission and tap selection in both lanes. Weights and contractions use
+the precision selected at reader construction.
+
+The prefilter operates on the delivered samples in host binary64.
+Each coefficient chunk is checked before rounding once into storage.
+An overflow or an underflow to zero raises `ValueError` during
+construction. An explicit
+`accumulate="float64"` scene request requires a float64 reader and raises
+`hwoutils.PrecisionError` when unavailable. The default uses float64 with a
+float64 reader and storage precision with a float32 reader.
+
+Adapters that converted float32 coordinates to float64 angular units pass
+`offset_original_dtype=jnp.float32`. The four-ULP coordinate allowance then
+uses `nextafter` in that original dtype at the converted scale.
 
 ## Compilation, identity and provenance
 
-`read_batch(reader, source_xy_lod, product_index)` takes float64 `[Q, 2]`
+`read_batch(reader, source_xy_lod, product_index)` takes `[Q, 2]`
 positions and int32 `[Q]` product indices and maps serial chunks. Static
 metadata stays unbatched, and an empty batch performs no interpolation.
 `eqx.filter_jit` and an outer `jax.vmap` are supported, but an outer mapped

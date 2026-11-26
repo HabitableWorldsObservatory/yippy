@@ -17,6 +17,7 @@ import jax
 import numpy as np
 import pytest
 from conftest import REFERENCE_DATA_REQUIRED
+from hwoutils.numerics import eps
 from scipy.interpolate import RectBivariateSpline
 
 from yippy import open_yip
@@ -168,12 +169,11 @@ def test_curve_follows_the_map_between_tabulated_diameters(ring_coro, diameter_l
     )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for independent interpolation"
-)
 @pytest.mark.parametrize("leakage_rule", ["aperture_mean", "azimuthal_ring_mean"])
-def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
-    """A nonconstant radial profile agrees in float64, including linear tails."""
+def test_jax_view_matches_the_loader_between_diameters(
+    ring_coro, leakage_rule, precision
+):
+    """Allow 128 epsilon units for interpolation and tails against SciPy."""
     from optixstuff.performance import azimuthal_mean_profile, profile_radii
     from scipy.interpolate import PchipInterpolator
 
@@ -220,10 +220,13 @@ def test_jax_view_matches_the_loader_between_diameters(ring_coro, leakage_rule):
             return stellar_intensity_curves(coro, d).evaluate(s)
 
         np.testing.assert_allclose(
-            method(separations, diameter), expected, rtol=1e-12, atol=1e-24
+            method(separations, diameter), expected, rtol=128 * eps(precision), atol=0
         )
         np.testing.assert_allclose(
-            jax.jit(method)(separations, diameter), expected, rtol=1e-12, atol=1e-24
+            jax.jit(method)(separations, diameter),
+            expected,
+            rtol=128 * eps(precision),
+            atol=0,
         )
 
 

@@ -10,7 +10,6 @@ from matplotlib.lines import Line2D
 from yippy.sinc.kernel import KernelProfile, weights
 from yippy.sinc.viz import _require
 from yippy.sinc.viz._common import (
-    require_x64,
     single_ax,
     stencil_profile,
     stencil_reader,
@@ -33,7 +32,7 @@ def plot_kernel(profile=None, *, ax=None, show_ideal=True, line_kw=None):
 
     Raises:
         TypeError: The profile is not a KernelProfile.
-        ValueError: The axes shape or profile is invalid, or x64 is disabled.
+        ValueError: The axes shape or profile is invalid.
 
     Example::
 
@@ -41,13 +40,12 @@ def plot_kernel(profile=None, *, ax=None, show_ideal=True, line_kw=None):
         result = plot_kernel()
     """
     ep = _require.eyepiece()
-    require_x64()
     if profile is not None:
         if not isinstance(profile, KernelProfile):
             raise TypeError("profile must be a KernelProfile or None")
         profile.__check_init__()
     offsets = np.linspace(-17.0, 17.0, 2001)
-    values = np.asarray(weights(jnp.asarray(offsets, dtype=jnp.float64)))
+    values = np.asarray(weights(jnp.asarray(offsets)))
     ax = single_ax(ax)
     options = {"color": ep.style.role("data"), **normalize_kwargs(line_kw, Line2D)}
     line = ax.plot(offsets, values, **options)[0]
@@ -117,7 +115,7 @@ def plot_stencil(
 
     Raises:
         TypeError: ``profile`` is not a kernel profile.
-        ValueError: Invalid geometry, samples, axes shape, or disabled x64;
+        ValueError: Invalid geometry, samples or axes shape;
             neither or both of reader and profile; lattice keywords with a reader;
             a prefiltered profile without a reader.
 
@@ -137,7 +135,6 @@ def plot_stencil(
         None if samples is None or callable(samples) else np.asarray(samples)
     )
     ep = _require.eyepiece()
-    require_x64()
     if reader is not None:
         if origin is not None or spacing is not None or n_nodes is not None:
             raise ValueError("a reader supplies origin, spacing and n_nodes")
@@ -164,7 +161,6 @@ def plot_stencil(
         point = float(np.asarray(point))
         if not np.isfinite(point):
             raise ValueError("query must be finite")
-        require_x64()
         found = at(np.full(2, point))
         taps, weight, valid = (a[axis] for a in found)
         positions = origin + taps * spacing

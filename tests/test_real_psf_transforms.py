@@ -3,6 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import eps, sum_roundoff
 from hwoutils.transforms import rotate_image
 from optixstuff.grids import (
     Image,
@@ -13,13 +14,14 @@ from optixstuff.grids import (
 )
 
 
-@pytest.mark.float64_only(
-    reason="Float64 reference roundoff for geometry and photometry"
-)
 @pytest.mark.parametrize("size", [64, 100])
-def test_real_psf_downsampling_conserves_flux(coro, size):
-    """Every stored PSF retains its integral at integer and noninteger ratios."""
-    source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=jnp.float64)
+def test_real_psf_downsampling_conserves_flux(coro, size, precision):
+    """Every stored PSF retains its integral at integer and noninteger ratios.
+
+    The two integral sums pay their pairwise depths plus eight operations
+    for overlap weights and the intervening contractions.
+    """
+    source = jnp.asarray(coro._offaxis_backend.flat_psfs, dtype=precision)
     scale = coro.grid.step * source.shape[1] / size
     target = PixelGrid.focal(size, scale, coro.grid.frame)
     pixels = Image(
@@ -27,7 +29,12 @@ def test_real_psf_downsampling_conserves_flux(coro, size):
     )
     output = integrate_footprints(pixels, footprint_overlap(coro.grid, target)).data
     np.testing.assert_allclose(
-        output.sum(axis=(1, 2)), source.sum(axis=(1, 2)), rtol=1e-12, atol=1e-30
+        output.sum(axis=(1, 2)),
+        source.sum(axis=(1, 2)),
+        rtol=8 * eps(precision)
+        + float(sum_roundoff(1.0, source.shape[1] ** 2, dtype=precision))
+        + float(sum_roundoff(1.0, size**2, dtype=precision)),
+        atol=0,
     )
     assert scale == 0.25 * source.shape[1] / size
     assert np.isfinite(output).all()

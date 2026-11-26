@@ -7,7 +7,6 @@ from yippy.sinc.viz import _require
 from yippy.sinc.viz._common import (
     lattice_parts,
     query_xy,
-    require_x64,
     single_ax,
     stencil_profile,
     stencil_reader,
@@ -63,7 +62,7 @@ def plot_stencil_2d(
     Raises:
         TypeError: ``profile`` is not a kernel profile.
         ValueError: Invalid lattice, query, order, counts, axes shape, or
-            disabled x64; a profile with a reader or none with a lattice.
+            a profile with a reader or none with a lattice.
 
     Example::
 
@@ -89,7 +88,6 @@ def plot_stencil_2d(
     if order not in ("spatial", "weight"):
         raise ValueError("order must be 'spatial' or 'weight'")
     ep = _require.eyepiece()
-    require_x64()
     nx, ny = shape[::-1].astype(int)
     positive, negative = ep.style.role("positive"), ep.style.role("negative")
     scenery = ep.style.neutral(0.35)

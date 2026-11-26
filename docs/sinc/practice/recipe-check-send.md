@@ -53,12 +53,14 @@ yippy-sinc validate path/to/delivery
 yippy-sinc validate path/to/delivery --product mono-000 --json
 ```
 
-The same check is available from Python. This example needs a delivery on
-disk.
+To produce the same reference residuals in Python, enable JAX 64-bit mode
+before calling the validator. This example needs a delivery on disk.
 
 ```python notest
+import jax
 from yippy.delivery.tools import validate
 
+jax.config.update("jax_enable_x64", True)
 report = validate("path/to/delivery")
 print(report.summary())
 assert report.passed

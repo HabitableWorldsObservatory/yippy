@@ -7,9 +7,19 @@ from dataclasses import replace
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from hwoutils.leaves import as_float_leaf
+from hwoutils.precision import float_dtype
 from optixstuff.grids import Measure, PixelGrid
 
-from yippy.sinc._types import F64, I32, Boolean, check_array, check_static
+from yippy.sinc._types import (
+    FLOAT_DTYPES,
+    I32,
+    Boolean,
+    RealArray,
+    check_array,
+    check_static,
+)
 from yippy.sinc.admission import (
     MIRROR_TOLERANCE,
     index_reasons,
@@ -26,6 +36,13 @@ from yippy.sinc.kernel import KernelProfile, PrefilteredKernelProfile
 from yippy.sinc.prefilter import design_grid, design_record, sampling_ratios
 
 
+def _host_float(value):
+    """Keep host declarations in binary64 independently of JAX availability."""
+    array = np.array(value, dtype=np.float64, copy=True)
+    array.setflags(write=False)
+    return array
+
+
 class Normalization(eqx.Module):
     """Source-independent product conversions; reads retain delivered units.
 
@@ -40,8 +57,8 @@ class Normalization(eqx.Module):
     """
 
     reference: str = eqx.field(static=True)
-    photon_conversion: F64 = eqx.field(converter=jnp.asarray)
-    reference_uncertainty_fraction: F64 = eqx.field(converter=jnp.asarray)
+    photon_conversion: np.ndarray = eqx.field(converter=_host_float)
+    reference_uncertainty_fraction: np.ndarray = eqx.field(converter=_host_float)
     included_factors: tuple[str, ...] = eqx.field(static=True)
     provenance_id: str = eqx.field(static=True)
 
@@ -109,11 +126,11 @@ class Products(eqx.Module):
     pixels: PixelGrid
     normalization: Normalization
     kind: str = eqx.field(static=True)
-    wavelength_nm: F64 = eqx.field(converter=jnp.asarray)
-    limits_nm: F64 = eqx.field(converter=jnp.asarray)
-    sampling_min_nm: F64 = eqx.field(converter=jnp.asarray)
-    campaign_sampling_min_nm: F64 = eqx.field(converter=jnp.asarray)
-    support_extent_xy: F64 = eqx.field(converter=jnp.asarray)
+    wavelength_nm: np.ndarray = eqx.field(converter=_host_float)
+    limits_nm: np.ndarray = eqx.field(converter=_host_float)
+    sampling_min_nm: np.ndarray = eqx.field(converter=_host_float)
+    campaign_sampling_min_nm: np.ndarray = eqx.field(converter=_host_float)
+    support_extent_xy: np.ndarray = eqx.field(converter=_host_float)
     support_evidence: I32 = eqx.field(converter=jnp.asarray)
     support_source_ids: tuple[str, ...] = eqx.field(static=True)
     premises: Premises
@@ -183,8 +200,8 @@ class Reflection(eqx.Module):
     evidence: I32 = eqx.field(converter=jnp.asarray)
     check_report_id: str = eqx.field(static=True)
     check_passed: Boolean = eqx.field(converter=jnp.asarray)
-    tolerance: F64 = eqx.field(
-        default_factory=lambda: jnp.asarray(MIRROR_TOLERANCE), converter=jnp.asarray
+    tolerance: np.ndarray = eqx.field(
+        default_factory=lambda: _host_float(MIRROR_TOLERANCE), converter=_host_float
     )
 
     def __check_init__(self):
@@ -210,7 +227,8 @@ class SampledGrid(eqx.Module):
 
     Attributes:
         intensity: Stored values, shape (product, sy, sx, row, column), in the
-            delivered units, float32 or float64.
+            delivered units, float32 or float64. Samples for a prefiltered
+            reader stay on the host at delivered precision until filtering.
         source: Source-node pixel grid, in lambda/D.
         products: Products the samples belong to.
         reflection: Reflection declaration.
@@ -221,12 +239,14 @@ class SampledGrid(eqx.Module):
             "prefiltered_coefficients".
     """
 
-    intensity: jax.Array
+    intensity: jax.Array | np.ndarray
     source: PixelGrid
     products: Products
     reflection: Reflection
     receipt_id: str = eqx.field(static=True)
-    _empirical_max_abs: F64 = eqx.field(default_factory=lambda: jnp.asarray(jnp.nan))
+    _empirical_max_abs: RealArray = eqx.field(
+        default_factory=lambda: jnp.asarray(jnp.nan)
+    )
     _has_checks: bool = eqx.field(static=True, default=False)
     profile_id: str = eqx.field(static=True, default="")
     stored: str = eqx.field(static=True, default="samples")
@@ -243,7 +263,7 @@ class SampledGrid(eqx.Module):
             (jnp.float32, jnp.float64),
         )
         check_array(self.reflection.check_passed, (count,), (jnp.bool_,))
-        check_array(self._empirical_max_abs, (), (jnp.float64,))
+        check_array(self._empirical_max_abs, (), FLOAT_DTYPES)
 
 
 class CheckSet(eqx.Module):
@@ -261,10 +281,10 @@ class CheckSet(eqx.Module):
         target_id: Identifier of the error target.
     """
 
-    source_xy_lod: F64 = eqx.field(converter=jnp.asarray)
-    intensity: jax.Array = eqx.field(converter=jnp.asarray)
+    source_xy_lod: np.ndarray = eqx.field(converter=_host_float)
+    intensity: np.ndarray = eqx.field(converter=np.asarray)
     product_index: I32 = eqx.field(converter=jnp.asarray)
-    core_peak: F64 = eqx.field(converter=jnp.asarray)
+    core_peak: np.ndarray = eqx.field(converter=_host_float)
     provenance_id: str = eqx.field(static=True)
     reference_method_id: str = eqx.field(static=True)
     target_id: str = eqx.field(static=True)
@@ -300,9 +320,9 @@ class MirrorCheckSet(eqx.Module):
         provenance_id: Identifier of the provenance record.
     """
 
-    source_xy_lod: F64 = eqx.field(converter=jnp.asarray)
+    source_xy_lod: np.ndarray = eqx.field(converter=_host_float)
     indices_xy: I32 = eqx.field(converter=jnp.asarray)
-    intensity: jax.Array = eqx.field(converter=jnp.asarray)
+    intensity: np.ndarray = eqx.field(converter=np.asarray)
     product_index: I32 = eqx.field(converter=jnp.asarray)
     provenance_id: str = eqx.field(static=True)
 
@@ -323,7 +343,7 @@ class MirrorCheckSet(eqx.Module):
 
 
 def _positive(values):
-    return bool(jnp.all(jnp.isfinite(values) & (values > 0)))
+    return bool(np.all(np.isfinite(values) & (values > 0)))
 
 
 def _metadata_reasons(products, reflection):
@@ -331,39 +351,35 @@ def _metadata_reasons(products, reflection):
     pixels, norm = products.pixels, products.normalization
     premises = products.premises
     if (
-        not bool(jnp.all((premises.evidence >= 1) & (premises.evidence <= 2)))
+        not bool(np.all((premises.evidence >= 1) & (premises.evidence <= 2)))
         or not all(premises.source_ids)
         or not all(
             (products.identity, products.optical_id, products.spectral_weight_id)
         )
     ):
         reasons |= Reason.METADATA_MISSING
-    if not bool(jnp.all(premises.values[:4])):
+    if not bool(np.all(premises.values[:4])):
         reasons |= Reason.FRAME_UNSUPPORTED
     if not bool(premises.values[5]):
         reasons |= Reason.METADATA_CONFLICT
     if not bool(premises.values[4]):
         reasons |= Reason.NORMALIZATION_UNSUPPORTED
-    basis = jnp.asarray(pixels.basis)
-    norms = jnp.sum(basis * basis, axis=0)
-    dot = float(jnp.sum(basis[:, 0] * basis[:, 1]))
-    orthogonal = abs(dot) <= 8 * math.ulp(1.0) * math.sqrt(float(jnp.prod(norms)))
+    basis = np.asarray(pixels.basis)
+    norms = np.sum(basis * basis, axis=0)
+    dot = float(np.sum(basis[:, 0] * basis[:, 1]))
+    orthogonal = abs(dot) <= 8 * math.ulp(1.0) * math.sqrt(float(np.prod(norms)))
     if (
         pixels.unit != "lod"
         or not _positive(norms)
-        or not bool(jnp.all(jnp.isfinite(basis)))
-        or not bool(
-            jnp.all(jnp.isfinite(jnp.asarray((pixels.center_x, pixels.center_y))))
-        )
+        or not bool(np.all(np.isfinite(basis)))
+        or not bool(np.all(np.isfinite(np.asarray((pixels.center_x, pixels.center_y)))))
         or not orthogonal
     ):
         reasons |= Reason.FRAME_UNSUPPORTED
     if reflection.kind == "two_axis_pixel_flip_v1":
-        expected = jnp.asarray([(n - 1) / 2 for n in pixels.shape[::-1]])
+        expected = np.asarray([(n - 1) / 2 for n in pixels.shape[::-1]])
         if (
-            not bool(
-                jnp.all(jnp.asarray((pixels.center_x, pixels.center_y)) == expected)
-            )
+            not bool(np.all(np.asarray((pixels.center_x, pixels.center_y)) == expected))
             or float(basis[0, 1]) != 0
             or float(basis[1, 0]) != 0
         ):
@@ -376,14 +392,12 @@ def _metadata_reasons(products, reflection):
         reasons |= Reason.NORMALIZATION_UNSUPPORTED
     uncertainty = norm.reference_uncertainty_fraction
     if not bool(
-        jnp.all(
-            jnp.isnan(uncertainty) | (jnp.isfinite(uncertainty) & (uncertainty >= 0))
-        )
+        np.all(np.isnan(uncertainty) | (np.isfinite(uncertainty) & (uncertainty >= 0)))
     ):
         reasons |= Reason.NORMALIZATION_UNSUPPORTED
     if (
         not _positive(products.support_extent_xy)
-        or not bool(jnp.all(products.support_evidence == 1))
+        or not bool(np.all(products.support_evidence == 1))
         or not all(products.support_source_ids)
     ):
         reasons |= Reason.UNKNOWN_BANDWIDTH
@@ -403,10 +417,9 @@ def _metadata_reasons(products, reflection):
     return reasons
 
 
-def _local_peak(image, source, pixels):
-    coordinates = jnp.asarray(pixels.coordinates())
-    selected = jnp.sum((coordinates - source[:, None, None]) ** 2, axis=0) <= 1.0
-    return float(jnp.max(jnp.where(selected, image, -jnp.inf)))
+def _local_peak(image, source, coordinates):
+    selected = np.sum((coordinates - source[:, None, None]) ** 2, axis=0) <= 1.0
+    return float(np.max(np.where(selected, image, -np.inf)))
 
 
 def _symmetry_checks(cube, lattice, products, reflection, checks):
@@ -415,8 +428,10 @@ def _symmetry_checks(cube, lattice, products, reflection, checks):
     passed = [True] * count
     residuals, axis_residuals, axis_exact = [], [], []
     tolerance = float(reflection.tolerance)
+    with jax.enable_x64():  # precision-ok: host-only detector coordinates
+        coordinates = np.asarray(products.pixels.coordinates())
     declared = (
-        bool(jnp.all(reflection.axes))
+        bool(np.all(reflection.axes))
         and int(reflection.evidence) in (1, 2)
         and all(
             (
@@ -444,8 +459,8 @@ def _symmetry_checks(cube, lattice, products, reflection, checks):
         )
         valid = (
             valid_offsets
-            and bool(jnp.all(jnp.isfinite(checks.intensity) & (checks.intensity >= 0)))
-            and bool(jnp.all(jnp.isfinite(checks.source_xy_lod)))
+            and bool(np.all(np.isfinite(checks.intensity) & (checks.intensity >= 0)))
+            and bool(np.all(np.isfinite(checks.source_xy_lod)))
             and bool(checks.provenance_id)
         )
         if not valid:
@@ -462,19 +477,19 @@ def _symmetry_checks(cube, lattice, products, reflection, checks):
                 reasons |= Reason.SYMMETRY_REFERENCE_INVALID
                 continue
             categories[product].add((ix < 0, iy < 0))
-            reference = checks.intensity[index].astype(jnp.float64)
-            predicted = cube[product, abs(iy), abs(ix)].astype(jnp.float64)
+            reference = np.asarray(checks.intensity[index], dtype=np.float64)
+            predicted = np.asarray(cube[product, abs(iy), abs(ix)], dtype=np.float64)
             if ix < 0:
                 predicted = predicted[:, ::-1]
             if iy < 0:
                 predicted = predicted[::-1, :]
-            peak = _local_peak(reference, checks.source_xy_lod[index], products.pixels)
+            peak = _local_peak(reference, checks.source_xy_lod[index], coordinates)
             if not math.isfinite(peak) or peak <= 0:
                 reasons |= Reason.SYMMETRY_REFERENCE_INVALID
                 passed[product] = False
                 residuals.append(math.inf)
                 continue
-            residual = float(jnp.max(jnp.abs(reference - predicted))) / peak
+            residual = float(np.max(np.abs(reference - predicted))) / peak
             residuals.append(residual)
             if not residual <= tolerance:
                 reasons |= Reason.SYMMETRY_CHECK_FAILED
@@ -494,13 +509,13 @@ def _symmetry_checks(cube, lattice, products, reflection, checks):
                     if axis == 0
                     else cube[product, 0, start:stop]
                 )
-                indices = jnp.arange(start, stop, dtype=jnp.float64)
-                zeros = jnp.zeros_like(indices)
-                source = jnp.stack(
+                indices = np.arange(start, stop, dtype=np.float64)
+                zeros = np.zeros_like(indices)
+                source = np.stack(
                     (zeros, indices) if axis == 0 else (indices, zeros), axis=1
                 )
                 source = source * spacing_xy(lattice)
-                exact, relative = _axis_residuals(images, source, products.pixels, axis)
+                exact, relative = _axis_residuals(images, source, coordinates, axis)
                 values = relative.tolist()
                 axis_residuals.extend(values)
                 identities = exact.tolist()
@@ -520,32 +535,31 @@ def _symmetry_checks(cube, lattice, products, reflection, checks):
     )
 
 
-@eqx.filter_jit
-def _axis_residuals(images, sources, pixels, axis):
-    integer = jnp.int32 if images.dtype == jnp.float32 else jnp.int64
-    bits = jax.lax.bitcast_convert_type(images, integer)
+def _axis_residuals(images, sources, coordinates, axis):
+    integer = np.int32 if images.dtype == np.float32 else np.int64
+    bits = images.view(integer)
     # Numeric identity allows both signed zeros but preserves subnormal samples.
-    bits = jnp.where((bits & jnp.iinfo(integer).max) == 0, 0, bits)
+    bits = np.where((bits & np.iinfo(integer).max) == 0, 0, bits)
     flipped_bits = bits[:, :, ::-1] if axis == 0 else bits[:, ::-1, :]
-    exact = jnp.all(bits == flipped_bits, axis=(1, 2))
-    images = images.astype(jnp.float64)
-    coordinates = jnp.asarray(pixels.coordinates())
+    exact = np.all(bits == flipped_bits, axis=(1, 2))
+    minimum_normal = np.finfo(images.dtype).tiny
+    images = np.asarray(images, dtype=np.float64)
     selected = (
-        jnp.sum((coordinates[None] - sources[:, :, None, None]) ** 2, axis=1) <= 1.0
+        np.sum((coordinates[None] - sources[:, :, None, None]) ** 2, axis=1) <= 1.0
     )
-    peaks = jnp.where(
-        jnp.any(selected, axis=(1, 2)),
-        jnp.max(jnp.where(selected, images, -jnp.inf), axis=(1, 2)),
+    peaks = np.where(
+        np.any(selected, axis=(1, 2)),
+        np.max(np.where(selected, images, -np.inf), axis=(1, 2)),
         # Sources beyond the frame have no in-stamp peak; the image maximum is
         # below theirs, so the relative residual is the stricter one.
-        jnp.max(images, axis=(1, 2)),
+        np.max(images, axis=(1, 2)),
     )
     flipped = images[:, :, ::-1] if axis == 0 else images[:, ::-1, :]
-    differences = jnp.max(jnp.abs(images - flipped), axis=(1, 2))
-    positive = peaks > 0
-    relative = differences / jnp.where(positive, peaks, 1.0)
+    differences = np.max(np.abs(images - flipped), axis=(1, 2))
+    positive = peaks >= minimum_normal
+    relative = differences / np.where(positive, peaks, 1.0)
     # Exact invariance does not require an in-stamp relative denominator.
-    return exact, jnp.where(positive, relative, jnp.nan)
+    return exact, np.where(positive, relative, np.nan)
 
 
 def _digest(*values):
@@ -626,10 +640,6 @@ def admit_grid(
         for pair in provenance
     ):
         raise TypeError("Provenance requires a tuple of (key, text) string pairs")
-    if not jax.config.x64_enabled:
-        return Admission(
-            None, Receipt(provenance=provenance), int(Reason.PRECISION_UNAVAILABLE)
-        )
     if not hasattr(intensity_nodes, "shape") or len(intensity_nodes.shape) != 4:
         raise ValueError("Nodes require [product, source, row, column]")
     allocations = estimate_memory(
@@ -648,9 +658,9 @@ def admit_grid(
             allocation_estimate=tuple(allocations.items()), provenance=provenance
         )
         return Admission(None, receipt, int(Reason.MEMORY_LIMIT))
-    nodes = jnp.asarray(intensity_nodes)
-    offsets = jnp.asarray(offsets_xy_lod)
-    indices = jnp.asarray(indices_xy)
+    nodes = np.asarray(intensity_nodes)
+    offsets = np.asarray(offsets_xy_lod)
+    indices = np.asarray(indices_xy)
     offset_dtype = (
         offsets.dtype
         if offset_original_dtype is None
@@ -692,7 +702,7 @@ def admit_grid(
     sy, sx = lattice.shape
     # Numerical buffers keep occupancy validation bounded by the delivery size.
     # Never allocate the declared rectangle when its size exceeds delivered rows.
-    linear = indices[:, 1].astype(jnp.int64) * sx + indices[:, 0]
+    linear = indices[:, 1].astype(np.int64) * sx + indices[:, 0]
     reasons |= index_reasons(indices, lattice.shape)
     if min(sy, sx) < profile.minimum_size(reflected):
         reasons |= Reason.INCOMPLETE_STENCIL
@@ -732,7 +742,7 @@ def admit_grid(
         reasons |= Reason.INCOMPLETE_STENCIL
     receipt = Receipt(
         profile_id=profile.identity,
-        execution_profile=f"jax-{jax.__version__}:{jax.default_backend()}:float64",
+        execution_profile=f"jax-{jax.__version__}:{jax.default_backend()}:{float_dtype()}",
         offset_dtype=str(offset_dtype),
         provenance=provenance,
         offset_tolerance_xy=tau,
@@ -774,7 +784,7 @@ def admit_grid(
     if prefiltered:
         designs = design_grid(profile, products, lattice, reflected, domain)
         receipt = replace(receipt, kernel_design=design_record(designs))
-    order = jnp.argsort(linear)
+    order = np.argsort(linear)
     cube = nodes[:, order].reshape(count, sy, sx, *products.pixels.shape)
     if reflected:
         symmetry_reasons, passed, mirror, axes, exact = _symmetry_checks(
@@ -809,8 +819,15 @@ def admit_grid(
         provenance,
     )
     receipt = replace(receipt, identity=identity)
+    if prefiltered:
+        cube.setflags(write=False)
+        resident = cube
+    elif cube.dtype == np.float64 and float_dtype() == np.float32:
+        resident = as_float_leaf(cube)
+    else:
+        resident = jnp.asarray(cube)
     grid = SampledGrid(
-        cube, lattice, products, reflection, identity, profile_id=profile.identity
+        resident, lattice, products, reflection, identity, profile_id=profile.identity
     )
     if checks is not None:
         if checks.intensity.shape[1:] != products.pixels.shape:
@@ -820,11 +837,11 @@ def admit_grid(
             and all(
                 (checks.provenance_id, checks.reference_method_id, checks.target_id)
             )
-            and bool(jnp.all(jnp.isfinite(checks.intensity) & (checks.intensity >= 0)))
+            and bool(np.all(np.isfinite(checks.intensity) & (checks.intensity >= 0)))
             and bool(
-                jnp.all(
-                    jnp.isnan(checks.core_peak)
-                    | (jnp.isfinite(checks.core_peak) & (checks.core_peak > 0))
+                np.all(
+                    np.isnan(checks.core_peak)
+                    | (np.isfinite(checks.core_peak) & (checks.core_peak > 0))
                 )
             )
         )
@@ -841,7 +858,14 @@ def admit_grid(
                 return Admission(
                     None, receipt, int(result.reason_bits) | int(Reason.DATA_INVALID)
                 )
-            error = float(jnp.max(jnp.abs(result.intensity - checks.intensity[index])))
+            error = float(
+                np.max(
+                    np.abs(
+                        np.asarray(result.intensity, dtype=np.float64)
+                        - checks.intensity[index]
+                    )
+                )
+            )
             absolute.append(error)
             relative.append(error / float(checks.core_peak[index]))
         empirical = max(absolute)
@@ -858,7 +882,7 @@ def admit_grid(
             ),
         )
         grid = SampledGrid(
-            cube,
+            resident,
             lattice,
             products,
             reflection,
