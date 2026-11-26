@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.numerics import eps, roundoff
-from hwoutils.testing import ulps
 from optixstuff.grids import Frame
 
 import yippy.sinc as sc
@@ -600,9 +599,12 @@ def test_chunked_build_matches_single_chunk(fixture, request, monkeypatch):
 
     With reflection each chunk is filtered together with the mirrored rows of
     the opposite detector edge. A chunk limit of one byte forces one row per
-    chunk on the 6-row detector; the result must equal the single-chunk build
-    to a few units in the last place (the compiler may vectorize the two chunk
-    shapes differently), where a flipped or misordered row differs at order one.
+    chunk on the 6-row detector. BLAS can accumulate the two shapes in
+    different orders. In each build, a term goes through one multiply and
+    at most length - 1 additions per axis, plus the reflected sum if present.
+    Bound the absolute sum before cancellation by the sample peak times the
+    largest absolute row sum of each filter. Both builds use host float64
+    before the final rounding to coefficient storage.
     """
     case = request.getfixturevalue(fixture)
     reader, grid = case["reader"], case["reader"].grid
@@ -619,8 +621,21 @@ def test_chunked_build_matches_single_chunk(fixture, request, monkeypatch):
     monkeypatch.setattr(prefilter, "BUILD_CHUNK_BYTES", 1)
     assert prefilter.build_chunk_rows(nodes, (6, 5)) == 1
     chunked = build_coefficients(samples, designs)
-    allowance = float(ulps(16, jnp.max(jnp.abs(reader.coefficients))))
-    np.testing.assert_allclose(chunked, reader.coefficients, rtol=0, atol=allowance)
+    scale = np.max(np.abs(np.asarray(samples))).item()
+    path_ops = 0
+    for design in designs:
+        weights = np.abs(design.direct)
+        path_ops += 2 * design.filter_half_width + 1
+        if design.mirrored is not None:
+            weights += np.abs(design.mirrored)
+            path_ops += 1
+        scale *= weights.sum(axis=1).max()
+    work_dtype = designs[0].direct.dtype
+    atol = 2 * path_ops * eps(work_dtype) * scale  # tol: floating-point, both builds
+    # Two final half-ulp roundings when the host result is narrowed.
+    narrowed = chunked.dtype != work_dtype
+    rtol = eps(chunked.dtype) if narrowed else 0  # tol: floating-point, storage casts
+    np.testing.assert_allclose(chunked, reader.coefficients, rtol=rtol, atol=atol)
 
 
 def test_coefficient_grid_is_not_read_as_samples(full):

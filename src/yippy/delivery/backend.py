@@ -173,13 +173,15 @@ class DeliveryBackend(eqx.Module):
         if (size + 2 * pad) % 2:
             pad += 1
         fft_size = size + 2 * pad
+        # Form node radii and angles in the same precision as the query.
+        offsets = like(self.blend_offsets, query)
         return synthesize_psf_idw(
             query[0],
             query[1],
             like(self.pitch_lod, query),
             self.blend_nodes,
-            self.blend_offsets[:, 0],
-            self.blend_offsets[:, 1],
+            offsets[:, 0],
+            offsets[:, 1],
             jnp.fft.rfftfreq(fft_size, dtype=query.dtype),
             jnp.fft.fftfreq(fft_size, dtype=query.dtype),
             pad,
