@@ -66,12 +66,16 @@ class Normalization(eqx.Module):
         """Validate the declared structure before numerical use."""
         check_static(self)
         check_array(
-            self.photon_conversion, (self.photon_conversion.size,), (jnp.float64,)
+            self.photon_conversion,
+            (self.photon_conversion.size,),
+            (jnp.float64,),
+            name="Normalization.photon_conversion",
         )
         check_array(
             self.reference_uncertainty_fraction,
             self.photon_conversion.shape,
             (jnp.float64,),
+            name="Normalization.reference_uncertainty_fraction",
         )
 
 
@@ -145,7 +149,13 @@ class Products(eqx.Module):
         return self.pixels.frame
 
     def __check_init__(self):
-        """Validate the declared structure before numerical use."""
+        """Validate the declared structure before numerical use.
+
+        Raises:
+            PrecisionError: If a float64 field has a narrower floating dtype.
+            TypeError: If a field has an incompatible type or dtype.
+            ValueError: If the declared structure is inconsistent.
+        """
         check_static(self)
         if not isinstance(self.measure, Measure):
             raise TypeError("products require a Measure")
@@ -153,19 +163,35 @@ class Products(eqx.Module):
             self.pixels.cell_area(self.measure.area)
         if self.pixels.unit != "lod" or self.pixels.frame is None:
             raise ValueError("Products require a lod grid with a frame")
-        count = self.wavelength_nm.size
-        if count < 1:
+        count = getattr(self.wavelength_nm, "size", None)
+        if count == 0:
             raise ValueError("At least one product is required")
-        for value in (
-            self.wavelength_nm,
-            self.sampling_min_nm,
+        for name in ("wavelength_nm", "sampling_min_nm"):
+            check_array(
+                getattr(self, name), (count,), (jnp.float64,), name=f"Products.{name}"
+            )
+        check_array(
             self.normalization.photon_conversion,
-        ):
-            check_array(value, (count,), (jnp.float64,))
-        check_array(self.limits_nm, (count, 2), (jnp.float64,))
-        check_array(self.support_extent_xy, (count, 2), (jnp.float64,))
+            (count,),
+            (jnp.float64,),
+            name="Normalization.photon_conversion",
+        )
+        check_array(
+            self.limits_nm, (count, 2), (jnp.float64,), name="Products.limits_nm"
+        )
+        check_array(
+            self.support_extent_xy,
+            (count, 2),
+            (jnp.float64,),
+            name="Products.support_extent_xy",
+        )
         check_array(self.support_evidence, (count,), (jnp.int32,))
-        check_array(self.campaign_sampling_min_nm, (), (jnp.float64,))
+        check_array(
+            self.campaign_sampling_min_nm,
+            (),
+            (jnp.float64,),
+            name="Products.campaign_sampling_min_nm",
+        )
         if len(self.support_source_ids) != count:
             raise ValueError("Support source count differs from product count")
 
@@ -210,7 +236,7 @@ class Reflection(eqx.Module):
         check_array(self.axes, (2,), (jnp.bool_,))
         check_array(self.evidence, (), (jnp.int32,))
         check_array(self.check_passed, (self.check_passed.size,), (jnp.bool_,))
-        check_array(self.tolerance, (), (jnp.float64,))
+        check_array(self.tolerance, (), (jnp.float64,), name="Reflection.tolerance")
 
 
 class SampledGrid(eqx.Module):
@@ -293,9 +319,14 @@ class CheckSet(eqx.Module):
         """Validate the declared structure before numerical use."""
         check_static(self)
         count = self.product_index.size
-        check_array(self.source_xy_lod, (count, 2), (jnp.float64,))
+        check_array(
+            self.source_xy_lod,
+            (count, 2),
+            (jnp.float64,),
+            name="CheckSet.source_xy_lod",
+        )
         check_array(self.product_index, (count,), (jnp.int32,))
-        check_array(self.core_peak, (count,), (jnp.float64,))
+        check_array(self.core_peak, (count,), (jnp.float64,), name="CheckSet.core_peak")
         if self.intensity.ndim != 3:
             raise ValueError("Check images require [query, row, column]")
         check_array(
@@ -330,7 +361,12 @@ class MirrorCheckSet(eqx.Module):
         """Validate the declared structure before numerical use."""
         check_static(self)
         count = self.product_index.size
-        check_array(self.source_xy_lod, (count, 2), (jnp.float64,))
+        check_array(
+            self.source_xy_lod,
+            (count, 2),
+            (jnp.float64,),
+            name="MirrorCheckSet.source_xy_lod",
+        )
         check_array(self.indices_xy, (count, 2), (jnp.int32,))
         check_array(self.product_index, (count,), (jnp.int32,))
         if self.intensity.ndim != 3:

@@ -14,6 +14,7 @@ import yippy.sinc as sc
 from yippy.sinc.evidence import Reason
 from yippy.sinc.geometry import origin_xy, source_grid, spacing_xy
 from yippy.sinc.grid import CheckSet, Reflection
+from yippy.sinc.kernel import PrefilteredKernelProfile
 from yippy.sinc.reader import Interpolator, read_batch
 
 from .helpers import analytic, delivery, make_reader
@@ -278,6 +279,43 @@ def test_reader_after_disabling_x64(full_reader):
                     read(query, product)
             else:
                 assert read(query, product).accepted
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [sc.KernelProfile(), PrefilteredKernelProfile()],
+    ids=["raw", "prefiltered"],
+)
+@pytest.mark.parametrize(
+    "value,error,message",
+    [
+        (
+            np.array([500], dtype=np.float32),
+            PrecisionError,
+            "must be float64, got float32",
+        ),
+        (
+            np.array([500], dtype=np.float16),
+            PrecisionError,
+            "must be float64, got float16",
+        ),
+        (np.array([500], dtype=np.int32), TypeError, "int32"),
+        (np.array([500], dtype=np.complex64), TypeError, "complex64"),
+        ([500.0], TypeError, "must be an array"),
+    ],
+)
+def test_reader_rejects_invalid_sampling_precision(profile, value, error, message):
+    """Validate float64 metadata when a PyTree update bypasses its converter."""
+    data = delivery(shape=(2, 2))
+    grid = sc.admit_grid(**data, profile=profile).require()
+    invalid = eqx.tree_at(lambda g: g.products.sampling_min_nm, grid, value)
+    with pytest.raises(error, match=rf"Products\.sampling_min_nm.*{message}"):
+        sc.make_reader(
+            invalid,
+            data["domain"],
+            profile=profile,
+            memory=data["memory"],
+        )
 
 
 def test_allocation_limits(full_delivery, full_reader):
