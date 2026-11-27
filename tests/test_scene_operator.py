@@ -90,7 +90,9 @@ def test_render_matches_the_dense_contraction(tmp_path, kind, symmetric):
     assert flux_error < 1e-5
 
 
-@pytest.mark.medium(reason="1000 dense reference PSFs and one 256-pixel build, 12 s")
+@pytest.mark.slow(
+    reason="1000 dense reference PSFs and one 256-pixel build, 26-42 s run-bound"
+)
 def test_shipped_package_blocks_size_and_estimate(coro):
     """Fails if the node form drifts from the per-source blend on real 2D PSFs.
 
