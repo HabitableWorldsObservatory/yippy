@@ -14,6 +14,7 @@ from lod_unit import lod
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, ApertureRule, Circular
 from optixstuff.performance import (
     CORE_OVERSAMPLE,
+    RECORD_ALGORITHM_VERSION,
     SampledProfile,
     performance_curves,
 )
@@ -497,6 +498,7 @@ class _YIPData:
         identity.update(
             {
                 "performance_record": PERFORMANCE_VERSION,
+                "record_algorithm_version": RECORD_ALGORITHM_VERSION,
                 "aperture_algorithm": "continuum_region_dft_peak_v1",
                 "yippy_version": __version__,
                 "stellar_interpolation_revision": STELLAR_INTERPOLATION_REVISION,

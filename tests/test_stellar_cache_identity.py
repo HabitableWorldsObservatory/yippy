@@ -1,6 +1,7 @@
-"""The stellar interpolation revision invalidates cached performance records."""
+"""Numerical revisions invalidate cached performance records."""
 
 import numpy as np
+import pytest
 from synthetic_yip import write_synthetic_yip
 
 import yippy._yip as yip_module
@@ -8,7 +9,10 @@ from yippy import open_yip
 from yippy._yip import _YIPData
 
 
-def test_performance_cache_misses_base_stellar_interpolation(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "field", ["stellar_interpolation_revision", "record_algorithm_version"]
+)
+def test_performance_cache_misses_previous_identity(tmp_path, monkeypatch, field):
     """A persisted base record misses and a current record hits."""
     write_synthetic_yip(tmp_path, npix=24, max_offset_lod=2.0)
     package = open_yip(tmp_path)
@@ -16,7 +20,7 @@ def test_performance_cache_misses_base_stellar_interpolation(tmp_path, monkeypat
 
     def base_identity(self, *args, **kwargs):
         identity = current_identity(self, *args, **kwargs)
-        identity.pop("stellar_interpolation_revision", None)
+        identity.pop(field)
         return identity
 
     with monkeypatch.context() as patch:
