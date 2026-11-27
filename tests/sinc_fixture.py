@@ -21,11 +21,15 @@ _PREMISES = (
 )
 
 
-def write_delivery(root, *, full=False):
+def write_delivery(root, *, full=False, npix=4):
     """Write native float32 band-limited samples and a separate legacy package."""
     root.mkdir(parents=True, exist_ok=True)
     write_synthetic_yip(
-        root / "legacy", npix=4, pixscale=0.4, max_offset_lod=1.0, offset_step_lod=0.5
+        root / "legacy",
+        npix=npix,
+        pixscale=0.4,
+        max_offset_lod=1.0,
+        offset_step_lod=0.5,
     )
     for name in ("stellar_intens.fits", "sky_trans.fits"):
         with fits.open(root / "legacy" / name, mode="update") as hdus:
@@ -34,8 +38,9 @@ def write_delivery(root, *, full=False):
     ix, iy = np.meshgrid(axis, axis, indexing="xy")
     indices = np.column_stack((ix.ravel(), iy.ravel()))
     offsets = indices * 0.38
-    detector_y, detector_x = np.mgrid[:4, :4]
-    x, y = (detector_x - 1.5) * 0.25, (detector_y - 1.5) * 0.25
+    detector_y, detector_x = np.mgrid[:npix, :npix]
+    center = (npix - 1) / 2
+    x, y = (detector_x - center) * 0.25, (detector_y - center) * 0.25
 
     def images(coords):
         return np.array(
@@ -49,7 +54,7 @@ def write_delivery(root, *, full=False):
         )
 
     header = yip_header(
-        PixelGrid.focal(4, 0.25, Frame(500, 6, "circumscribed")),
+        PixelGrid.focal(npix, 0.25, Frame(500, 6, "circumscribed")),
         design="symmetric",
         inscribed_diameter_m=5.0,
         low_nm=500.0,
@@ -125,8 +130,8 @@ def write_delivery(root, *, full=False):
             "report_path": "mirror.json",
             "report_sha256": digest("mirror.json"),
         },
-        "detector_shape_yx": [4, 4],
-        "detector_center_xy": [1.5, 1.5],
+        "detector_shape_yx": [npix, npix],
+        "detector_center_xy": [center, center],
         "detector_convention": "pixel_midpoint_v1",
         "pixel_scale_lod_xy": [0.25, 0.25],
         "pixel_scale_arcsec_xy": [(0.25 * (500e-9 / 6.0)) * (180 * 3600 / np.pi)] * 2,

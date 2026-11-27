@@ -13,7 +13,7 @@ rule = Circular(0.7)
 coro = open_yip("path/to/yip").prepare(rules=(rule,))
 curves = coro.curves(rule)
 separations = np.array([3.0, 5.0, 10.0, 20.0])
-contrast = np.maximum(np.abs(curves.evaluate("raw_contrast", separations)), 4e-10)
+contrast = np.maximum(np.abs(curves.evaluate("raw_contrast", separations, 0.0)), 4e-10)
 noise = contrast / 30.0
 ```
 

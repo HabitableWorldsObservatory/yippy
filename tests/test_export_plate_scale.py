@@ -4,10 +4,12 @@ import json
 from dataclasses import replace
 
 import equinox as eqx
+import jax
 import numpy as np
 import pytest
 from astropy.io import fits
 from hwoutils.conversions import lambda_d_to_arcsec
+from hwoutils.testing import ulps
 from sinc_fixture import save_manifest, write_delivery
 from synthetic_yip import write_synthetic_yip
 
@@ -24,7 +26,8 @@ except ModuleNotFoundError:
 def unequal_product_grids(tmp_path_factory):
     """Prepare a uniform stellar map with twice the off-axis pitch."""
     directory = tmp_path_factory.mktemp("export_plate_scale")
-    metadata = write_delivery(directory)
+    # Nine 0.25 lambda/D pixels span the first nonzero ring (0.38 + 0.7).
+    metadata = write_delivery(directory, npix=9)
     metadata["checks"] = []
     metadata["served"]["bounds_lod"] = [[-0.2, 0.2], [-0.2, 0.5]]
     save_manifest(directory, metadata)
@@ -36,20 +39,40 @@ def unequal_product_grids(tmp_path_factory):
     yield open_yip(directory).prepare(interpolation="sinc")
 
 
+@pytest.mark.parametrize("leakage_rule", ["aperture_ring_mean", "aperture_mean"])
 @pytest.mark.parametrize("units", ["LAMBDA/D", "arcsec"])
-def test_export_preserves_stellar_density(unequal_product_grids, tmp_path, units):
-    """The constant native stellar density is the absolute truth in either unit."""
+def test_export_preserves_stellar_density(
+    unequal_product_grids, tmp_path, units, leakage_rule
+):
+    """A uniform map returns its density wherever the entire ring fits.
+
+    A clipped ring counts the zero extension at some position angles while
+    the exported area follows the planet aperture on +x. The host ring sum
+    differed by 85 float64 epsilon units on the contained ring. Allow 128,
+    plus four working-precision roundings for the density and angular units.
+    """
     coro = unequal_product_grids
+    if coro.leakage_rule != leakage_rule:
+        coro = coro.with_rules((coro.curves().rule,), leakage_rule=leakage_rule)
     write_to = tmp_path / "exosims"
     export_exosims(coro, units, output_dir=write_to)
     data, header = fits.getdata(write_to / "core_mean_intensity.fits", header=True)
     density_lod2 = coro.stellar_map(None, 0.0).density("grid").data[0, 0]
     angle_scale = lambda_d_to_arcsec(1, 500, 6) if units == "arcsec" else 1
+    seps = data[:, 0] / angle_scale
+    extent = min(
+        abs(edge) for grid in (coro.grid, coro.stellar_grid) for edge in grid.extent()
+    )
+    inside = seps + header["RADLOD"] <= extent
+    assert np.any(seps[inside] == 0) and np.any(seps[inside] > 0)
+    expected = density_lod2 / angle_scale**2
+    with jax.enable_x64():
+        atol = float(ulps(128, np.float64(expected)) + ulps(4, expected))
     np.testing.assert_allclose(
-        data[:, 1] / header["PIXSCALE"] ** 2,
-        density_lod2 / angle_scale**2,
-        rtol=1e-6,
-        atol=0,
+        data[inside, 1] / header["PIXSCALE"] ** 2,
+        expected,
+        rtol=0,
+        atol=atol,
     )
 
 

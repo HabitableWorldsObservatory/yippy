@@ -54,7 +54,7 @@ transmission = coro.uniform_sky_map(None, grid=coro.grid)
 
 record = coro.curves(circle)
 throughput = record.evaluate("throughput", 5.0)
-contrast = record.evaluate("raw_contrast", 5.0)
+contrast = record.evaluate("raw_contrast", 5.0, 0.0)
 area = record.evaluate("core_area_lod2", 5.0)
 sky = coro.uniform_sky_response(5.0)
 ```
@@ -247,7 +247,9 @@ from yippy.export import export_ayo_csv, export_exosims
 
 ppf = 30.0
 record = coro.curves()
-contrast_noise = np.maximum(np.abs(record.evaluate("raw_contrast", 5.0)), 4e-10) / ppf
+contrast_noise = (
+    np.maximum(np.abs(record.evaluate("raw_contrast", 5.0, 0.0)), 4e-10) / ppf
+)
 density_noise = record.evaluate("leakage_density_lod2", 5.0, 0.0) / ppf
 export_exosims(coro)
 export_ayo_csv(coro, "output.csv", ppf)
