@@ -243,6 +243,7 @@ R = {
     "INCOMPLETE_STENCIL": ("both", "At a read, the query's 32 by 32 stencil runs off the stored nodes. At admission, the grid has fewer than 17 nodes per quadrant axis (32 per full-grid axis), or no served position has a complete stencil", "Read inside the served region, or deliver a larger rectangle"),
     "OUTSIDE_DOMAIN": ("read", "The query is outside the permission region", "Read inside the region"),
     "SYMMETRY_UNSUPPORTED": ("admission", "The symmetry declaration is incomplete or malformed (both axes, evidence, identifiers, tolerance no looser than 1e-6), or conflicts with the grid", "Complete the declaration"),
+    "PRECISION_UNAVAILABLE": ("reserved", "A required float64 operation cannot run at the current precision", "Use float64 for the operation"),
     "MEMORY_LIMIT": ("admission", "An allocation estimate exceeds the `MemoryBudget`", "Raise the ceilings or tile reads more finely"),
     "NONFINITE_QUERY": ("read", "The query position is NaN or infinite", "Pass a finite position"),
     "PRODUCT_UNAVAILABLE": ("read", "The product index is not in the delivery", "Use an index the delivery has"),
@@ -401,7 +402,7 @@ give and in what order, and what it leaves unsaid. The answers, filled in:
   rises by a factor near {glue}`a_growth_n` between $h=0.38$ and $h=0.45$.
 - **Reasons:** every bit of `Reason` is in the table, and a refusal lists all
   that apply.
-- **Order:** precision and memory end the run alone, then semantic checks,
+- **Order:** an initial memory breach ends the run alone, then semantic checks,
   then symmetry, then interior checks, as in the flowchart.
 - **Unsaid:** version 0.1 reads without a certified bound, so the receipt's
   checks are evidence and never a bound.
