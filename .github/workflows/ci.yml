@@ -90,7 +90,9 @@ jobs:
 
       - name: Quick tier
         run: |
-          pytest tests/ -m "not slow and not network" -ra --tb=short \
+          # Populate the shared example data cache before workers read it.
+          python -c "from yippy import fetch_yip; fetch_yip('eac1_aavc_2d')"
+          pytest tests/ -m "not slow and not network" -n 2 --dist loadfile -ra --tb=short \
             --precision=${{ matrix.precision }} \
             --timeout=300 --fail-slow=30s \
             --durations=15 --durations-min=1.0 \
