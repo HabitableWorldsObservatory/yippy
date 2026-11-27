@@ -1,10 +1,15 @@
-# Unreleased sibling libraries, applied as uv overrides so each is installed at a pinned main
-# commit whatever version bounds other packages declare (a breaking change waiting for its
-# release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
-# Each pin below is the branch that carries the unreleased major version the floors in
-# pyproject.toml name (floors name the next version release-please will cut, not yet on PyPI).
-# After a sibling is released and on PyPI: delete its line here. When the sibling branch is
-# merged first, replace the branch with the merge commit on main until the release lands.
-# The file is empty (comments only) once PyPI carries every declared floor.
-hwoutils @ git+https://github.com/CoreySpohn/hwoutils@fit-posterior
-optixstuff @ git+https://github.com/CoreySpohn/optixstuff@fit-posterior
+# Unreleased sibling libraries, applied as uv overrides in the same resolve.
+# Each pins the sibling's release head; delete a pin once PyPI carries that version.
+coronachrome @ git+https://github.com/CoreySpohn/coronachrome@446d2ae87b2d279d397a836e1407ab5de0951115
+coronagraphoto @ git+https://github.com/CoreySpohn/coronagraphoto@6d242a92e3cf0c328a346929ada872a5c150d551
+eyepiece @ git+https://github.com/CoreySpohn/eyepiece@407a8bc8a997083e5d1e3f6cf8f8ee12bd100440
+hwoutils @ git+https://github.com/CoreySpohn/hwoutils@e362b4bcedf814f84132aacf60f295cf22ca6563
+jaxedith @ git+https://github.com/CoreySpohn/jaxEDITH@70580ab362115b2b9e941a72b34ab6773d11bd2b
+optixstuff @ git+https://github.com/CoreySpohn/optixstuff@133bbc0d545ada48d69ff85aab111ed643284833
+orbix @ git+https://github.com/CoreySpohn/orbix@f7710d5d85a352b8735a48c4b403b4a2f4c033d9
+photomancy @ git+https://github.com/CoreySpohn/photomancy@932f23e720a2f22dd1b4946393273f301dffb154
+physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix@a62d7c8ab3e81db8009a13de30cdd79974bf8078
+priorities @ git+https://github.com/CoreySpohn/priorities@9cfc723374390a6b086c0c392ec7ed8931b559ea
+skyscapes @ git+https://github.com/CoreySpohn/skyscapes@9a597da287b5fc4f993399f58c27a3582cf8921a
+tiptilt @ git+https://github.com/CoreySpohn/tiptilt@1f5190aa732c6638cb67364531ae959a02dbe324
+zodi @ git+https://github.com/CoreySpohn/zodi@ffff6503123450d74a18016b7ecae7db174ace46
