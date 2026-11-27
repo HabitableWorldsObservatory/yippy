@@ -170,6 +170,8 @@ scripts/*
 # Build artifacts from scripts/build_zenodo_archives.py (zips for Zenodo upload)
 dist/
 *.png
+# Static figures the sinc docs pages embed (made by docs/sinc/scripts).
+!docs/sinc/_static/validation/*.png
 
 # Local tooling caches
 .claude/
