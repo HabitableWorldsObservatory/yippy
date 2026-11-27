@@ -194,7 +194,8 @@ def test_quadrant_native_intake(admitted):
 def test_reads_units_refusals(admitted):
     """Fails on integral/mean conversion, clipped sinc output or NaN acceptance."""
     reader = admitted._offaxis_backend.reader
-    direct = reader.read(jnp.array([0.07, -0.04]), jnp.int32(0))
+    # Use the same compiled sinc sum to isolate the per-pixel unit conversion.
+    direct = eqx.filter_jit(reader.read)(jnp.array([0.07, -0.04]), jnp.int32(0))
     actual = jax.tree.map(
         lambda value: value[0],
         admitted._offaxis_backend.create_psfs_with_info([0.07], [-0.04]),

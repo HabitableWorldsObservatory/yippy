@@ -13,11 +13,15 @@ azimuthal mean; on the shipped vortex package it agrees with the Fourier-Bessel
 series of the map to 0.4 percent everywhere tested.
 """
 
+from functools import partial
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import REFERENCE_DATA_REQUIRED
 from hwoutils.numerics import eps
+from optixstuff.performance import circular_aperture
 from scipy.interpolate import RectBivariateSpline
 
 from yippy import open_yip
@@ -468,7 +472,6 @@ def test_curves_of_a_2d_product_warn_once(modulated_package, caplog):
 # product, so the leakage read at a stellar diameter agrees with the image route
 # at that diameter (the star is not a point at zero diameter).
 RECORD_SEPARATIONS_LOD = np.array([2.86, 5.30, 8.27, 11.27])
-RECORD_TOL = 2e-3
 
 
 @pytest.fixture(scope="module")
@@ -489,39 +492,46 @@ def eac1_curves():
     return coro, coro.curves()
 
 
-def disc_ring_leakage(coro, image, separation_lod, n_apertures=360, n_sub=16):
-    """Mean over position angle of the exact-coverage sum of a circular aperture.
+@partial(jax.jit, static_argnames=("half_width",))
+def _aperture_sums(image, centers, radius_pix, pitch, half_width):
+    """Measure each disk directly on the band-limited stellar image."""
 
-    The aperture is a disc of the record's rule radius centred on a circle about
-    the optical axis; each pixel is weighted by the fraction of it covered,
-    counted on an n_sub by n_sub sub-grid. NumPy only, independent of the record.
+    def flux(center):
+        return circular_aperture(
+            image, radius_pix, pitch, fixed_center=center, half_width_pix=half_width
+        )[0]
+
+    return jax.lax.map(flux, centers)
+
+
+def disc_ring_leakage(grid, image, rule, separations, n_angles=256):
+    """Average public disk integrals on the band-limited stellar image.
+
+    Double the angular count until the largest change on the four rings is
+    below 2 ppm across all fourteen diameters. The 128-to-256 change reaches
+    0.274 percent; 256 and 512 agree within 1.74 ppm.
     """
-    pixel_lod = float(coro.grid.step)
-    radius = float(coro.curves().rule.radius_lod) / pixel_lod
-    centre_y, centre_x = coro.stellar_grid.center_y, coro.stellar_grid.center_x
-    sub = (np.arange(n_sub) + 0.5) / n_sub - 0.5
-    total = 0.0
-    for theta in np.linspace(0.0, 2.0 * np.pi, n_apertures, endpoint=False):
-        cy = centre_y + separation_lod / pixel_lod * np.sin(theta)
-        cx = centre_x + separation_lod / pixel_lod * np.cos(theta)
-        y0, y1 = int(np.floor(cy - radius)) - 1, int(np.ceil(cy + radius)) + 2
-        x0, x1 = int(np.floor(cx - radius)) - 1, int(np.ceil(cx + radius)) + 2
-        ys = (np.arange(y0, y1)[:, None] + sub[None, :]).ravel()
-        xs = (np.arange(x0, x1)[:, None] + sub[None, :]).ravel()
-        inside = (ys[:, None] - cy) ** 2 + (xs[None, :] - cx) ** 2 <= radius**2
-        weights = inside.reshape(y1 - y0, n_sub, x1 - x0, n_sub).mean(axis=(1, 3))
-        total += (weights * image[y0:y1, x0:x1]).sum()
-    return total / n_apertures
+    with jax.enable_x64():
+        phi = np.arange(n_angles) * (2 * np.pi / n_angles)
+        radius_pix = rule.radius_lod / grid.step
+        radii = separations[:, None]
+        pixels = grid.unit_to_pixel(radii * np.cos(phi), radii * np.sin(phi))
+        centers = jnp.stack((pixels.y, pixels.x), axis=-1).reshape(-1, 2)
+        fluxes = _aperture_sums(
+            jnp.asarray(image, dtype=jnp.float64),
+            centers,
+            radius_pix,
+            grid.step,
+            int(np.ceil(radius_pix)) + 1,
+        )
+        return np.asarray(fluxes).reshape(len(separations), n_angles).mean(axis=1)
 
 
 def record_vs_ring(coro, record, diameter_lod):
-    """Relative difference of the record's leakage and the NumPy ring mean."""
-    image = np.asarray(
-        coro.stellar_map(None, diameter_lod, grid=None).integrated().data,
-        dtype=np.float64,
-    )
-    truth = np.array(
-        [disc_ring_leakage(coro, image, s) for s in RECORD_SEPARATIONS_LOD]
+    """Relative difference between the interpolated record and direct aperture sums."""
+    image = coro.stellar_map(None, diameter_lod, grid=None).integrated()
+    truth = disc_ring_leakage(
+        image.grid, image.data, record.rule, RECORD_SEPARATIONS_LOD
     )
     got = np.asarray(
         record.evaluate("leakage_fraction", RECORD_SEPARATIONS_LOD, diameter_lod),
@@ -530,33 +540,19 @@ def record_vs_ring(coro, record, diameter_lod):
     return got / truth - 1.0
 
 
-# Measured worst case over the four separations, per tabulated diameter, of the
-# record against the converged ring mean of that plane (360 apertures with a
-# 16 by 16 sub-grid, 720 with 32 agree to 0.02 percent). The 0.1 percent at the
-# smallest diameters is the record's, not the truth's: it is the same at every
-# truth resolution. It does not come from the radial step of the ring profile
-# (halving it twice moves the 0.25 and 0.50 lambda/D rows by under 0.1 percent)
-# or the azimuth count, and a quintic in place of the cubic map interpolant
-# leaves it unchanged. The ring rule weights a point-sampled ring-mean map with
-# pixel weights; the truth sums the pixel values over the same apertures. The two
-# are the same integral only in the continuum, and at the diameters where the
-# map varies on the scale of a pixel inside the aperture the gap reaches
-# 0.6 percent.
-KNOT_TOL = {
-    "small": 2e-3,  # measured max 0.14 percent at diameters up to 0.126
-    "large": 7e-3,  # measured max 0.61 percent at 0.25, 0.50 and 1.0
-}
+# These rounded separations lie between measured offsets. Relative to direct
+# disk sums, separation interpolation gives differences up to 0.110 percent for
+# the first nine diameters and 0.492 percent for the last three. Allow about
+# 10 percent above each measured maximum.
+KNOT_TOL = {"small": 1.21e-3, "large": 5.5e-3}
 
 
 @pytest.mark.parametrize("knot", range(12))
 def test_record_leakage_at_each_tabulated_diameter(eac1_curves, knot):
     """Fails if the record's leakage is not the ring mean of that table plane.
 
-    Truth is the mean over 360 exact-coverage apertures on the plane at the
-    tabulated diameter, independent of the record's construction. The tolerance
-    is the measured worst case rounded up: 0.2 percent up to 0.126 lambda/D
-    (measured 0.14) and 0.7 percent from 0.25 lambda/D (measured 0.61). The
-    comment above says where that gap comes from.
+    Each diameter reads its own table plane at the four probe separations.
+    The reference reconstructs that plane independently at rotated apertures.
     """
     coro, record = eac1_curves
     diameter = float(np.asarray(record.stellar_diameters_lod)[knot])
@@ -569,16 +565,13 @@ def test_record_leakage_at_each_tabulated_diameter(eac1_curves, knot):
 def test_record_leakage_between_diameters_follows_the_map(eac1_curves, diameter_lod):
     """Fails if the curves route leaves the image route's interpolated map.
 
-    This checks that the two routes agree, not that either is accurate: the
-    truth is the ring mean of the map the image route interpolates between
-    tabulated diameters, so it shares the interpolation rule and the table, which
-    holds no map between its knots. The 0.2 percent bound is the measured
-    agreement (worst case 0.14 percent at these diameters, which sit below
-    0.07 lambda/D, where the two routes stay within it).
+    The image route interpolates the stellar map before integrating and the
+    record interpolates the measured fluxes. The maximum relative difference
+    at these two diameters was 0.0578 percent; allow 0.064 percent.
     """
     coro, record = eac1_curves
     err = record_vs_ring(coro, record, diameter_lod)
-    assert np.max(np.abs(err)) <= RECORD_TOL, err
+    assert np.max(np.abs(err)) <= 6.4e-4, err
 
 
 def test_resolved_star_differs_from_a_point_star(eac1_curves):
@@ -586,7 +579,7 @@ def test_resolved_star_differs_from_a_point_star(eac1_curves):
     _, record = eac1_curves
     point = float(record.evaluate("leakage_fraction", 2.86, 0.0))
     resolved = float(record.evaluate("leakage_fraction", 2.86, 0.25))
-    assert abs(resolved / point - 1.0) > 10 * RECORD_TOL
+    assert abs(resolved / point - 1.0) > 0.02
 
 
 def test_record_gradient_in_the_stellar_diameter(eac1_curves):
