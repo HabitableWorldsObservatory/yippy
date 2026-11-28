@@ -38,8 +38,9 @@ from optixstuff.spectral import Band, same_wavelength
 
 from ._jax_funcs import blend_pad
 from ._stellar_intens import bounded_stellar_pchip, stellar_knot_index
+from ._version import __version__
 from ._yip import _YIPData
-from .header import HeaderData
+from .header import HeaderData, _card_pupil_id
 from .interpolation import SincOptions
 from .logger import logger
 from .performance import resolve_leakage_rule
@@ -143,7 +144,65 @@ def _product_stamps(header: HeaderData) -> Stamps:
         pupil_diameter_m=value_in(header.diameter, "m"),
         pupil_inscribed_m=value_in(header.diameter_inscribed, "m"),
         pupil_obscured=header.obscured,
+        pupil_id=header.pupil_id,
     )
+
+
+def _resolve_pupil_id(package, keyword):
+    """Return the identifier a declaration covers for the whole delivery, or None.
+
+    Every pair of known declarations (the keyword, the manifest key and the
+    PUPIL_ID card of each product) must agree. The keyword or the manifest key
+    names the delivery; cards name it only when all three products declare one.
+    A partial declaration leaves the delivery unidentified.
+
+    Args:
+        package: Open YIP package.
+        keyword: The ``pupil_id`` argument of the coronagraph, or None.
+
+    Returns:
+        The delivery pupil identifier, or None for unknown.
+
+    Raises:
+        ValueError: If the keyword is empty or two known declarations differ.
+    """
+    if keyword is not None and (not isinstance(keyword, str) or not keyword):
+        raise ValueError("pupil_id must be None or a non-empty string")
+    manifest = package._manifest
+    key = None if manifest is None else manifest.get("pupil_id")
+    cards = {
+        f"{label} PUPIL_ID card": _card_pupil_id(
+            package.fits_header(product).get("PUPIL_ID")
+        )
+        for label, product in (
+            ("offaxis", "offaxis_psfs"),
+            ("stellar", "stellar_intensity"),
+            ("sky", "sky_transmission"),
+        )
+    }
+    known = [
+        (source, value)
+        for source, value in (
+            ("keyword pupil_id", keyword),
+            ("manifest pupil_id", key),
+            *cards.items(),
+        )
+        if value is not None
+    ]
+    for i, (first_source, first) in enumerate(known):
+        for source, value in known[i + 1 :]:
+            if value != first:
+                raise ValueError(
+                    f"Conflicting pupil_id: {first_source} {first!r}, "
+                    f"{source} {value!r}"
+                )
+    if keyword is not None:
+        return keyword
+    if key is not None:
+        return key
+    if all(value is not None for value in cards.values()):
+        return next(iter(cards.values()))
+    return None
 
 
 class _StellarLogSpline(interpax.CubicSpline):
@@ -190,6 +249,7 @@ class Coronagraph(AbstractTableCoronagraph):
     sky_trans: Image
     header: HeaderData = eqx.field(static=True)
     built_at: Stamps = eqx.field(static=True)
+    _pupil_id: str | None = eqx.field(static=True)
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
     band_averaged: bool = eqx.field(static=True)
@@ -223,6 +283,7 @@ class Coronagraph(AbstractTableCoronagraph):
         leakage_rule=None,
         interpolation="blend",
         sinc_options: SincOptions | None = None,
+        pupil_id: str | None = None,
     ):
         """Load host products and freeze their tables and prepared aperture rules.
 
@@ -241,10 +302,18 @@ class Coronagraph(AbstractTableCoronagraph):
             interpolation: Interpolation mode requested for off-axis reads, for example
                 ``"blend"`` or ``"auto"``.
             sinc_options: Optional sinc construction controls; None uses defaults.
+            pupil_id: Name of the pupil prescription the tables were computed with,
+                for a delivery that does not declare one. It must agree with every
+                declaration the package holds.
+
+        Raises:
+            ValueError: If ``rules`` is empty, or ``pupil_id`` is empty or
+                contradicts a declaration of the package.
         """
         rules = tuple(dict.fromkeys(rules))
         if not rules:
             raise ValueError("rules must contain at least one aperture rule")
+        self._pupil_id = _resolve_pupil_id(package, pupil_id)
         package._check_source()
         host = _YIPData(
             package,
@@ -264,6 +333,8 @@ class Coronagraph(AbstractTableCoronagraph):
         self.built_at = merge_stamps(
             build_stamps(
                 producer="yippy.Coronagraph",
+                producer_version=__version__,
+                pupil_id=self._pupil_id,
                 source=Digest(package.source.digest),
                 product_id=package.product_id,
             ),
@@ -301,6 +372,11 @@ class Coronagraph(AbstractTableCoronagraph):
         self.sky_trans = host.sky_trans
 
     @property
+    def pupil_id(self) -> str | None:
+        """Declared identifier of the pupil prescription, or None for unknown."""
+        return self._pupil_id
+
+    @property
     def pupil(self):
         """Pupil geometry recorded by the YIP; missing required metadata raises."""
         for name in ("diameter", "diameter_inscribed", "obscured"):
@@ -311,6 +387,7 @@ class Coronagraph(AbstractTableCoronagraph):
             circumscribed_diameter_m=diameter_m,
             inscribed_diameter_m=self.header.diameter_inscribed.to_value("m"),
             collecting_area_m2=pi * diameter_m**2 / 4 * (1 - self.header.obscured),
+            pupil_id=self.pupil_id,
         )
 
     def curves(self, rule=DEFAULT_APERTURE_RULE, *, leakage_rule=None):

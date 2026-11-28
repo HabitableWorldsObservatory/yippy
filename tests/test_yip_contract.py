@@ -13,22 +13,28 @@ move. Where a quantity has a closed form it is tested against the synthetic
 package instead, in ``test_analytic_yip.py``.
 """
 
+import json
+
 import astropy.io.fits as pyfits
 import equinox as eqx
 import jax
 import numpy as np
+import optixstuff as ox
 import pytest
 from astropy import units as u
+from astropy.io import fits
 from hwoutils.numerics import eps
 from hwoutils.provenance import StampMismatchError, compare_stamps, require_stamps
 from lod_unit import lod
 from optixstuff.apertures import Circular
-from optixstuff.grids import Measure, PixelGrid
+from optixstuff.grids import Frame, Measure, PixelGrid
 from sinc_fixture import write_delivery
 from synthetic_yip import write_synthetic_yip
 
-from yippy import SceneCoronagraph, open_yip
+from yippy import SceneCoronagraph, open_yip, write_yip
+from yippy import __version__ as yippy_version
 from yippy import coronagraph as coronagraph_module
+from yippy.writer import yip_header
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -246,6 +252,7 @@ def test_built_at_keeps_the_full_native_source_digest(stamp_package):
     assert stamps["source"] == f"sha256:{package.source.digest}"
     assert stamps["producer"] == "str:yippy.Coronagraph"
     assert stamps["product_id"] == "unknown"
+    assert stamps["pupil_id"] == "unknown"
     assert {
         key: value for key, value in stamps.items() if key.startswith("stellar.")
     } == {
@@ -261,6 +268,7 @@ def test_built_at_keeps_the_full_native_source_digest(stamp_package):
         "stellar.pupil_diameter_m": "f64:0x1.8000000000000p+2",
         "stellar.pupil_inscribed_m": "f64:0x1.4000000000000p+2",
         "stellar.pupil_obscured": "f64:0x0.0p+0",
+        "stellar.pupil_id": "unknown",
     }
 
 
@@ -737,3 +745,157 @@ def test_shipped_off_axis_psfs_ring_only_at_the_noise_floor(shipped_coro):
         data = np.asarray(shipped_coro.source_psfs(None, xs, ys, grid=grid).image.data)
         worst = (data.min(axis=(-2, -1)) / data.max(axis=(-2, -1))).min()
         assert worst > -bound
+
+
+PRODUCTS = ("offaxis_psfs", "stellar_intensity", "sky_transmission")
+
+
+def pupil_cards(offaxis=None, stellar=None, sky=None):
+    """Header overrides declaring PUPIL_ID on the named products only."""
+    return {
+        product: {"PUPIL_ID": value}
+        for product, value in zip(PRODUCTS, (offaxis, stellar, sky), strict=True)
+        if value is not None
+    }
+
+
+def selected_view(model, telescope_id):
+    """Install the coronagraph in an Observatory whose pupil carries telescope_id."""
+    pupil = ox.SimplePupil(
+        circumscribed_diameter_m=6.0, collecting_area_m2=1.0, pupil_id=telescope_id
+    )
+    detector = ox.Detector(
+        pixel_scale_arcsec=0.01,
+        shape=(10, 10),
+        qe=0.9,
+        dark_current_e_per_pixel_s=0.0,
+        read_noise_e_rms=0.0,
+        clock_induced_charge_e_per_pixel_frame=0.0,
+        read_time_s=1.0,
+        survival_fraction=1.0,
+    )
+    instrument = ox.Instrument("imager", coronagraph=model, detector=detector)
+    return ox.Observatory(ox.Telescope(pupil), (instrument,)).select("imager")
+
+
+@pytest.mark.parametrize(
+    ("cards", "keyword", "expected"),
+    [
+        (pupil_cards("A", "A", "A"), None, "A"),
+        (pupil_cards(), "K", "K"),
+        (pupil_cards("A", "A", "A"), "A", "A"),
+        (pupil_cards(), None, None),
+    ],
+)
+def test_pupil_id_resolution_order(stamp_package, cards, keyword, expected):
+    """The keyword and a full set of equal cards each name the delivery."""
+    package = stamp_package("resolve", **cards)
+    model = package.prepare(pupil_id=keyword)
+    assert model.pupil_id == expected
+    assert model.pupil.pupil_id == expected
+    assert dict(model.built_at)["pupil_id"] == (
+        "unknown" if expected is None else f"str:{expected}"
+    )
+
+
+def test_pupil_id_conflicts_name_both_sources(stamp_package, tmp_path):
+    """A keyword never overrides a declaration, and two declarations never differ."""
+    package = stamp_package("keyword", **pupil_cards("A", "A", "A"))
+    with pytest.raises(ValueError, match=r"keyword pupil_id 'B'.*offaxis PUPIL_ID"):
+        package.prepare(pupil_id="B")
+    with pytest.raises(ValueError, match="non-empty"):
+        stamp_package("empty").prepare(pupil_id="")
+    with pytest.raises(ValueError, match="non-empty"):
+        stamp_package("empty_card", offaxis_psfs={"PUPIL_ID": ""}).prepare()
+
+    manifest = write_delivery(tmp_path, full=True, npix=24)
+    path = tmp_path / "sinc-delivery.json"
+    assert "pupil_id" not in manifest
+    path.write_text(json.dumps({**manifest, "pupil_id": "M"}))
+    keyed = open_yip(tmp_path, product_id="mono")
+    assert keyed.prepare().pupil_id == "M"
+    assert keyed.header.offaxis_psfs.pupil_id == "M"
+    with pytest.raises(ValueError, match=r"keyword pupil_id 'K'.*manifest pupil_id"):
+        keyed.prepare(pupil_id="K")
+    with fits.open(tmp_path / manifest["planes"][0]["psf_path"], mode="update") as hdus:
+        hdus[0].header["PUPIL_ID"] = "C"
+    with pytest.raises(ValueError, match="Conflicting pupil_id"):
+        _ = open_yip(tmp_path, product_id="mono").header
+
+
+def test_pupil_id_agreement_across_products(stamp_package, tmp_path):
+    """Known cards agree pairwise; a partial declaration is kept but not promoted."""
+    with pytest.raises(ValueError, match=r"offaxis PUPIL_ID card 'A'.*sky PUPIL_ID"):
+        stamp_package("differ", **pupil_cards("A", "A", "B")).prepare()
+    with pytest.raises(ValueError, match=r"offaxis PUPIL_ID card 'A'.*stellar"):
+        stamp_package("pair", **pupil_cards("A", "B", None)).prepare()
+    with pytest.raises(ValueError, match=r"keyword pupil_id 'B'.*stellar PUPIL_ID"):
+        stamp_package("partial_kw", **pupil_cards(None, "A", None)).prepare(
+            pupil_id="B"
+        )
+
+    two = stamp_package("two", **pupil_cards("A", None, "A")).prepare()
+    one = stamp_package("one", **pupil_cards(None, "A", None))
+    model = one.prepare()
+    for built in (two, model):
+        assert built.pupil_id is None
+        assert dict(built.built_at)["pupil_id"] == "unknown"
+    assert dict(model.built_at)["stellar.pupil_id"] == "str:A"
+    assert dict(model.built_at)["offaxis.pupil_id"] == "unknown"
+    copied = open_yip(write_yip(tmp_path / "copy", one))
+    assert copied.prepare().pupil_id is None
+    assert dict(copied.prepare().built_at)["stellar.pupil_id"] == "str:A"
+
+
+def test_pupil_id_pairs_with_the_telescope_pupil(stamp_package):
+    """Rule 14 outcomes, and equal extent is not identity."""
+    declared = stamp_package("a", **pupil_cards("A", "A", "A")).prepare()
+    other = stamp_package("b", **pupil_cards("B", "B", "B")).prepare()
+    undeclared = stamp_package("none").prepare()
+    assert selected_view(declared, "A").pupil_match == "matched"
+    assert selected_view(declared, None).pupil_match == "unverified"
+    assert selected_view(undeclared, "A").pupil_match == "unverified"
+    assert selected_view(undeclared, None).pupil_match == "unverified"
+    # Same D, D_INSC and OBSCURED, different declared prescription.
+    for model, telescope_id in ((declared, "B"), (other, "A")):
+        with pytest.raises(StampMismatchError, match="pupil_id"):
+            selected_view(model, telescope_id)
+    assert declared.pupil.diameter("circumscribed") == other.pupil.diameter(
+        "circumscribed"
+    )
+    assert declared.header.diameter_inscribed == other.header.diameter_inscribed
+
+
+def test_pupil_id_stamps_and_writer_round_trip(stamp_package, tmp_path):
+    """Four labels are stamped, write_yip keeps the card, the producer is versioned."""
+    package = stamp_package("round_trip", **pupil_cards("A", "A", "A"))
+    stamps = dict(package.prepare().built_at)
+    assert stamps["pupil_id"] == "str:A"
+    for prefix in ("stellar", "offaxis", "sky"):
+        assert stamps[f"{prefix}.pupil_id"] == "str:A"
+    assert stamps["producer_version"] == f"str:{yippy_version}"
+    undeclared = dict(stamp_package("plain").prepare().built_at)
+    assert undeclared["stellar.pupil_id"] == "unknown"
+    copied = open_yip(write_yip(tmp_path / "copy", package))
+    assert copied.fits_header("sky_transmission")["PUPIL_ID"] == "A"
+    assert copied.prepare().pupil_id == "A"
+    grid = PixelGrid.focal(4, 0.25, Frame(500.0, 6.0, "circumscribed"))
+    assert yip_header(grid, pupil_id="N")["PUPIL_ID"] == "N"
+    assert "PUPIL_ID" not in yip_header(grid)
+    with pytest.raises(ValueError, match="non-empty"):
+        yip_header(grid, pupil_id="")
+
+
+def test_pupil_id_is_static_and_replaces_primary(stamp_package):
+    """The identifier is structure, not a leaf, and readable under jit."""
+    first = stamp_package("s1", **pupil_cards("A", "A", "A")).prepare()
+    second = stamp_package("s2", **pupil_cards("A", "A", "A")).prepare()
+    other = stamp_package("s3", **pupil_cards("B", "B", "B")).prepare()
+    assert jax.tree_util.treedef_children(
+        jax.tree.structure(first)
+    ) == jax.tree_util.treedef_children(jax.tree.structure(second))
+    assert jax.tree.structure(first) != jax.tree.structure(other)
+    assert all(not isinstance(leaf, str) for leaf in jax.tree.leaves(first))
+    assert jax.jit(lambda model: len(model.pupil_id))(first) == 1
+    assert first.pupil.pupil_id == first.pupil_id == "A"
+    assert not hasattr(type(first), "primary")

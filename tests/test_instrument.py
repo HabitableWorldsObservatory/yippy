@@ -100,6 +100,16 @@ class TestInstrumentIntegration:
         t = instrument.system_throughput(500.0)
         assert t == pytest.approx(0.5)
 
+    def test_system_throughput_includes_the_telescope_train(self, instrument):
+        """Exact algebra: the total is the shared train times the configuration's."""
+        mirror = ox.ConstantThroughput(throughput=0.8, name="mirror")
+        telescope = ox.Telescope(
+            instrument.telescope.pupil, attenuating_elements=(mirror,)
+        )
+        shared = ox.Observatory(telescope, (instrument.instrument,)).select("imager")
+        assert shared.instrument.throughput(500.0) == pytest.approx(0.5)
+        assert shared.system_throughput(500.0) == pytest.approx(0.4)
+
     def test_pupil_area(self, instrument):
         """Floating-point: the explicit collecting area equals the annular area."""
         expected = jnp.pi * 3.0**2 * (1.0 - 0.14**2)

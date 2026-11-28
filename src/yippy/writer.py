@@ -22,6 +22,7 @@ def yip_header(
     *,
     design=None,
     inscribed_diameter_m=None,
+    pupil_id=None,
     low_nm=None,
     high_nm=None,
     obscured=None,
@@ -40,6 +41,8 @@ def yip_header(
             PIXSCALE, LAMBDA, XCENTER and YCENTER.
         design: Optical design name (DESIGN); omitted from the header when None.
         inscribed_diameter_m: Inscribed telescope diameter in m (D_INSC).
+        pupil_id: Name of the pupil prescription the tables were computed with
+            (PUPIL_ID); a non-empty string, omitted from the header when None.
         low_nm: Shortest bandpass wavelength in nm (MINLAM).
         high_nm: Longest bandpass wavelength in nm (MAXLAM).
         obscured: Obscured aperture-area fraction (OBSCURED).
@@ -60,9 +63,12 @@ def yip_header(
         or grid.frame.diameter_convention != "circumscribed"
     ):
         raise ValueError("YIP image grids require circumscribed lambda/D units")
+    if pupil_id is not None and (not isinstance(pupil_id, str) or not pupil_id):
+        raise ValueError("pupil_id must be None or a non-empty string")
     header = fits.Header()
     for key, value, comment in (
         ("DESIGN", design, "optical design"),
+        ("PUPIL_ID", pupil_id, "pupil prescription identifier"),
         ("D", grid.frame.diameter_m, "circumscribed telescope diameter in m"),
         ("D_INSC", inscribed_diameter_m, "inscribed telescope diameter in m"),
         ("PIXSCALE", grid.step, "lambda/D per pixel"),

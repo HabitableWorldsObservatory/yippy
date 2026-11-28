@@ -275,10 +275,23 @@ def delivery_header(header, manifest, plane):
 
     Returns:
         Header metadata whose pixel scale, wavelengths, diameter and sample kind come
-        from the manifest.
+        from the manifest, and whose pupil identifier is the manifest key or the card.
+
+    Raises:
+        ValueError: If the manifest key is empty or differs from the card.
     """
+    parsed = HeaderData.from_fits_header(header)
+    declared = manifest.get("pupil_id")
+    if declared is not None and (not isinstance(declared, str) or not declared):
+        raise ValueError("Manifest pupil_id must be a non-empty string")
+    if declared is not None and parsed.pupil_id not in (None, declared):
+        raise ValueError(
+            f"Conflicting pupil_id: manifest {declared!r}, "
+            f"FITS card PUPIL_ID {parsed.pupil_id!r}"
+        )
     return replace(
-        HeaderData.from_fits_header(header),
+        parsed,
+        pupil_id=declared if declared is not None else parsed.pupil_id,
         sample_kind=manifest["sample_kind"],
         pixscale=float(manifest["pixel_scale_lod_xy"][0]) * lod / u.pix,
         lambda0=float(manifest["lambda0_m"]) * m2nm * u.nm,

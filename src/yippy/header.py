@@ -55,6 +55,8 @@ class HeaderData:
             ``"mean"`` (SAMPKIND).
         diameter_convention: Diameter convention of the native frame.
         coordinate_model: Coordinate model of the native frame.
+        pupil_id: Pupil prescription identifier from PUPIL_ID, or None when the
+            product declares none.
     """
 
     simple: bool
@@ -81,6 +83,7 @@ class HeaderData:
     sample_kind: str = "point"
     diameter_convention: str = "circumscribed"
     coordinate_model: str = "paraxial_entrance_tilt"
+    pupil_id: str | None = None
 
     def __post_init__(self):
         """Protect the underlying quantity arrays as well as the header fields."""
@@ -242,6 +245,7 @@ class HeaderData:
                 "NAXIS2",
                 "NAXIS3",
                 "DESIGN",
+                "PUPIL_ID",
                 "D",
                 "D_INSC",
                 "PIXSCALE",
@@ -290,7 +294,18 @@ class HeaderData:
             n_star=header.get("N_STAR", None),
             zernike=header.get("ZERNIKE", ""),
             wfe=HeaderData.get_header_value(header, "WFE", u.pm),
+            pupil_id=_card_pupil_id(header.get("PUPIL_ID")),
         )
+
+
+def _card_pupil_id(value):
+    """Return a declared pupil identifier, None when absent; an empty card raises."""
+    if value is None:
+        return None
+    value = str(value)
+    if not value:
+        raise ValueError("PUPIL_ID must be a non-empty string")
+    return value
 
 
 def lod_inscribed_to_circumscribed(separation_lod, frame: Frame, diameter_inscribed_m):

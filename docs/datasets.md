@@ -221,7 +221,8 @@ pixel scale, ...) lives in each YIP's FITS headers, not in the catalog.
 `Coronagraph.built_at` records the full SHA-256 digest of the delivery and the
 selected product ID, when present. Its `stellar.`, `offaxis.` and `sky.` labels
 record each product's design, native frame, jitter in milliarcseconds, wavefront
-error in picometers and pupil geometry. Absent or unconvertible declarations
+error in picometers, pupil geometry and declared pupil identifier. `producer_version`
+records the yippy release that built it. Absent or unconvertible declarations
 are `unknown`. An explicit zero for jitter or wavefront error is a known value.
 
 Use `compare_stamps` to check which build facts agree, which differ and which
@@ -241,4 +242,86 @@ for label, value in first.built_at:
         print(label, value)
 
 print(compare_stamps(first.built_at, second.built_at))
+```
+
+## Naming the pupil a delivery was computed with
+
+A pupil identifier is a name the producer of a delivery gives to the pupil
+prescription its tables were computed with, for example the name of an aperture
+file or of a design revision. yippy never derives one from the diameter or the
+obscuration, because two pupils of equal extent are different prescriptions.
+
+A producer writes the name with `yip_header(..., pupil_id="name")`, which adds
+the `PUPIL_ID` card, or as the optional `pupil_id` key of a versioned delivery
+manifest. A user who knows the provenance of an unlabeled delivery passes
+`pupil_id=` to `YIPPackage.prepare`. The name must be a non-empty string, and
+every declaration the package holds must agree: a keyword that contradicts a
+card or a manifest key, or two products with different cards, raise a
+`ValueError`. The identifier of the coronagraph is known when the keyword, the
+manifest key, or the cards of all three image products declare it. A partial
+declaration leaves `Coronagraph.pupil_id` as `None` and is kept in `built_at`
+under the label of its product.
+
+Installed in an `Observatory`, the identifier is compared with the one on the
+telescope pupil. Equal known names give `pupil_match == "matched"`, two known
+and different names raise `StampMismatchError` when the `Observatory` is built,
+and an unknown name on either side gives `"unverified"`.
+
+```python
+import tempfile
+
+import numpy as np
+import optixstuff as ox
+from hwoutils.provenance import StampMismatchError
+from optixstuff.grids import Frame, PixelGrid
+from yippy import open_yip, write_yip
+from yippy.writer import yip_header
+
+grid = PixelGrid.focal(16, 0.25, Frame(500.0, 6.0, "circumscribed"))
+y, x = np.mgrid[:16, :16] - 7.5
+offsets = np.arange(0.0, 2.1, 0.5)
+psfs = np.array([np.exp(-((x * 0.25 - o) ** 2 + (y * 0.25) ** 2)) for o in offsets])
+header = yip_header(
+    grid, inscribed_diameter_m=5.0, obscured=0.0, pupil_id="aperture-rev-a"
+)
+products = dict(
+    grid=grid,
+    offaxis_psfs=psfs,
+    offsets_xy_lod=offsets,
+    stellar_intensity=1e-9 * np.ones((2, 16, 16)),
+    stellar_diameters_lod=[0.0, 0.1],
+    sky_transmission=np.ones((16, 16)),
+    headers=header,
+)
+coronagraph = open_yip(write_yip(tempfile.mkdtemp(), products)).prepare()
+print(coronagraph.pupil_id)
+
+detector = ox.Detector(
+    pixel_scale_arcsec=0.01,
+    shape=(10, 10),
+    qe=0.9,
+    dark_current_e_per_pixel_s=0.0,
+    read_noise_e_rms=0.0,
+    clock_induced_charge_e_per_pixel_frame=0.0,
+    read_time_s=1.0,
+    survival_fraction=1.0,
+)
+imager = ox.Instrument("imager", coronagraph=coronagraph, detector=detector)
+
+
+def telescope(pupil_id):
+    pupil = ox.SimplePupil(
+        circumscribed_diameter_m=6.0, collecting_area_m2=28.0, pupil_id=pupil_id
+    )
+    return ox.Telescope(pupil)
+
+
+for pupil_id in ("aperture-rev-a", None):
+    observatory = ox.Observatory(telescope(pupil_id), (imager,))
+    print(observatory.select("imager").pupil_match)
+
+try:
+    ox.Observatory(telescope("aperture-rev-b"), (imager,))
+except StampMismatchError as error:
+    print("refused:", type(error).__name__)
 ```
