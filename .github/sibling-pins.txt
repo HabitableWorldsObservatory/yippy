@@ -1,9 +1,2 @@
 # Unreleased sibling libraries, applied as uv overrides in the same resolve.
 # Each pins the sibling's release head; delete a pin once PyPI carries that version.
-coronachrome @ git+https://github.com/CoreySpohn/coronachrome@446d2ae87b2d279d397a836e1407ab5de0951115
-coronagraphoto @ git+https://github.com/CoreySpohn/coronagraphoto@6d242a92e3cf0c328a346929ada872a5c150d551
-jaxedith @ git+https://github.com/CoreySpohn/jaxEDITH@70580ab362115b2b9e941a72b34ab6773d11bd2b
-photomancy @ git+https://github.com/CoreySpohn/photomancy@932f23e720a2f22dd1b4946393273f301dffb154
-physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix@a62d7c8ab3e81db8009a13de30cdd79974bf8078
-skyscapes @ git+https://github.com/CoreySpohn/skyscapes@9a597da287b5fc4f993399f58c27a3582cf8921a
-tiptilt @ git+https://github.com/CoreySpohn/tiptilt@1f5190aa732c6638cb67364531ae959a02dbe324
