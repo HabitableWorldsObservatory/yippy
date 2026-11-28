@@ -1,5 +1,83 @@
 # Changelog
 
+## [4.0.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v3.0.0...v4.0.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sinc:** refuse float32 product metadata with PrecisionError
+* **yippy:** close table, delivery, sinc and scene reads at the prepared model's precision
+* **yippy:** rebase queries in float64 before narrowing, refuse float32 coefficient overflow, keep scene tangents at dark cells
+* **coronagraph:** a package whose stellar_intens.fits MINLAM/MAXLAM disagree with offax_psf.fits is refused, and a package with MINLAM below MAXLAM is band-averaged and is placed once per observing band at its centre.
+* **stellar:** stellar maps off the knots differ from earlier releases: the public AAVC map by up to 3.8e-6 relative (knots bitwise unchanged) and Optimal Order 6 by up to 0.4 percent at zero diameter. Performance caches written by earlier releases are recomputed. Subnormal positive stellar samples are refused at preparation, and export_exosims refuses nonpositive or nonfinite leakage.
+* **jax:** drop the phasor arguments from the shift helpers
+* **export:** write each exported file's own pixel pitch in the declared units
+* **stellar:** keep zero samples and refuse lit flux outside the scene grid
+* **sampling:** stellar_map on a detector grid returns new values at every pitch, including the native one: each pixel is the integral of the not-a-knot cubic spline of the stored samples over its footprint, floored at 0.1 of the linear footprint read. STELLAR_RECONSTRUCTION is cubic_spline (was linear), so the supported region shrinks by a second outer ring of the native grid (margin 2 cells, was 0.5). Requires the optixstuff release with the cubic_spline footprint read.
+* **performance:** the performance record holds one leakage profile per tabulated stellar diameter, PERFVER is 8 and the cache key adds the diameter axis; evaluate of leakage and raw_contrast needs the stellar diameter.
+* **sampling:** drop the outside argument of fraction_image; products are zero past their table
+* **scene:** the scene operator's source grid extends to the off-axis node hull, so disk sources beyond the stamp are rendered
+* **scene:** an operator returns a finite image and the cells it covers, validity is the union, and masked operators have a public constructor
+* **read:** one source domain per backend, the node hull; a source outside it is flagged and zero, and the 1D read keeps its wing past the stamp
+* **maps:** stop reflecting the stellar and sky maps past the table, so unmeasured pixels are zero
+* **performance:** the default leakage_rule for a 2D product is now aperture_ring_mean (the aperture averaged over position angle) instead of aperture_mean (the +x axis only); pass leakage_rule='aperture_mean' for the old read. azimuthal_ring_mean is deprecated in favor of aperture_ring_mean.
+* **scene:** sum a tuple of scene operators and refuse oversized operators on every route through hwoutils.memory
+* **scene:** render scenes with BlendSceneOperator and refuse operators above max_bytes
+* underscore the legacy modules, stop exporting logger, drop the legacy notebooks
+* **export:** drop the Coronagraph export wrappers, spell out separation_*_lod, require ppf
+* **datasets:** remove fetch_sinc_starter until the starter delivery is published
+* **coronagraph:** follow the trimmed slot and stellar_diameter_lod naming
+* **coronagraph:** drop the curve queries and finite-star leakage operators from Coronagraph
+* **sinc:** reduce yippy.sinc to 15 names and fold the memory limit helpers into MemoryBudget
+* **delivery:** move the sinc delivery format, routing and tools to yippy.delivery
+
+### Features
+
+* **coronagraph:** declare band-averaged packages from the off-axis spectral limits ([c64822c](https://github.com/HabitableWorldsObservatory/yippy/commit/c64822c97a69a3b45e435932e2a376773753bdfb))
+* **coronagraph:** drop the curve queries and finite-star leakage operators from Coronagraph ([4897381](https://github.com/HabitableWorldsObservatory/yippy/commit/48973813f7aa2d8a7c9caa92bbfe363466b36360))
+* **datasets:** remove fetch_sinc_starter until the starter delivery is published ([196f6fb](https://github.com/HabitableWorldsObservatory/yippy/commit/196f6fb0934d3e3ab7878d15989be685c6865049))
+* **export:** drop the Coronagraph export wrappers, spell out separation_*_lod, require ppf ([4b17b78](https://github.com/HabitableWorldsObservatory/yippy/commit/4b17b7864156bc805c7a17127e934ec5d62c44fa))
+* **performance:** attach the uniform-sky profile to every prepared performance record ([4aaa193](https://github.com/HabitableWorldsObservatory/yippy/commit/4aaa1932c05cb542f1434371d5d4138fd11b7d0a))
+* **performance:** curves record carries leakage over the stellar diameter axis ([9504dee](https://github.com/HabitableWorldsObservatory/yippy/commit/9504dee9cfd73c939fea691f102d2cf97a9979a5))
+* **performance:** read a 2D product's star leakage as the exact-coverage aperture averaged over azimuth by default ([25a1ab8](https://github.com/HabitableWorldsObservatory/yippy/commit/25a1ab8f98173698c4238cebffcfff3ce63fc5fd))
+* **sampling:** drop the outside argument of fraction_image; products are zero past their table ([2e9abba](https://github.com/HabitableWorldsObservatory/yippy/commit/2e9abba4b12ef64d722dec9c3cae12310d52b96e))
+* **sampling:** read the stellar map by its floored cubic spline footprint ([237616f](https://github.com/HabitableWorldsObservatory/yippy/commit/237616f47f239506d4b25641c1a0c950303b8b61))
+* **scene:** an operator returns a finite image and the cells it covers, validity is the union, and masked operators have a public constructor ([f082a2b](https://github.com/HabitableWorldsObservatory/yippy/commit/f082a2bf76a7c41596c591b8b7f952b7363c3de4))
+* **scene:** render scenes with BlendSceneOperator and refuse operators above max_bytes ([70ce265](https://github.com/HabitableWorldsObservatory/yippy/commit/70ce2654b1c0f7e5de61f32bc74939a46e6f6328))
+* **scene:** sum a tuple of scene operators and refuse oversized operators on every route through hwoutils.memory ([0242317](https://github.com/HabitableWorldsObservatory/yippy/commit/02423173f439256897acd70f1eb54b194f714849))
+* **scene:** the scene operator's source grid extends to the off-axis node hull, so disk sources beyond the stamp are rendered ([6ec4d26](https://github.com/HabitableWorldsObservatory/yippy/commit/6ec4d26c8e74d592470dfc8213a158186329a25f))
+* underscore the legacy modules, stop exporting logger, drop the legacy notebooks ([def790b](https://github.com/HabitableWorldsObservatory/yippy/commit/def790ba6228778414c3b5aed73b8b7d3b258f40))
+
+
+### Bug Fixes
+
+* **delivery:** blend offsets and stamps at the query precision ([4ca41b8](https://github.com/HabitableWorldsObservatory/yippy/commit/4ca41b8bdc8e3d8bc14dc6220f843cb917476767))
+* **export:** write each exported file's own pixel pitch in the declared units ([8ff3cf1](https://github.com/HabitableWorldsObservatory/yippy/commit/8ff3cf1086bc709e6c23e40f26ec4c55d5b93c75))
+* **maps:** stop reflecting the stellar and sky maps past the table, so unmeasured pixels are zero ([6a423b2](https://github.com/HabitableWorldsObservatory/yippy/commit/6a423b2d6711860f0de7bad104a611f146870a5d))
+* **offaxis:** zero each blend neighbor outside its translated stored window ([422d693](https://github.com/HabitableWorldsObservatory/yippy/commit/422d6934331c237db3705f840e0bb90ba8824e10))
+* **precision:** read host offsets at the source dtype and enforce the precision guard ([92eb844](https://github.com/HabitableWorldsObservatory/yippy/commit/92eb8449f22823e1e7f05436b6c321f616437088))
+* **read:** blend 2D nodes bilinearly in radius and azimuth so a throughput ramp is followed, not stepped ([c376d6f](https://github.com/HabitableWorldsObservatory/yippy/commit/c376d6fda2c3414c1e3ffbffeac4b556e87db4c1))
+* **read:** keep the blend reader differentiable at nodes and the origin ([cc0cf33](https://github.com/HabitableWorldsObservatory/yippy/commit/cc0cf33d7aaf9006838714e2bd8ca0af4057c7bf))
+* **read:** one source domain per backend, the node hull; a source outside it is flagged and zero, and the 1D read keeps its wing past the stamp ([1963ca9](https://github.com/HabitableWorldsObservatory/yippy/commit/1963ca9c107a5f653b94a8ffceeac380f44433dd))
+* **sinc:** contract prefiltered read one axis at a time to avoid an XLA CPU miscompile ([7868d3b](https://github.com/HabitableWorldsObservatory/yippy/commit/7868d3b2f55060b18a0f00c1c12faf9535a8114d))
+* **sinc:** refuse float32 product metadata with PrecisionError ([0b544b9](https://github.com/HabitableWorldsObservatory/yippy/commit/0b544b9ad0b52bf187450cbd9cd3d8c4eee3ccd9))
+* **stellar:** bound the stellar interpolation to its bracketing samples and refuse dark exports ([3863875](https://github.com/HabitableWorldsObservatory/yippy/commit/38638752a4d531743c3cebf53c9f7744a12008ee))
+* **stellar:** declare linear reconstruction for stellar maps so the dark hole cannot ring negative ([78eb38a](https://github.com/HabitableWorldsObservatory/yippy/commit/78eb38aa203cbd788e7c2ba3e5705940cbc83b7d))
+* **stellar:** keep linear reconstruction for stellar maps, since log biases the dark-hole flux low ([96d84dc](https://github.com/HabitableWorldsObservatory/yippy/commit/96d84dc61c0412e72c518d791e8cc47c35f9a5fb))
+* **stellar:** keep zero samples and refuse lit flux outside the scene grid ([a62af68](https://github.com/HabitableWorldsObservatory/yippy/commit/a62af68186105502ff456f2bc7c03a10a2fa1446))
+* **stellar:** reconstruct stellar maps in log intensity so the dark hole stays positive ([0b99457](https://github.com/HabitableWorldsObservatory/yippy/commit/0b994576088cb46b4c31673fa1233135769563f3))
+* **yippy:** close table, delivery, sinc and scene reads at the prepared model's precision ([eda94b8](https://github.com/HabitableWorldsObservatory/yippy/commit/eda94b8bc7bebee64d5a843b895f37f4e0086bf1))
+* **yippy:** key cached performance records on the record algorithm version ([a082e19](https://github.com/HabitableWorldsObservatory/yippy/commit/a082e198f852732f732d723985aa011411775d60))
+* **yippy:** rebase queries in float64 before narrowing, refuse float32 coefficient overflow, keep scene tangents at dark cells ([6dbab1c](https://github.com/HabitableWorldsObservatory/yippy/commit/6dbab1cc798d3a612952b2224e7521cb3de931c0))
+
+
+### Code Refactoring
+
+* **coronagraph:** follow the trimmed slot and stellar_diameter_lod naming ([12313bb](https://github.com/HabitableWorldsObservatory/yippy/commit/12313bbad7a792eb33fdf3c16a4a3f316716e8bb))
+* **delivery:** move the sinc delivery format, routing and tools to yippy.delivery ([43513d6](https://github.com/HabitableWorldsObservatory/yippy/commit/43513d6b4c0ed344a5bc0b382dfc507a03239500))
+* **jax:** drop the phasor arguments from the shift helpers ([68bdacf](https://github.com/HabitableWorldsObservatory/yippy/commit/68bdacfe311d4f03de51bd0f0604f214d36132a7))
+* **sinc:** reduce yippy.sinc to 15 names and fold the memory limit helpers into MemoryBudget ([c197e62](https://github.com/HabitableWorldsObservatory/yippy/commit/c197e62936af538a111220face233fe9fa7c54df))
+
 ## [3.0.0](https://github.com/HabitableWorldsObservatory/yippy/compare/v2.12.0...v3.0.0) (2026-11-19)
 
 
