@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/CoreySpohn/hwoutils
-    rev: 328aa0d
+    rev: v3.0.0
     hooks:
       - id: no-internal-refs
       - id: precision-guard
