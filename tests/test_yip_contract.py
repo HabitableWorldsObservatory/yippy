@@ -120,7 +120,7 @@ def test_built_at_normalizes_declared_units(stamp_package, caplog):
 
 
 def test_built_at_records_unknown_pupil(stamp_package):
-    """Absent pupil cards give exact unknowns while primary still requires them."""
+    """Absent pupil cards give exact unknowns while pupil still requires them."""
     products = {
         "stellar": "stellar_intensity",
         "offaxis": "offaxis_psfs",
@@ -135,7 +135,7 @@ def test_built_at_records_unknown_pupil(stamp_package):
         assert stamps[f"{prefix}.pupil_inscribed_m"] == "unknown"
         assert stamps[f"{prefix}.pupil_obscured"] == "unknown"
     with pytest.raises(ValueError, match="metadata is missing diameter_inscribed"):
-        _ = no_optional.primary
+        _ = no_optional.pupil
 
     # Native grid construction requires D. Check stamp encoding at the header seam
     # before the loader rejects a delivery that omits it.

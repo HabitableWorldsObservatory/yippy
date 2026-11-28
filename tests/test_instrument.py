@@ -8,9 +8,9 @@ import pytest
 
 @pytest.fixture(scope="session")
 def instrument(cached_diameter_coro):
-    """Full Instrument with primary, coronagraph, detector, and a filter."""
-    # The primary takes the coronagraph's diameter: its tables fix lambda/D.
-    primary = ox.SimplePrimary(
+    """Selected instrument with pupil, coronagraph, detector, and a filter."""
+    # The pupil takes the coronagraph's diameter: its tables fix lambda/D.
+    pupil = ox.SimplePupil(
         circumscribed_diameter_m=cached_diameter_coro.grid.frame.diameter_m,
         collecting_area_m2=3.141592653589793 * 9 * (1 - 0.14**2),
     )
@@ -25,12 +25,18 @@ def instrument(cached_diameter_coro):
         survival_fraction=1.0,
     )
     optics_filter = ox.ConstantThroughput(throughput=0.5, name="optics")
-    return ox.Instrument(
-        primary=primary,
-        coronagraph=cached_diameter_coro,
-        attenuating_elements=(optics_filter,),
-        detector=detector,
+    observatory = ox.Observatory(
+        ox.Telescope(pupil),
+        (
+            ox.Instrument(
+                "imager",
+                coronagraph=cached_diameter_coro,
+                attenuating_elements=(optics_filter,),
+                detector=detector,
+            ),
+        ),
     )
+    return observatory.select("imager")
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +100,9 @@ class TestInstrumentIntegration:
         t = instrument.system_throughput(500.0)
         assert t == pytest.approx(0.5)
 
-    def test_primary_area(self, instrument):
+    def test_pupil_area(self, instrument):
         """Floating-point: the explicit collecting area equals the annular area."""
         expected = jnp.pi * 3.0**2 * (1.0 - 0.14**2)
-        assert instrument.primary.collecting_area_m2 == pytest.approx(
+        assert instrument.pupil.collecting_area_m2 == pytest.approx(
             float(expected), rel=1e-6
         )

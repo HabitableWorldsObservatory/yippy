@@ -33,7 +33,7 @@ from optixstuff.coronagraph import (
 )
 from optixstuff.grids import Image, Measure, PixelGrid, coverage
 from optixstuff.performance import RING_RULE, PerformanceCurves, SampledProfile
-from optixstuff.primary import SimplePrimary
+from optixstuff.pupil import SimplePupil
 from optixstuff.spectral import Band, same_wavelength
 
 from ._jax_funcs import blend_pad
@@ -301,13 +301,13 @@ class Coronagraph(AbstractTableCoronagraph):
         self.sky_trans = host.sky_trans
 
     @property
-    def primary(self):
-        """Primary geometry recorded by the YIP; missing required metadata raises."""
+    def pupil(self):
+        """Pupil geometry recorded by the YIP; missing required metadata raises."""
         for name in ("diameter", "diameter_inscribed", "obscured"):
             if getattr(self.header, name) is None:
                 raise ValueError(f"YIP metadata is missing {name}")
         diameter_m = self.header.diameter.to_value("m")
-        return SimplePrimary(
+        return SimplePupil(
             circumscribed_diameter_m=diameter_m,
             inscribed_diameter_m=self.header.diameter_inscribed.to_value("m"),
             collecting_area_m2=pi * diameter_m**2 / 4 * (1 - self.header.obscured),

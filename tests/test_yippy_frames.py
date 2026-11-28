@@ -111,7 +111,7 @@ def test_shared_frame_bit_equality(cached_diameter_coro):
 
 
 @pytest.mark.parametrize("unit", ["m", "cm"])
-def test_simple_primary_from_yip(unit, tmp_path):
+def test_simple_pupil_from_yip(unit, tmp_path):
     """Exact header diameters; changing collecting area never changes D_INSC.
 
     Floating-point basis: 16 float64 eps for geometric area; header lengths
@@ -125,7 +125,7 @@ def test_simple_primary_from_yip(unit, tmp_path):
             hdus[0].header["D"] = (6.0 * scale, f"diameter in {unit}")
             hdus[0].header["D_INSC"] = (4.7 * scale, f"inscribed diameter in {unit}")
             hdus[0].header["OBSCURED"] = obscured
-        primary = open_yip(path).prepare().primary
+        primary = open_yip(path).prepare().pupil
         assert primary.diameter("circumscribed") == 6.0
         assert primary.diameter("inscribed") == 4.7
         np.testing.assert_allclose(
@@ -136,7 +136,7 @@ def test_simple_primary_from_yip(unit, tmp_path):
 
 
 @pytest.mark.parametrize("key", ["D", "D_INSC", "OBSCURED"])
-def test_simple_primary_from_yip_requires_geometry(key, tmp_path):
+def test_simple_pupil_from_yip_requires_geometry(key, tmp_path):
     """Missing geometry raises instead of deriving a diameter from collecting area."""
     path = tmp_path / "geometry"
     synthetic_coronagraph(path)
@@ -150,4 +150,4 @@ def test_simple_primary_from_yip_requires_geometry(key, tmp_path):
             "OBSCURED": "obscured",
         }[key],
     ):
-        _ = open_yip(path).prepare().primary
+        _ = open_yip(path).prepare().pupil
