@@ -43,10 +43,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from astropy.io import fits
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.grids import Frame, PixelGrid
 
 from yippy import open_yip
+from yippy.schema import PRODUCT_FILES
 from yippy.testing import write_synthetic_yip as write_fixture_arrays
 from yippy.writer import yip_header
 
@@ -175,6 +177,8 @@ def write_synthetic_yip(
     occulter_shape: str = "exp",
     ring_radii_lod: tuple[float, ...] = (0.0, 1.0, 1.6, 2.9),
     ring_azimuths_deg: tuple[float, ...] = (0.0, 30.0, 60.0, 90.0),
+    *,
+    header_overrides=None,
 ) -> SyntheticYIP:
     """Write a five-file package and return the constants that describe it.
 
@@ -203,6 +207,9 @@ def write_synthetic_yip(
         ring_radii_lod: ring radii of the ``"2dq_rings"`` kind.
         ring_azimuths_deg: node azimuths on every ring of the ``"2dq_rings"``
             kind, within the first quadrant.
+        header_overrides: Mapping from product names to FITS cards. Values may be
+            (value, comment) pairs or None to remove a card. Applied to the written
+            files so omitted cards stay absent even when the writer requires them.
 
     Returns:
         A :class:`SyntheticYIP` describing what was written.
@@ -294,6 +301,14 @@ def write_synthetic_yip(
         sky=sky,
         headers=headers,
     )
+    for product, cards in (header_overrides or {}).items():
+        with fits.open(directory / PRODUCT_FILES[product], mode="update") as hdus:
+            header = hdus[0].header
+            for key, value in cards.items():
+                if value is None:
+                    header.pop(key, None)
+                else:
+                    header[key] = value
 
     return SyntheticYIP(
         path=directory,

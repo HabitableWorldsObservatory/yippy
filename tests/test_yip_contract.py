@@ -1,8 +1,8 @@
 """The contract the shipped package and its reader hold each other to.
 
-These are the assertions that can only be made against real data: the header
-keywords a package is required to carry, the normalization its PSFs are written
-with, and the working angles the reader derives from them. They are data-gated.
+Synthetic packages check how the reader interprets declared FITS metadata.
+The shipped package checks required keywords, PSF normalization and working
+angles derived by the reader. Those assertions are data-gated.
 A cold cache with no network skips with a reason naming the cause, setting
 ``YIPPY_REQUIRE_REFERENCE_DATA=1`` turns that skip into a failure, and a cache
 that is present and disagrees fails either way.
@@ -14,14 +14,21 @@ package instead, in ``test_analytic_yip.py``.
 """
 
 import astropy.io.fits as pyfits
+import equinox as eqx
+import jax
 import numpy as np
 import pytest
+from astropy import units as u
 from hwoutils.numerics import eps
+from hwoutils.provenance import StampMismatchError, compare_stamps, require_stamps
 from lod_unit import lod
+from optixstuff.apertures import Circular
 from optixstuff.grids import Measure, PixelGrid
+from sinc_fixture import write_delivery
 from synthetic_yip import write_synthetic_yip
 
-from yippy import open_yip
+from yippy import SceneCoronagraph, open_yip
+from yippy import coronagraph as coronagraph_module
 
 # The off-axis PSFs are normalized so that a source far outside the mask
 # carries this fraction of the light an unocculted source would deliver to the
@@ -44,6 +51,217 @@ FAR_FIELD_SEPARATIONS_LOD = (20.0, 25.0)
 # Every record uses the same PCHIP half-maximum crossing.
 EAC1_AAVC_IWA_LOD = 4.054787
 EAC1_AAVC_IWA_TOL = 5e-3
+
+
+@pytest.fixture
+def stamp_package(tmp_path):
+    """Open small native packages with precisely controlled declarations."""
+
+    def write(name, **headers):
+        return open_yip(
+            write_synthetic_yip(
+                tmp_path / name, npix=24, max_offset_lod=2, header_overrides=headers
+            ).path
+        )
+
+    return write
+
+
+def test_built_at_distinguishes_missing_jitter_from_zero(stamp_package):
+    """An omitted card and a written zero give exact, distinct strings."""
+    missing = stamp_package("missing", stellar_intensity={"JITTER": None}).prepare()
+    zero = stamp_package(
+        "zero", stellar_intensity={"JITTER": (0, "RMS jitter per axis in mas")}
+    ).prepare()
+    label = "stellar.jitter_mas"
+    assert dict(missing.built_at)[label] == "unknown"
+    assert dict(zero.built_at)[label] == "f64:0x0.0p+0"
+    comparison = compare_stamps(missing.built_at, zero.built_at)
+    assert label in comparison.unverified
+    assert label not in comparison.matched
+
+
+def test_built_at_normalizes_declared_units(stamp_package, caplog):
+    """Stamp strings exactly encode the binary64 FITS unit conversions."""
+    converted = stamp_package(
+        "converted",
+        stellar_intensity={
+            "WFE": (0.05, "wavefront error in nm"),
+            "JITTER": (0.001, "arcsec"),
+        },
+        offaxis_psfs={"WFE": (0.009, "nm"), "JITTER": (0.025, "arcsec")},
+        sky_transmission={"WFE": (1, "mas"), "JITTER": ("NaN", "mas")},
+    ).prepare()
+    canonical = stamp_package(
+        "canonical",
+        stellar_intensity={"WFE": (50, "pm"), "JITTER": (1, "mas")},
+        offaxis_psfs={"WFE": (9, "pm"), "JITTER": (25, "mas")},
+        sky_transmission={"WFE": (50, "wavefront error"), "JITTER": (1, "jitter")},
+    ).prepare()
+    a, b = dict(converted.built_at), dict(canonical.built_at)
+    for fact, converted_value, canonical_value, exact_value in (
+        ("wfe_pm", (0.05 * u.nm).to_value("pm"), 50.0, 9.0),
+        ("jitter_mas", (0.001 * u.arcsec).to_value("mas"), 1.0, 25.0),
+    ):
+        assert a[f"stellar.{fact}"] == f"f64:{float(converted_value).hex()}"
+        assert (
+            b[f"stellar.{fact}"] == b[f"sky.{fact}"] == f"f64:{canonical_value.hex()}"
+        )
+        assert (
+            a[f"offaxis.{fact}"] == b[f"offaxis.{fact}"] == f"f64:{exact_value.hex()}"
+        )
+        assert a[f"sky.{fact}"] == "unknown"
+    assert any(
+        "Using default unit for JITTER: mas" in message for message in caplog.messages
+    )
+    assert any(
+        "Using default unit for WFE: pm" in message for message in caplog.messages
+    )
+
+
+def test_built_at_records_unknown_pupil(stamp_package):
+    """Absent pupil cards give exact unknowns while primary still requires them."""
+    products = {
+        "stellar": "stellar_intensity",
+        "offaxis": "offaxis_psfs",
+        "sky": "sky_transmission",
+    }
+    omitted = {"D_INSC": None, "OBSCURED": None}
+    no_optional = stamp_package(
+        "no_optional", **{product: omitted for product in products.values()}
+    ).prepare()
+    stamps = dict(no_optional.built_at)
+    for prefix in products:
+        assert stamps[f"{prefix}.pupil_inscribed_m"] == "unknown"
+        assert stamps[f"{prefix}.pupil_obscured"] == "unknown"
+    with pytest.raises(ValueError, match="metadata is missing diameter_inscribed"):
+        _ = no_optional.primary
+
+    # Native grid construction requires D. Check stamp encoding at the header seam
+    # before the loader rejects a delivery that omits it.
+    missing = stamp_package(
+        "no_pupil", **{product: {"D": None, **omitted} for product in products.values()}
+    )
+    for product in products.values():
+        stamps = dict(
+            coronagraph_module._product_stamps(getattr(missing.header, product))
+        )
+        assert stamps["pupil_diameter_m"] == "unknown"
+        assert stamps["pupil_inscribed_m"] == "unknown"
+        assert stamps["pupil_obscured"] == "unknown"
+    with pytest.raises(ValueError, match="D is required to build a pixel grid"):
+        missing.prepare()
+
+
+def test_built_at_uses_each_products_native_frame(tmp_path):
+    """The stamp encodes the known dimensions and scales of the three products."""
+    manifest = write_delivery(tmp_path, full=True, npix=24)
+    write_synthetic_yip(
+        tmp_path / manifest["legacy_package_path"],
+        npix=22,
+        pixscale=0.375,
+        max_offset_lod=2,
+        header_overrides={
+            "sky_transmission": {"PIXSCALE": (0.5, "lambda/D per pixel")}
+        },
+    )
+    model = open_yip(tmp_path, product_id="mono").prepare()
+    stamps = dict(model.built_at)
+    assert stamps["product_id"] == "str:mono"
+    for prefix, scale, size in (
+        ("offaxis", 0.25, 24),
+        ("stellar", 0.375, 22),
+        ("sky", 0.5, 22),
+    ):
+        assert stamps[f"{prefix}.pixscale_lod"] == f"f64:{scale.hex()}"
+        assert stamps[f"{prefix}.shape"] == f"tuple:(int:{size},int:{size})"
+
+
+def test_built_at_reports_known_jitter_and_source_mismatches(stamp_package):
+    """Changing one stellar card changes exactly its stamp and the native digest."""
+    a = stamp_package("a", stellar_intensity={"JITTER": (1, "mas")}).prepare()
+    b = stamp_package("b", stellar_intensity={"JITTER": (2, "mas")}).prepare()
+    comparison = compare_stamps(a.built_at, b.built_at)
+    assert comparison.mismatched == (
+        (
+            "source",
+            f"sha256:{a.package.source.digest}",
+            f"sha256:{b.package.source.digest}",
+        ),
+        ("stellar.jitter_mas", "f64:0x1.0000000000000p+0", "f64:0x1.0000000000000p+1"),
+    )
+    with pytest.raises(StampMismatchError, match=r"stellar\.jitter_mas"):
+        require_stamps(a.built_at, b.built_at, what="coronagraphs")
+
+
+def test_built_at_is_static_and_survives_numerical_updates(stamp_package):
+    """Rebuilds and equal-shape edits retain the first build's exact stamps."""
+    package = stamp_package("stable")
+    first, second = package.prepare(), package.prepare()
+    updated = eqx.tree_at(
+        lambda model: model.sky_trans.data, first, replace_fn=lambda data: data * 2
+    )
+    reruled = first.with_rules((Circular(0.8),))
+    scene = SceneCoronagraph(first, (), scene_grid=first.grid)
+    assert (
+        second.built_at
+        == updated.built_at
+        == reruled.built_at
+        == scene.built_at
+        == first.built_at
+    )
+
+    first_leaves = jax.tree.leaves(first)
+    assert set(dict(first.built_at)).isdisjoint(
+        leaf for leaf in first_leaves if isinstance(leaf, str)
+    )
+    assert reruled.built_at is first.built_at
+    first_tree = jax.tree.structure(first)
+    assert jax.tree.structure(updated) == first_tree
+    assert jax.tree_util.treedef_children(
+        jax.tree.structure(second)
+    ) == jax.tree_util.treedef_children(first_tree)
+    # Independently loaded host objects have distinct static identities. Supply the
+    # second build's operands on the first host to check numerical cache reuse.
+    same_host = jax.tree.unflatten(first_tree, jax.tree.leaves(second))
+    traces = []
+
+    @jax.jit
+    def read(model):
+        traces.append(None)
+        return model.sky_trans.data[0, 0]
+
+    value = read(first)
+    assert read(same_host) == value
+    assert read(updated) == 2 * value
+    assert len(traces) == 1
+
+
+def test_built_at_keeps_the_full_native_source_digest(stamp_package):
+    """The stamp uses all 64 hex digits of the source's SHA-256 identity."""
+    package = stamp_package("source")
+    model = package.prepare()
+    stamps = dict(model.built_at)
+    assert len(package.source.digest) == 64
+    assert stamps["source"] == f"sha256:{package.source.digest}"
+    assert stamps["producer"] == "str:yippy.Coronagraph"
+    assert stamps["product_id"] == "unknown"
+    assert {
+        key: value for key, value in stamps.items() if key.startswith("stellar.")
+    } == {
+        "stellar.design": "str:synthetic-stellar",
+        "stellar.zernike": "str:none",
+        "stellar.sample_kind": "str:point",
+        "stellar.diameter_convention": "str:circumscribed",
+        "stellar.coordinate_model": "str:paraxial_entrance_tilt",
+        "stellar.pixscale_lod": "f64:0x1.0000000000000p-2",
+        "stellar.shape": "tuple:(int:24,int:24)",
+        "stellar.jitter_mas": "f64:0x0.0p+0",
+        "stellar.wfe_pm": "f64:0x0.0p+0",
+        "stellar.pupil_diameter_m": "f64:0x1.8000000000000p+2",
+        "stellar.pupil_inscribed_m": "f64:0x1.4000000000000p+2",
+        "stellar.pupil_obscured": "f64:0x0.0p+0",
+    }
 
 
 def test_eac1_band_average_uses_one_scale(shipped_coro):

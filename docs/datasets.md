@@ -215,3 +215,30 @@ print(archive.archive_path())  # Resolve the cache location without fetching.
 
 Descriptive metadata beyond these fields (wavelengths, dark-zone extent,
 pixel scale, ...) lives in each YIP's FITS headers, not in the catalog.
+
+## What a coronagraph was built from
+
+`Coronagraph.built_at` records the full SHA-256 digest of the delivery and the
+selected product ID, when present. Its `stellar.`, `offaxis.` and `sky.` labels
+record each product's design, native frame, jitter in milliarcseconds, wavefront
+error in picometers and pupil geometry. Absent or unconvertible declarations
+are `unknown`. An explicit zero for jitter or wavefront error is a known value.
+
+Use `compare_stamps` to check which build facts agree, which differ and which
+could not be verified. The stamps describe the delivery at build time. Changing
+prepared aperture rules or replacing numerical operands keeps those facts.
+
+```python
+from hwoutils.provenance import compare_stamps
+from yippy import open_yip
+
+package = open_yip("eac1_aavc_2d")
+first = package.prepare()
+second = package.prepare()
+
+for label, value in first.built_at:
+    if label.startswith("stellar."):
+        print(label, value)
+
+print(compare_stamps(first.built_at, second.built_at))
+```

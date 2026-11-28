@@ -11,9 +11,17 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from astropy.units import UnitConversionError
 from hwoutils.leaves import is_traced
 from hwoutils.memory import DEFAULT_MAX_BYTES, admit
 from hwoutils.precision import float_dtype, like
+from hwoutils.provenance import (
+    Digest,
+    Stamps,
+    build_stamps,
+    merge_stamps,
+    prefix_stamps,
+)
 from optixstuff.apertures import DEFAULT_APERTURE_RULE
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -110,6 +118,34 @@ def _declared_band(offaxis_header, stellar_header):
     return None if same_wavelength(*offaxis) else Band(*offaxis)
 
 
+def _product_stamps(header: HeaderData) -> Stamps:
+    """Capture the native header facts in the units named by their labels."""
+
+    def value_in(quantity, unit):
+        if quantity is None:
+            return None
+        try:
+            value = float(quantity.to_value(unit))
+        except UnitConversionError:
+            return None
+        return None if math.isnan(value) else value
+
+    return build_stamps(
+        design=header.design or None,
+        zernike=header.zernike or None,
+        sample_kind=header.sample_kind,
+        diameter_convention=header.diameter_convention,
+        coordinate_model=header.coordinate_model,
+        pixscale_lod=None if header.pixscale is None else float(header.pixscale.value),
+        shape=(header.naxis2, header.naxis1),
+        jitter_mas=value_in(header.jitter, "mas"),
+        wfe_pm=value_in(header.wfe, "pm"),
+        pupil_diameter_m=value_in(header.diameter, "m"),
+        pupil_inscribed_m=value_in(header.diameter_inscribed, "m"),
+        pupil_obscured=header.obscured,
+    )
+
+
 class _StellarLogSpline(interpax.CubicSpline):
     """Expose the fitted knot and coefficient arrays as model-owned leaves."""
 
@@ -140,6 +176,7 @@ class Coronagraph(AbstractTableCoronagraph):
         stellar_grid: Native pixel grid of the stellar intensity maps, in lambda/D.
         sky_trans: Sky transmission image on its native grid.
         header: Parsed YIP header metadata.
+        built_at: Delivery identity and declared native facts for each image product.
         interpolation_info: Routing and provenance of the off-axis interpolation.
         bandpass: Spectral band recorded by the YIP in nm, or None when it holds a
             single wavelength.
@@ -152,6 +189,7 @@ class Coronagraph(AbstractTableCoronagraph):
     stellar_grid: PixelGrid
     sky_trans: Image
     header: HeaderData = eqx.field(static=True)
+    built_at: Stamps = eqx.field(static=True)
     interpolation_info: object = eqx.field(static=True)
     bandpass: Band | None
     band_averaged: bool = eqx.field(static=True)
@@ -222,6 +260,17 @@ class Coronagraph(AbstractTableCoronagraph):
         package._check_source()
         self._host = host
         self.header = host.header
+        headers = package.header
+        self.built_at = merge_stamps(
+            build_stamps(
+                producer="yippy.Coronagraph",
+                source=Digest(package.source.digest),
+                product_id=package.product_id,
+            ),
+            prefix_stamps("stellar", _product_stamps(headers.stellar_intensity)),
+            prefix_stamps("offaxis", _product_stamps(headers.offaxis_psfs)),
+            prefix_stamps("sky", _product_stamps(headers.sky_transmission)),
+        )
         self.grid = host.grid
         self.stellar_grid = host.stellar_intens.grid
         self.interpolation_info = host.interpolation_info
